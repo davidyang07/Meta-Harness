@@ -103,7 +103,7 @@ The meta-harness loop is no longer a sequence — it's a search tree.
 
 - Python 3.11+ and [uv](https://github.com/astral-sh/uv)
 - Docker (for local Postgres)
-- Node.js 20+ + npm (for the dashboard, optional until step 11)
+- Node.js 20+ + npm (for the dashboard)
 - The [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/overview) (`claude`) for the real proposer
 - An Anthropic API key (`ANTHROPIC_API_KEY`)
 
@@ -130,6 +130,20 @@ uv run meta-harness loop --proposer claude --budget 1 --fresh --mock-bench
 
 # Resume an interrupted run from its last Postgres checkpoint
 uv run meta-harness resume <run-name>
+
+# Post-evaluate the best candidate against the unseen holdout tasks
+uv run meta-harness loop --proposer mock --mock-bench --budget 2 --fresh --holdout
+```
+
+**Run the dashboard**
+
+```bash
+# Terminal 1 — FastAPI backend (REST + SSE) on :8000
+cd backend && uv run uvicorn app.main:app --port 8000 --reload
+
+# Terminal 2 — Next.js dashboard on :3000 (reads NEXT_PUBLIC_API_BASE_URL,
+# defaults to http://localhost:8000)
+cd frontend/dashboard && npm install && npm run dev
 ```
 
 ---
@@ -138,8 +152,9 @@ uv run meta-harness resume <run-name>
 
 The implementation is tracked as a topological sequence of 13 verified
 steps in `docs/BUILD_ORDER.md`, each with a literal **definition-of-done**
-command that proves it works. Backend tests currently pass with the live
-LLM test skipped when `ANTHROPIC_API_KEY` is unavailable.
+command that proves it works. Steps 1–12 are complete; the only remaining
+work is step 13, the formal end-to-end acceptance dry-run. Backend tests
+pass with the live LLM test skipped when `ANTHROPIC_API_KEY` is unavailable.
 
 | Step | Goal | Status |
 |---|---|---|
@@ -150,11 +165,11 @@ LLM test skipped when `ANTHROPIC_API_KEY` is unavailable.
 | 5 | Outer StateGraph + mock proposer + Pareto frontier | ✓ |
 | 6 | Real proposer (`claude` CLI subprocess) + SKILL.md | ✓ |
 | 7 | AsyncPostgresSaver + full async refactor | ✓ |
-| 8 | Cross-run memory (PostgresStore) | next |
-| 9 | Time-travel + concurrent branches | next |
-| 10 | FastAPI REST + SSE with closed-set event registry | next |
-| 11 | Frontend dashboard (Next.js + ReactFlow + D3 + Monaco) | next |
-| 12 | CLI completeness + holdout evaluation | next |
+| 8 | Cross-run memory (PostgresStore) | ✓ |
+| 9 | Time-travel + concurrent branches | ✓ |
+| 10 | FastAPI REST + SSE with closed-set event registry | ✓ |
+| 11 | Frontend dashboard (Next.js + ReactFlow + D3 + Monaco) | ✓ |
+| 12 | CLI completeness + holdout evaluation | ✓ |
 | 13 | End-to-end demo dry-run (formal acceptance) | final |
 
 Run `cd backend && uv run pytest tests/ -q` at any commit to confirm the
@@ -165,8 +180,8 @@ test floor.
 ## What's distinctive about this implementation
 
 1. **Two LangGraph state machines, not one.** The outer machine evolves
-   the inner machine's source code. Both are checkpointed; both will
-   support time-travel.
+   the inner machine's source code. Both are checkpointed via
+   `AsyncPostgresSaver`, and both support time-travel forking.
 2. **The "meta-harness tool" is a SKILL.md, not a framework feature.**
    ~150 lines of Markdown injected via `--append-system-prompt` when
    the proposer's `claude` subprocess is spawned. Anti-overfitting and
@@ -197,7 +212,9 @@ meta-harness/
 ├── backend/                                   # FastAPI + LangGraph
 │   ├── app/
 │   │   ├── cli.py                             # `meta-harness` CLI (typer)
-│   │   ├── main.py                            # FastAPI app entry (step 10)
+│   │   ├── main.py                            # FastAPI app factory
+│   │   ├── streaming.py                       # closed-set SSE event registry
+│   │   ├── api/                               # FastAPI routers (runs, checkpoints, forks, memory, events)
 │   │   └── meta_harness/                      # internal namespace
 │   │       ├── outer.py                       # outer 4-node StateGraph
 │   │       ├── inner.py                       # inner 5-phase StateGraph
@@ -209,15 +226,15 @@ meta-harness/
 │   │       ├── frontier.py                    # Pareto on (accuracy × tokens)
 │   │       ├── persistence.py                 # AsyncPostgresSaver
 │   │       ├── runs.py                        # filesystem lifecycle
-│   │       ├── memory.py                      # cross-run patterns      (step 8)
-│   │       └── branches.py                    # time-travel forks       (step 9)
+│   │       ├── memory.py                      # cross-run patterns (AsyncPostgresStore)
+│   │       └── branches.py                    # time-travel forks + branch registry
 │   └── tests/                                 # backend pytest suite
-├── frontend/                                  # Next.js 16 dashboard    (step 11)
+├── frontend/dashboard/                        # Next.js 16 dashboard
 ├── sdk/meta_harness/                          # public Python library
 ├── skills/meta-harness-coding-agent/SKILL.md  # the proposer's workflow
 ├── eval/
 │   ├── tasks/                                 # 5 frozen calibration tasks
-│   ├── holdout/                               # 2 unseen test tasks     (step 12)
+│   ├── holdout/                               # 2 unseen holdout test tasks
 │   └── score.py                               # multi-task pytest scorer
 ├── agents/
 │   ├── baseline.py                            # immutable starting harness
