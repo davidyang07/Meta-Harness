@@ -87,6 +87,24 @@ export type RunSummary = {
   status: string;
   iteration: number;
   isMock?: boolean;
+  /**
+   * Provenance of this run's numbers, straight from the backend
+   * manifest. "mock" means synthetic demo data; "measured" means real
+   * inner-loop trials. The UI must never present the two the same way.
+   */
+  metricsSource?: "measured" | "mock" | "unknown";
+};
+
+/** One branch of the run's search tree, as returned by GET /runs/{id}/trajectory. */
+export type BranchNode = {
+  threadId: string;
+  parentThreadId: string | null;
+  parentCheckpointId: string | null;
+  branchId: string | null;
+  name: string | null;
+  status: string;
+  /** True only while this backend process is actively driving the branch. */
+  live: boolean;
 };
 
 export type MemoryEntry = {
@@ -117,6 +135,7 @@ export type DashboardState = {
   sseConnected: boolean;
   latestCheckpointId: string | null;
   lastError: string | null;
+  branches: BranchNode[];
 };
 
 export type RunInfo = RunSummary;
@@ -156,6 +175,7 @@ export type DashboardAction =
   | { type: "SELECT_LOG_LINE"; payload: string | null }
   | { type: "SET_SSE_CONNECTED"; payload: boolean }
   | { type: "SET_CHECKPOINT"; payload: string }
-  | { type: "SET_ERROR"; payload: string }
+  | { type: "SET_ERROR"; payload: string | null }
+  | { type: "SET_BRANCHES"; payload: BranchNode[] }
   | { type: "CANCEL_BRANCH"; payload: string }
   | { type: "RESET" };

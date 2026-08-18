@@ -16,6 +16,19 @@ import type {
   TreeNode,
 } from "./types";
 
+/**
+ * Identity of a node in the search tree.
+ *
+ * A candidate name alone is not enough: two branches forked from the
+ * same checkpoint reach the same iteration, and merging their nodes
+ * makes one branch's result overwrite the other's on screen. The
+ * backend qualifies candidate names per branch, and the UI keys on
+ * (thread, candidate) so the two can never collapse into one node.
+ */
+export function nodeKey(node: { threadId?: string; candidate: string }): string {
+  return `${node.threadId ?? ""}::${node.candidate}`;
+}
+
 const initialTree: TreeNode[] = [
   {
     candidate: "baseline",
@@ -165,6 +178,7 @@ const initialState: DashboardState = {
   sseConnected: false,
   latestCheckpointId: null,
   lastError: null,
+  branches: [],
 };
 
 export const demoFixtureState: Partial<DashboardState> = {
@@ -203,7 +217,8 @@ function reducer(state: DashboardState, action: DashboardAction): DashboardState
     case "SET_TREE":
       return { ...state, tree: action.payload };
     case "ADD_TREE_NODE": {
-      const existing = state.tree.find(n => n.candidate === action.payload.candidate);
+      const key = nodeKey(action.payload);
+      const existing = state.tree.find(n => nodeKey(n) === key);
       const merged: TreeNode = existing
         ? {
             ...existing,
@@ -214,9 +229,12 @@ function reducer(state: DashboardState, action: DashboardAction): DashboardState
             hypothesis: action.payload.hypothesis ?? existing.hypothesis,
             axis: action.payload.axis ?? existing.axis,
             delta: action.payload.delta ?? existing.delta,
+            // A later event without a thread must not erase branch identity.
+            threadId: action.payload.threadId ?? existing.threadId,
+            isForkBranch: action.payload.isForkBranch || existing.isForkBranch,
           }
         : action.payload;
-      const without = state.tree.filter(n => n.candidate !== action.payload.candidate);
+      const without = state.tree.filter(n => nodeKey(n) !== key);
       return { ...state, tree: [...without, merged] };
     }
     case "SET_CHECKPOINT_ID":
@@ -227,6 +245,14 @@ function reducer(state: DashboardState, action: DashboardAction): DashboardState
             ? { ...node, checkpointId: action.payload.checkpointId }
             : node
         )),
+      };
+    case "SET_BRANCHES":
+      return {
+        ...state,
+        branches: action.payload,
+        run: state.run
+          ? { ...state.run, branches: Math.max(action.payload.length - 1, 0) }
+          : state.run,
       };
     case "APPLY_FRONTIER_UPDATE":
       return {
