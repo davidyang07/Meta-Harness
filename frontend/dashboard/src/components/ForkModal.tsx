@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { useParams } from 'next/navigation';
 import { useDashboardDispatch } from '@/lib/state';
 import { forkRun } from '@/lib/api';
+import { refreshBranches } from '@/lib/sse';
 
 type ForkModalProps = {
   candidateName: string;
@@ -16,6 +17,7 @@ export function ForkModal({ candidateName, checkpointId, parentThreadId, onClose
   const dispatch = useDashboardDispatch();
   const [prior, setPrior] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const handleCreate = async () => {
     if (!prior.trim() || submitting) return;
@@ -24,7 +26,6 @@ export function ForkModal({ candidateName, checkpointId, parentThreadId, onClose
     const fallbackBranchId = `fork.${Math.random().toString(36).slice(2, 10)}`;
     const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-    let branchId = fallbackBranchId;
     try {
       const result = await forkRun(params.run_id, {
         parent_checkpoint_id: checkpointId,
@@ -34,7 +35,8 @@ export function ForkModal({ candidateName, checkpointId, parentThreadId, onClose
         mods: { proposer_prior: prior.trim(), best_candidate: candidateName },
         name: fallbackBranchId,
       });
-      branchId = result.branch_id ?? fallbackBranchId;
+      const branchId = result.branch_id ?? fallbackBranchId;
+      dispatch({ type: 'SET_ERROR', payload: null });
       dispatch({
         type: 'ADD_LOG_ENTRY',
         payload: {
@@ -46,33 +48,41 @@ export function ForkModal({ candidateName, checkpointId, parentThreadId, onClose
           threadId: result.thread_id,
         },
       });
-    } catch {
+      // Only a fork the backend actually accepted becomes a fork event.
+      // Recording one on failure would draw a branch that does not exist.
+      dispatch({
+        type: 'ADD_FORK_EVENT',
+        payload: {
+          timestamp,
+          parentCandidate: candidateName,
+          checkpointId,
+          prior: prior.trim(),
+          branchId,
+          rationale: 'Manual fork rerun from dashboard',
+        },
+      });
+      // Pick up the new branch immediately rather than waiting for SSE.
+      await refreshBranches(params.run_id, dispatch);
+      setSubmitting(false);
+      onClose();
+      return;
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'fork request failed';
+      setError(message);
+      dispatch({ type: 'SET_ERROR', payload: message });
       dispatch({
         type: 'ADD_LOG_ENTRY',
         payload: {
           id: `fork-failed-${Date.now()}`,
           timestamp,
-          tag: 'fork',
-          text: `fork request failed for ${parentThreadId ?? params.run_id}@${checkpointId.slice(0, 8)}; recording local fork intent`,
+          tag: 'fail',
+          text: `fork request failed for ${parentThreadId ?? params.run_id}@${checkpointId.slice(0, 8)}: ${message}`,
           candidateName,
         },
       });
+      setSubmitting(false);
     }
-
-    dispatch({
-      type: 'ADD_FORK_EVENT',
-      payload: {
-        timestamp,
-        parentCandidate: candidateName,
-        checkpointId,
-        prior: prior.trim(),
-        branchId,
-        rationale: 'Manual fork rerun from dashboard',
-      },
-    });
-
-    setSubmitting(false);
-    onClose();
   };
 
   return (
@@ -104,6 +114,15 @@ export function ForkModal({ candidateName, checkpointId, parentThreadId, onClose
             className="mt-1.5 w-full px-3 py-2.5 bg-panel rounded border border-border text-xs text-text-hi placeholder:text-text-ghost resize-none h-24 focus:outline-none focus:border-cyan"
           />
         </div>
+
+        {error && (
+          <div
+            data-testid="fork-error"
+            className="mb-4 px-3 py-2 rounded border border-red/40 bg-red/10 text-[10px] text-red"
+          >
+            {error}
+          </div>
+        )}
 
         <div className="flex justify-end gap-3">
           <button

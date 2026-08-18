@@ -3,7 +3,7 @@
 import { useEffect, useCallback, useRef } from 'react';
 import { useParams } from 'next/navigation';
 import { DashboardProvider, useDashboardDispatch } from '@/lib/state';
-import { startSSE, startMockSSE } from '@/lib/sse';
+import { startSSE, startMockSSE, refreshBranches } from '@/lib/sse';
 import { fetchCheckpointCandidateMap, getRunDetail, isBackendAvailable, toRunInfo, toTreeNodesFromRunDetail } from '@/lib/api';
 import { TopBar } from '@/components/TopBar';
 import { TrajectoryTree } from '@/components/TrajectoryTree';
@@ -94,8 +94,15 @@ function DashboardShell() {
         for (const [candidate, checkpointId] of checkpoints) {
           dispatch({ type: 'SET_CHECKPOINT_ID', payload: { candidate, checkpointId } });
         }
-      } catch {
+        // Reconstructed from backend artifacts, so a page refresh
+        // rebuilds the branch tree rather than losing it.
+        await refreshBranches(runId, dispatch);
+      } catch (error) {
         dispatch({ type: 'SET_SSE_CONNECTED', payload: false });
+        dispatch({
+          type: 'SET_ERROR',
+          payload: error instanceof Error ? error.message : `run ${runId} unavailable`,
+        });
         return undefined;
       }
       return startSSE(runId, dispatch);
@@ -105,7 +112,13 @@ function DashboardShell() {
       return startMockSSE(dispatch);
     }
 
+    // No backend and not the built-in demo: show an explicit empty
+    // state rather than fixture data dressed up as this run.
     dispatch({ type: 'SET_SSE_CONNECTED', payload: false });
+    dispatch({
+      type: 'SET_ERROR',
+      payload: `backend unavailable — cannot load run ${runId}`,
+    });
     return undefined;
   }, [runId, dispatch]);
 
