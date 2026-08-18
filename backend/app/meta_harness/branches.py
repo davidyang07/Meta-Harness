@@ -9,20 +9,33 @@ The core primitive is ``worktree_add``:
 - apply user state modifications with ``graph.aupdate_state``,
 - resume the fork with ``graph.ainvoke(None, fork_config)`` in an
   ``asyncio.create_task``.
+
+**Branch history is durable; branch execution is not.** Every metadata
+transition is mirrored to ``runs/<run_id>/branches.json``, so restarting
+the API still reconstructs the full branch tree. The in-process
+``branch_registry`` holds live ``asyncio.Task`` handles, and those do
+*not* survive a restart — a branch that was ``running`` when the process
+died is reported as ``interrupted``, never as still running.
 """
 
 from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Literal
 
 from langgraph.graph import END, START
 
-BranchStatus = Literal["created", "running", "completed", "failed", "cancelled"]
+from app.meta_harness import runs as runs_mod
+
+BranchStatus = Literal[
+    "created", "running", "completed", "failed", "cancelled", "interrupted"
+]
 
 INPUT_NODE = "__input__"
 
@@ -45,10 +58,21 @@ class BranchMetadata:
     mods: dict[str, Any] = field(default_factory=dict)
     name: str | None = None
     result: dict[str, Any] | None = None
+    #: Candidate the branch inherited at its fork point, for lineage.
+    parent_candidate: str | None = None
+    #: True while an in-process task is driving this branch. Never
+    #: persisted as True — see ``_rehydrate_status``.
+    live: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable shape for API/CLI callers."""
         return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "BranchMetadata":
+        """Rebuild from persisted JSON, ignoring unknown/legacy keys."""
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
 
 
 @dataclass
@@ -78,6 +102,122 @@ class CheckpointRecord:
 
 branch_registry: dict[str, asyncio.Task[Any]] = {}
 branch_metadata: dict[str, BranchMetadata] = {}
+
+#: Where each run's branch history is persisted. Set by the API/CLI so
+#: this module keeps no opinion about repo layout.
+_runs_root: Path | None = None
+
+BRANCHES_FILENAME = "branches.json"
+
+
+def set_runs_root(path: Path | None) -> None:
+    """Point branch persistence at a ``runs/`` directory (or disable it)."""
+    global _runs_root
+    _runs_root = Path(path) if path is not None else None
+
+
+def get_runs_root() -> Path | None:
+    """The configured ``runs/`` root, or ``None`` when persistence is off."""
+    return _runs_root
+
+
+def _branches_path(run_id: str) -> Path | None:
+    """``runs/<run_id>/branches.json``, or ``None`` if it can't be resolved.
+
+    ``run_id`` reaches this module from HTTP paths, so it is validated
+    as an artifact name before it is joined — a traversal attempt
+    resolves to ``None`` rather than a path outside ``runs/``.
+    """
+    if _runs_root is None:
+        return None
+    try:
+        runs_mod.validate_artifact_name(run_id, kind="run")
+    except ValueError:
+        return None
+    root = _runs_root.resolve()
+    run_dir = (root / run_id).resolve()
+    try:
+        run_dir.relative_to(root)
+    except ValueError:
+        return None
+    if not run_dir.is_dir():
+        return None
+    return run_dir / BRANCHES_FILENAME
+
+
+def _read_persisted(run_id: str) -> dict[str, dict[str, Any]]:
+    path = _branches_path(run_id)
+    if path is None or not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    branches = data.get("branches") if isinstance(data, dict) else None
+    if not isinstance(branches, list):
+        return {}
+    return {
+        str(b["thread_id"]): b
+        for b in branches
+        if isinstance(b, dict) and b.get("thread_id")
+    }
+
+
+def persist_branch(metadata: BranchMetadata) -> None:
+    """Mirror one branch's metadata into ``runs/<run_id>/branches.json``.
+
+    Best-effort: branch history is an observability artifact, and a
+    filesystem hiccup must never abort a running branch.
+    """
+    path = _branches_path(metadata.run_id)
+    if path is None:
+        return
+    try:
+        existing = _read_persisted(metadata.run_id)
+        record = metadata.to_dict()
+        # ``live`` is process state. Persisting it True would make a
+        # branch look running forever after a crash.
+        record["live"] = False
+        existing[metadata.thread_id] = record
+        runs_mod.write_json_atomic(
+            path,
+            {
+                "run_id": metadata.run_id,
+                "updated_at": _now(),
+                "branches": sorted(
+                    existing.values(), key=lambda b: str(b.get("created_at", ""))
+                ),
+            },
+        )
+    except OSError:
+        pass
+
+
+def _rehydrate_status(record: dict[str, Any]) -> dict[str, Any]:
+    """A persisted ``running`` branch is really an interrupted one.
+
+    Its asyncio task died with the process. Reporting it as running
+    would be a lie the UI then shows as a live spinner.
+    """
+    record = dict(record)
+    if record.get("status") in {"created", "running"}:
+        record["status"] = "interrupted"
+        record["error"] = record.get("error") or (
+            "process exited while the branch was running; "
+            "checkpoint history is intact, the task is not"
+        )
+    return record
+
+
+def load_persisted_branches(run_id: str) -> list[BranchMetadata]:
+    """Read a run's branch history from disk, independent of memory."""
+    return [
+        BranchMetadata.from_dict(_rehydrate_status(record))
+        for record in sorted(
+            _read_persisted(run_id).values(),
+            key=lambda b: str(b.get("created_at", "")),
+        )
+    ]
 
 
 def _now() -> str:
@@ -214,8 +354,10 @@ async def worktree_add(
         created_at=_now(),
         mods=mods,
         name=name,
+        parent_candidate=fork_values.get("best_candidate"),
     )
     branch_metadata[thread_id] = metadata
+    persist_branch(metadata)
 
     fork_config = await graph.aupdate_state(
         {"configurable": {"thread_id": thread_id}},
@@ -224,6 +366,8 @@ async def worktree_add(
     )
     metadata.status = "running"
     metadata.started_at = _now()
+    metadata.live = True
+    persist_branch(metadata)
 
     task = asyncio.create_task(
         _run_branch(graph, metadata, fork_config, recursion_limit),
@@ -250,20 +394,51 @@ async def cancel_branch(thread_id: str) -> BranchMetadata:
 
 
 def list_branches(*, run_id: str | None = None) -> list[BranchMetadata]:
-    """List branch metadata, optionally filtered by run id."""
-    branches = list(branch_metadata.values())
+    """List branch metadata, merging in-process state with persisted history.
+
+    In-process records win: they are strictly fresher than what is on
+    disk. Persisted-only records fill in branches created by an earlier
+    process, so a restarted API still reports the full branch tree.
+    """
+    merged: dict[str, BranchMetadata] = {}
     if run_id is not None:
-        branches = [b for b in branches if b.run_id == run_id]
-    return sorted(branches, key=lambda b: b.created_at)
+        for persisted in load_persisted_branches(run_id):
+            merged[persisted.thread_id] = persisted
+    else:
+        for known_run in {b.run_id for b in branch_metadata.values()}:
+            for persisted in load_persisted_branches(known_run):
+                merged[persisted.thread_id] = persisted
+
+    for live in branch_metadata.values():
+        if run_id is not None and live.run_id != run_id:
+            continue
+        merged[live.thread_id] = live
+    return sorted(merged.values(), key=lambda b: b.created_at)
 
 
-def get_branch(thread_id: str) -> BranchMetadata | None:
-    """Return branch metadata by thread id, if known."""
-    return branch_metadata.get(thread_id)
+def get_branch(thread_id: str, *, run_id: str | None = None) -> BranchMetadata | None:
+    """Return branch metadata by thread id, from memory or persisted history."""
+    live = branch_metadata.get(thread_id)
+    if live is not None:
+        return live
+    if run_id is None:
+        # Fork thread ids are "<parent>.fork.<id>"; the run id is the
+        # leftmost segment of that chain.
+        run_id = thread_id.split(".fork.")[0]
+    for persisted in load_persisted_branches(run_id):
+        if persisted.thread_id == thread_id:
+            return persisted
+    return None
 
 
 def reconstruct_trajectory(run_id: str) -> dict[str, Any]:
-    """Build a branch tree shape for future dashboard/API use."""
+    """Build the run's branch tree from memory + persisted history.
+
+    Survives an API restart: branch records come from
+    ``runs/<run_id>/branches.json`` when the in-process registry is
+    empty. ``live`` distinguishes a branch this process is currently
+    driving from one that merely has persisted history.
+    """
     branches = list_branches(run_id=run_id)
     threads: dict[str, dict[str, Any]] = {
         run_id: {
@@ -274,16 +449,21 @@ def reconstruct_trajectory(run_id: str) -> dict[str, Any]:
             "status": "root",
             "branch_id": None,
             "name": "root",
+            "live": run_id in branch_registry,
         }
     }
     edges: list[dict[str, Any]] = []
     for branch in branches:
-        threads[branch.thread_id] = branch.to_dict()
+        record = branch.to_dict()
+        task = branch_registry.get(branch.thread_id)
+        record["live"] = task is not None and not task.done()
+        threads[branch.thread_id] = record
         edges.append(
             {
                 "source": branch.parent_thread_id,
                 "target": branch.thread_id,
                 "parent_checkpoint_id": branch.parent_checkpoint_id,
+                "parent_candidate": branch.parent_candidate,
             }
         )
     return {
@@ -332,10 +512,14 @@ async def _run_branch(
         metadata.status = "failed"
         metadata.finished_at = _now()
         metadata.error = str(exc)
+        metadata.live = False
+        persist_branch(metadata)
         raise
     metadata.status = "completed"
     metadata.finished_at = _now()
+    metadata.live = False
     metadata.result = final if isinstance(final, dict) else {"result": final}
+    persist_branch(metadata)
     return final
 
 
@@ -350,6 +534,8 @@ def _mark_cancelled(metadata: BranchMetadata) -> None:
     metadata.status = "cancelled"
     metadata.cancelled_at = _now()
     metadata.finished_at = metadata.finished_at or metadata.cancelled_at
+    metadata.live = False
+    persist_branch(metadata)
 
 
 def _require_branch(thread_id: str) -> BranchMetadata:

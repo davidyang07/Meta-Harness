@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse
 from app import __version__
 from app.api import branches, checkpoints, events, forks, memory, runs
 from app.api.runs import cancel_active_runs
-from app.meta_harness.branches import cancel_all_branches
+from app.meta_harness.branches import cancel_all_branches, set_runs_root
 from app.meta_harness.memory import memory_store as memory_store_cm
 from app.meta_harness.persistence import healthcheck, persistence_layer
 from app.streaming import StreamingRegistryError
@@ -55,6 +55,9 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         load_dotenv(repo_root / ".env")
         app.state.repo_root = repo_root
+        # Branch history is persisted under runs/<run_id>/branches.json so
+        # the trajectory survives an API restart.
+        set_runs_root(repo_root / "runs")
         app.state.eval_tasks_dir = eval_tasks_dir
         app.state.checkpointer = None
         app.state.memory_store = None
