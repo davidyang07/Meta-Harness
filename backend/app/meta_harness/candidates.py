@@ -22,6 +22,7 @@ import hashlib
 import importlib
 import importlib.util
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,40 @@ def authored_source_path(repo_root: Path, label: str) -> Path:
     return repo_root / "agents" / f"{safe}.py"
 
 
+#: How long to keep retrying a read of a just-authored candidate file.
+#: The proposer writes into the repo's ``agents/`` directory, which on a
+#: developer machine is often inside a syncing folder (OneDrive, Dropbox)
+#: and on CI is shared with concurrently running branches. A file written
+#: microseconds ago can briefly fail to stat. Losing a candidate to that
+#: would waste a whole proposer invocation.
+_SNAPSHOT_READ_TIMEOUT_S = 2.0
+_SNAPSHOT_READ_INTERVAL_S = 0.05
+
+
+def _read_authored_source(src: Path, label: str) -> str:
+    """Read a just-authored candidate file, tolerating a brief delay.
+
+    Retries only transient failures. If the file is still unreadable
+    when the budget runs out, the error names the path and the label so
+    "the proposer never wrote it" stays diagnosable.
+    """
+    deadline = time.monotonic() + _SNAPSHOT_READ_TIMEOUT_S
+    last_error: OSError | None = None
+    while True:
+        try:
+            return src.read_text(encoding="utf-8")
+        except OSError as exc:
+            last_error = exc
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(_SNAPSHOT_READ_INTERVAL_S)
+    raise CandidateSourceError(
+        f"proposer registered candidate {label!r} but {src} was not readable "
+        f"after {_SNAPSHOT_READ_TIMEOUT_S}s ({type(last_error).__name__}: "
+        f"{last_error})"
+    )
+
+
 def snapshot_candidate_source(
     *,
     repo_root: Path,
@@ -54,12 +89,9 @@ def snapshot_candidate_source(
     proposer claimed a candidate it never wrote.
     """
     src = authored_source_path(repo_root, label)
-    if not src.is_file():
-        raise CandidateSourceError(
-            f"proposer registered candidate {label!r} but {src} does not exist"
-        )
+    source = _read_authored_source(src, label)
     dest = runs_mod.candidate_source_path(run_dir, thread_id, candidate_name)
-    dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    dest.write_text(source, encoding="utf-8")
     return dest
 
 
