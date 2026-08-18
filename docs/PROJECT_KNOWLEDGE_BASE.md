@@ -2522,15 +2522,23 @@ Right-click iter-2 checkpoint → "Fork from here" → edit prior → Resume:
 | 2′   | rewrite tool descriptions w/ examples   | 0.78  | +0.16 from iter 1 | keep ✓       |
 | 3′   | add few-shot demos to descriptions      | 0.85  | +0.07             | GLOBAL BEST  |
 
-Pareto frontier:
-- more-specific-descriptions: 0.80 @ ~24,800 avg tokens — non-dominated
-- few-shot-demos:            0.85 @ ~26,200 avg tokens — non-dominated
-- tighter-tool-hashing:      0.66 — dominated by both above
+Pareto frontier: each branch keeps its own. A candidate is
+non-dominated when nothing else has accuracy >= and tokens <= with at
+least one strict. A candidate whose tokens were never measured carries
+avg_tokens: null and is compared on accuracy alone.
 
-Cost & runtime:
-- Total wall time: < 8 minutes (target 6)
-- Total cost: ~$3.30 (Appendix C §C.12), hard cap < $5
+Cost & runtime: whatever the run records. Every trial writes
+llm_calls / tokens / cost_usd / wall_time_s; cost is null when the model
+has no configured price.
 ```
+
+> **The score tables above are illustrative, not measured.** They show
+> the shape of a run — a rejection, a fork, two Pareto-optimal branches.
+> No benchmark has been executed in this repository, so there is no
+> measured accuracy, token or cost figure to quote. See
+> [`RESUME_CLAIMS.md`](RESUME_CLAIMS.md) for what is actually verified
+> and [`../benchmarks/resume-claim/README.md`](../benchmarks/resume-claim/README.md)
+> for the protocol that would produce real numbers.
 
 ### 18.1 Holdout
 
@@ -2627,7 +2635,7 @@ better story.
 - [ ] Postgres healthy: `docker compose -f infra/docker-compose.yml ps`
 - [ ] Backend running on `:8000`: `cd backend && uv run uvicorn app.main:app --port 8000 --reload`
 - [ ] Frontend running on `:3000`: `cd frontend/dashboard && npm run dev`
-- [ ] Run `bash scripts/demo_dryrun.sh` end-to-end and confirm 12/12 GREEN
+- [ ] Run `bash scripts/demo_acceptance.sh` end-to-end and confirm DEMO READY (LEVEL 1)
 - [ ] Test count check: `cd backend && uv run pytest tests/ -q`
       should report **82 passed, 1 skipped, 0 failed**
 - [ ] Pre-warm the demo: open `http://localhost:3000/runs/demo-2026-04-25?demo=true`
@@ -2742,14 +2750,28 @@ Plus we get the LangGraph community's bug fixes for free (e.g. the
 
 **Q: How long does a real run take?**
 
-A: With Haiku 4.5 inner-loop on 5 tasks × 5 trials × 4 iterations, ~6
-minutes wall time and ~$3.30 cost. The proposer (Opus) is ~2 minutes per
-iteration; benchmarking is ~30 seconds per iteration with workers=4. Total
-wall is dominated by the proposer's read+write rounds.
+A: We haven't measured it, so there is no honest number to give. Wall
+time is dominated by the proposer's read+write rounds; benchmarking is
+parallel over (task × trial) with `--workers`.
+
+Measure it for your own setup before quoting anything — one trial prints
+its real token and cost usage:
+
+```bash
+uv run meta-harness inner --task task-001-fix-typo --candidate baseline
+```
+
+Then multiply by `tasks × trials × iterations`. Every run also records
+per-candidate `total_cost_usd` in `eval-result.json` and per-iteration
+proposer cost in `proposer-sessions/iter-N/session.json`.
 
 **Q: Can you actually run this end-to-end live?**
 
-A: Yes — `bash scripts/demo_dryrun.sh` runs all 12 acceptance checks.
+A: Yes — `bash scripts/demo_acceptance.sh` runs the LEVEL 1 ladder
+(no API key required: tests, CLI, mock loop, live API, real fork, branch
+isolation, SSE, frontend build, both Playwright projects, hygiene).
+`bash scripts/live_smoke.sh` is LEVEL 2 and needs credentials; it prints
+SKIPPED rather than a false pass without them.
 For the judging demo we use `--mock-bench` to deterministic-ify the score
 arc; the proposer is real (`--proposer claude`). This is the right
 trade-off because the demo-arc score curve is deterministic by design (the
@@ -2914,7 +2936,8 @@ The keystone files, sorted by likelihood of "I need to know how X works":
 
 | File | Purpose |
 |---|---|
-| `scripts/demo_dryrun.sh` | 12 binary checks for demo readiness |
+| `scripts/demo_acceptance.sh` | LEVEL 1 acceptance: offline, no API key |
+| `scripts/live_smoke.sh` | LEVEL 2 acceptance: live model, needs credentials |
 | `scripts/smoke_api.py` | Exercise the REST + SSE surface |
 
 ### Docs (read in this order)
@@ -3182,7 +3205,7 @@ dashboard reducer can route to the correct branch.
 
 Verified verbatim against `backend/app/cli.py`. Eight commands total
 (seven top-level + one memory sub-app with one subcommand). The
-`scripts/demo_dryrun.sh` step 7 check counts these eight names.
+`scripts/demo_acceptance.sh` section 3 checks every subcommand is present.
 
 ### `meta-harness version` (`cli.py:37-42`)
 

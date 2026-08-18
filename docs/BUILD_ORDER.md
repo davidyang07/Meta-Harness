@@ -326,8 +326,8 @@ calibration on the 5 eval tasks if the score arc drifts.
 
 **Done when.**
 ```bash
-bash scripts/demo_dryrun.sh
-# scripts/demo_dryrun.sh runs the literal demo command from
+bash scripts/demo_acceptance.sh
+# scripts/demo_acceptance.sh runs the LEVEL 1 acceptance ladder from
 # DEFINITION_OF_DONE.md and asserts every acceptance bullet listed
 # there. Exit 0 = ship.
 ```

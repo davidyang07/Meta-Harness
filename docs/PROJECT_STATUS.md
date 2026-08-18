@@ -184,7 +184,7 @@ under `eval/holdout/`; CLI coverage lives in `backend/tests/test_cli.py`.
 > **Priority: HIGH** — this is the final acceptance gate.
 
 **What's missing:**
-- [ ] `scripts/demo_dryrun.sh` — exercises the full demo command from `DEFINITION_OF_DONE.md`
+- [ ] `scripts/demo_acceptance.sh` — exercises the full demo command from `DEFINITION_OF_DONE.md`
 - [ ] Score arc calibration: accuracy should land within ±5% of expected
 - [ ] Fork branches should reach ≥0.83 accuracy
 - [ ] Total runtime < 8 min, cost < $5

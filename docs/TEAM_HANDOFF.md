@@ -567,12 +567,12 @@ within ±5% of expected; fork branches reach ≥0.83; runtime <8 min;
 cost <$5.
 
 **Files.**
-- `scripts/demo_dryrun.sh` (new): the formal acceptance runner.
+- `scripts/demo_acceptance.sh` (new): the formal acceptance runner.
 - (Possibly) eval-task hardening if calibration is still off.
 
 **DoD command:**
 ```bash
-bash scripts/demo_dryrun.sh
+bash scripts/demo_acceptance.sh
 ```
 
 **Branch:** `step-13/demo-acceptance`. Whole team in the final
