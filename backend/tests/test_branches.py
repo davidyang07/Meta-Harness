@@ -164,13 +164,11 @@ async def test_worktree_add_creates_branch_and_applies_mods():
         parent_thread_id,
         metadata.thread_id,
     }
-    assert trajectory["edges"] == [
-        {
-            "source": parent_thread_id,
-            "target": metadata.thread_id,
-            "parent_checkpoint_id": parent_checkpoint_id,
-        }
-    ]
+    assert len(trajectory["edges"]) == 1
+    edge = trajectory["edges"][0]
+    assert edge["source"] == parent_thread_id
+    assert edge["target"] == metadata.thread_id
+    assert edge["parent_checkpoint_id"] == parent_checkpoint_id
 
 
 @async_test

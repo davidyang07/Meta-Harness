@@ -30,6 +30,7 @@ from app.meta_harness import metrics as met  # noqa: E402
 from app.meta_harness.harness import CodingAgentHarness  # noqa: E402
 from app.meta_harness.inner import build_inner_graph, run_inner_loop  # noqa: E402
 from app.meta_harness.persistence import healthcheck, persistence_layer  # noqa: E402
+from tests.conftest import unique_name  # noqa: E402
 
 _PG_OK = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
     healthcheck()
@@ -102,7 +103,7 @@ async def test_inner_graph_transitions_persist_in_postgres(tmp_path: Path):
     workspace.mkdir()
     task = _task(workspace)
     thread_id = met.inner_thread_id(
-        run_id="run-x",
+        run_id=unique_name("run-x"),
         thread_id="run-x.fork.beef",
         candidate="cand-1",
         task_id="stub-task",
@@ -137,8 +138,8 @@ async def test_inner_thread_ids_identify_their_trial(tmp_path: Path):
     workspace.mkdir()
     task = _task(workspace)
     thread_id = met.inner_thread_id(
-        run_id="run-y",
-        thread_id="run-y",
+        run_id=(_ry := unique_name("run-y")),
+        thread_id=_ry,
         candidate="cand-2",
         task_id="stub-task",
         trial=7,
@@ -156,8 +157,8 @@ async def test_inner_thread_ids_identify_their_trial(tmp_path: Path):
 
     parsed = met.parse_inner_thread_id(thread_id)
     assert parsed == {
-        "run_id": "run-y",
-        "thread_id": "run-y",
+        "run_id": _ry,
+        "thread_id": _ry,
         "candidate": "cand-2",
         "task_id": "stub-task",
         "trial": 7,
@@ -170,15 +171,16 @@ async def test_two_branches_do_not_share_inner_checkpoint_threads(tmp_path: Path
     workspace.mkdir()
     task = _task(workspace)
 
+    run_id = unique_name("run-z")
     ids = [
         met.inner_thread_id(
-            run_id="run-z",
+            run_id=run_id,
             thread_id=branch,
             candidate="same-label",
             task_id="stub-task",
             trial=1,
         )
-        for branch in ("run-z", "run-z.fork.abcd")
+        for branch in (run_id, f"{run_id}.fork.abcd")
     ]
     assert ids[0] != ids[1]
 
@@ -219,6 +221,8 @@ async def test_benchmark_core_threads_the_checkpointer_into_every_trial(
     (task_dir / "workspace").mkdir(parents=True)
     (task_dir / "task.json").write_text(json.dumps(_task(task_dir / "workspace")))
 
+    run_id = unique_name("run-b")
+    prefix = f"inner::{run_id}::{run_id}::cand"
     async with persistence_layer() as saver:
         result = await bench.benchmark_harness(
             harness_factory=StubHarness,
@@ -226,7 +230,7 @@ async def test_benchmark_core_threads_the_checkpointer_into_every_trial(
             trials=2,
             workers=1,
             trace_root=tmp_path / "traces",
-            thread_prefix="inner::run-b::run-b::cand",
+            thread_prefix=prefix,
             checkpointer=saver,
         )
         assert result["accuracy"] == 1.0
@@ -236,7 +240,7 @@ async def test_benchmark_core_threads_the_checkpointer_into_every_trial(
         assert result["total_llm_calls"] > 0
 
         for trial in (1, 2):
-            thread_id = f"inner::run-b::run-b::cand::stub-task::trial-{trial}"
+            thread_id = f"{prefix}::stub-task::trial-{trial}"
             history = [
                 s
                 async for s in saver.alist(

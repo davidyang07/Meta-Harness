@@ -19,6 +19,7 @@ so no test can delete committed source.
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 
 import pytest
@@ -48,3 +49,14 @@ def _clean_generated_agents(committed_agent_files: set[Path]):
             path.unlink()
         except OSError:
             pass
+
+
+def unique_name(prefix: str) -> str:
+    """A run/thread name unique to this invocation.
+
+    Postgres checkpoint history is keyed by thread_id and outlives the
+    test process. A fixed name accumulates checkpoints across suite runs,
+    which makes any assertion about history shape flap on the second run
+    against the same database.
+    """
+    return f"{prefix}-{uuid.uuid4().hex[:8]}"

@@ -42,6 +42,7 @@ from app.meta_harness.branches import (  # noqa: E402
 from app.meta_harness.outer import OuterLoopRunner, initial_state  # noqa: E402
 from app.meta_harness.persistence import healthcheck, persistence_layer  # noqa: E402
 from app.meta_harness.state import BASELINE_CANDIDATE_NAME  # noqa: E402
+from tests.conftest import unique_name  # noqa: E402
 
 
 _PG_OK = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
@@ -139,7 +140,7 @@ async def _fork_two(graph, run_dir: Path, checkpoint_id: str):
 
 async def test_same_iteration_branches_keep_separate_artifacts(tmp_path: Path):
     """Two branches on iteration 2 must not share any execution artifact."""
-    run_dir = runs_mod.make_run_dir(tmp_path, "iso-artifacts", fresh=True)
+    run_dir = runs_mod.make_run_dir(tmp_path, unique_name("iso-artifacts"), fresh=True)
 
     async with persistence_layer() as saver:
         _, graph = await _root_run(run_dir, saver, budget=2)
@@ -189,7 +190,7 @@ def _qualified(branch, label: str) -> str:
 
 async def test_branch_candidate_source_is_never_overwritten(tmp_path: Path):
     """Each branch benchmarks the source it authored, byte for byte."""
-    run_dir = runs_mod.make_run_dir(tmp_path, "iso-source", fresh=True)
+    run_dir = runs_mod.make_run_dir(tmp_path, unique_name("iso-source"), fresh=True)
 
     async with persistence_layer() as saver:
         _, graph = await _root_run(run_dir, saver, budget=2)
@@ -218,7 +219,7 @@ async def test_branch_candidate_source_is_never_overwritten(tmp_path: Path):
 
 async def test_branch_evolution_lineage_stays_attributable(tmp_path: Path):
     """Rows never mix branches, and the merged view stays attributable."""
-    run_dir = runs_mod.make_run_dir(tmp_path, "iso-lineage", fresh=True)
+    run_dir = runs_mod.make_run_dir(tmp_path, unique_name("iso-lineage"), fresh=True)
 
     async with persistence_layer() as saver:
         _, graph = await _root_run(run_dir, saver, budget=2)
@@ -255,7 +256,7 @@ async def test_branch_evolution_lineage_stays_attributable(tmp_path: Path):
 
 
 async def test_reconstructed_trajectory_contains_both_branches(tmp_path: Path):
-    run_dir = runs_mod.make_run_dir(tmp_path, "iso-trajectory", fresh=True)
+    run_dir = runs_mod.make_run_dir(tmp_path, unique_name("iso-trajectory"), fresh=True)
 
     async with persistence_layer() as saver:
         _, graph = await _root_run(run_dir, saver, budget=2)
@@ -290,7 +291,7 @@ async def test_branches_run_concurrently_without_deadlocking_the_saver(
     tmp_path: Path,
 ):
     """Two real outer-loop branches share one AsyncPostgresSaver safely."""
-    run_dir = runs_mod.make_run_dir(tmp_path, "iso-concurrency", fresh=True)
+    run_dir = runs_mod.make_run_dir(tmp_path, unique_name("iso-concurrency"), fresh=True)
 
     async with persistence_layer() as saver:
         _, graph = await _root_run(run_dir, saver, budget=2)
