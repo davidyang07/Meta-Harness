@@ -11,6 +11,75 @@ called out where it intersects this document.
 
 ---
 
+## 0. Amendments — read this first
+
+The sections below were written against a run layout where every
+artifact lived at `runs/{run_id}/`. That is no longer true, and two other
+contracts changed. Where a later section contradicts this one, **this
+section wins**.
+
+### 0.1 Artifacts are thread-scoped
+
+Execution state now lives under `runs/{run_id}/threads/{thread_slug}/`.
+
+**Why.** Two branches forked from the same checkpoint reach the same
+iteration number. With run-level paths, the fork's proposer overwrote
+`runs/{run}/pending_eval.json` and the root branch then benchmarked a
+candidate it never proposed. Every path in §2 that referenced
+`runs/{run_id}/<artifact>` now reads
+`runs/{run_id}/threads/{thread_slug}/<artifact>`:
+
+| Old | New |
+|---|---|
+| `runs/{run}/pending_eval.json` | `runs/{run}/threads/{thread}/pending_eval.json` |
+| `runs/{run}/frontier_val.json` | `runs/{run}/threads/{thread}/frontier_val.json` |
+| `runs/{run}/evolution_summary.jsonl` | `runs/{run}/threads/{thread}/evolution_summary.jsonl` |
+| `runs/{run}/proposer-sessions/iter-N/` | `runs/{run}/threads/{thread}/proposer-sessions/iter-N/` |
+| `runs/{run}/candidates/{name}/` | `runs/{run}/threads/{thread}/candidates/{name}/` |
+| — | `runs/{run}/threads/{thread}/agents/{name}.py` (new: per-branch source snapshot) |
+| — | `runs/{run}/branches.json` (new: durable branch metadata) |
+
+`{thread_slug}` is the LangGraph `thread_id` when it is a valid artifact
+name, else `t-<sha256(thread_id)[:32]>` (see `runs.thread_slug`). The
+run's root thread uses the run id.
+
+Run-level views are produced by merging across threads
+(`runs.aggregate_evolution_rows`, `runs.aggregate_frontiers`); every
+merged row carries the `thread_id` that produced it.
+
+### 0.2 Candidate names are run-unique; labels are human-readable
+
+`Candidate.name` is the run-unique artifact key.
+`Candidate.label` is what the proposer called it. On a forked branch the
+name gains a stable `__<sha256(thread_id)[:8]>` suffix
+(`runs.qualify_candidate_name`, idempotent), so two branches on the same
+iteration cannot claim the same directory or source file.
+
+New `Candidate` fields: `label`, `source_path` (branch-private snapshot
+of the source that was actually benchmarked), `source_sha256`.
+`axis` gains the value `"baseline"`.
+
+### 0.3 Metrics are measured, and mock is labelled
+
+Every result payload carries `metrics_source: "measured" | "mock"`.
+Aggregation refuses to fold rows whose source disagrees.
+
+`cost_usd` is `null` when the model has no configured price. **It is
+never `0.0` to mean "unknown".** Aggregates carry `cost_complete: bool`.
+
+On the Pareto cost axis, `avg_tokens: null` means "not measured": such a
+candidate is compared on accuracy alone and can never dominate a
+measured one.
+
+### 0.4 Every number in the examples below is illustrative
+
+The JSON examples throughout this document show *shape*, not results.
+No accuracy, token or cost figure in this file is a measurement. See
+[`docs/RESUME_CLAIMS.md`](RESUME_CLAIMS.md) and
+[`benchmarks/resume-claim/README.md`](../benchmarks/resume-claim/README.md).
+
+---
+
 ## 1. State schemas (LangGraph TypedDicts)
 
 ### 1.1 `MetaHarnessState` — outer state machine
@@ -83,6 +152,10 @@ class Candidate:
 
 ## 2. Filesystem JSON / JSONL contracts
 
+> **Paths in this section are superseded by §0.1** — execution artifacts
+> live under `runs/{run_id}/threads/{thread_slug}/`. The JSON *shapes*
+> below remain accurate except where §0 amends them.
+
 All files live under `runs/{run_id}/`. The directory layout follows
 Appendix C §C.10 (per-candidate trace structure) plus Stanford's
 filesystem-first convention (Appendix B §B.2).
@@ -120,19 +193,33 @@ frontier rendering filters on `dominated_by_names == []`.*
 ```json
 {
   "iteration": 4,
+  "thread_id": "run-x",
+  "metrics_source": "measured",
   "candidates": [
-    {"name": "more-specific-descriptions", "accuracy": 0.80, "avg_tokens": 24800, "dominated_by_names": []},
-    {"name": "early-exit-on-auth",         "accuracy": 0.74, "avg_tokens": 18200, "dominated_by_names": []},
-    {"name": "tighter-tool-hashing",       "accuracy": 0.66, "avg_tokens": 21000, "dominated_by_names": ["more-specific-descriptions", "early-exit-on-auth"]}
+    {"name": "baseline",   "accuracy": 0.62, "avg_tokens": 18200, "metrics_source": "measured", "dominated_by_names": []},
+    {"name": "cand-a",     "accuracy": 0.80, "avg_tokens": 24800, "metrics_source": "measured", "dominated_by_names": []},
+    {"name": "cand-b",     "accuracy": 0.66, "avg_tokens": 26000, "metrics_source": "measured", "dominated_by_names": ["cand-a"]},
+    {"name": "unmeasured", "accuracy": 0.70, "avg_tokens": null,  "metrics_source": "measured", "dominated_by_names": ["cand-a"]}
   ],
-  "_pareto_names": ["more-specific-descriptions", "early-exit-on-auth"],
-  "_best": {"name": "more-specific-descriptions", "accuracy": 0.80, "avg_tokens": 24800},
+  "_pareto_names": ["baseline", "cand-a"],
+  "_best": {"name": "cand-a", "accuracy": 0.80, "avg_tokens": 24800},
   "per_task": {
-    "task-001-fix-typo":     {"best_candidate": "more-specific-descriptions", "pass_rate": 0.95},
-    "task-002-add-function": {"best_candidate": "more-specific-descriptions", "pass_rate": 0.85}
+    "task-001-fix-typo":     {"best_candidate": "cand-a", "pass_rate": 0.95},
+    "task-002-add-function": {"best_candidate": "cand-a", "pass_rate": 0.85}
   }
 }
 ```
+
+*(Illustrative values — see §0.4.)* Notes:
+
+- The measured `baseline` is a normal frontier member and stays
+  non-dominated when it is cheaper than everything more accurate.
+- `avg_tokens: null` means the candidate's tokens were never measured.
+  It is compared on accuracy alone: `unmeasured` is dominated by the
+  strictly more accurate `cand-a`, and dominates nothing.
+- `metrics_source` at the top level is `"mixed"` when mock and measured
+  candidates appear together, so no consumer can render a synthetic
+  frontier as a measurement.
 
 `_pareto_names` is a convenience derived from `dominated_by_names == []`;
 both forms are present so the dashboard can choose by render path.
@@ -144,14 +231,32 @@ both forms are present so the dashboard can choose by render path.
 tree without scanning every status.json.*
 
 ```jsonl
-{"iteration": 1, "candidate": "retry-on-test-fail", "import_path": "agents.retry_on_test_fail:CodingAgentHarness", "parent_candidate_name": null, "axis": "exploration", "hypothesis": "...", "scores": {"accuracy": 0.70, "per_task": {...}}, "delta": 0.08, "outcome": "70.0% (+8.0%)", "tokens": 23400, "cost_usd": 0.42, "timing_s": {"propose": 38.2, "bench": 184.6, "wall": 226.0}}
-{"iteration": 4, "candidate": "more-specific-descriptions", "import_path": "agents.more_specific_descriptions:CodingAgentHarness", "parent_candidate_name": "early-exit-on-auth", "axis": "exploitation", "hypothesis": "...", "scores": {"accuracy": 0.80, "per_task": {...}}, "delta": 0.06, "outcome": "80.0% (+6.0%)", "tokens": 24800, "cost_usd": 0.45, "timing_s": {"propose": 41.0, "bench": 191.2, "wall": 235.4}}
+{"iteration": 0, "candidate": "baseline", "label": "baseline", "thread_id": "run-x", "import_path": "agents.baseline:BaselineHarness", "source_sha256": null, "parent_candidate_name": null, "axis": "baseline", "hypothesis": "immutable starting harness (no overrides)", "scores": {"accuracy": 0.62, "per_task": {}}, "delta": 0.0, "outcome": "62.0% (+0.0%)", "tokens": 18200, "cost_usd": 0.31, "metrics_source": "measured"}
+{"iteration": 1, "candidate": "retry-on-test-fail", "label": "retry-on-test-fail", "thread_id": "run-x", "import_path": "agents.retry_on_test_fail:CodingAgentHarness", "source_sha256": "9f2c...", "parent_candidate_name": "baseline", "axis": "exploration", "hypothesis": "...", "scores": {"accuracy": 0.70, "per_task": {}}, "delta": 0.08, "outcome": "70.0% (+8.0%)", "tokens": 23400, "cost_usd": 0.42, "metrics_source": "measured"}
+{"iteration": 2, "candidate": "few-shot__a1b2c3d4", "label": "few-shot", "thread_id": "run-x.fork.a1b2c3d4", "import_path": "agents.few_shot:CodingAgentHarness", "source_sha256": "4e81...", "parent_candidate_name": "retry-on-test-fail", "axis": "exploitation", "hypothesis": "...", "scores": {"accuracy": 0.78, "per_task": {}}, "delta": 0.08, "outcome": "78.0% (+8.0%)", "tokens": 26100, "cost_usd": 0.47, "metrics_source": "measured"}
 ```
 
-`parent_candidate_name` is `null` for the baseline; the parent
-candidate's name otherwise. This is the same field as
-`Candidate.parent` (§1.3) at serialization time, renamed for clarity in
-the persisted log.
+*(Illustrative values — see §0.4.)*
+
+Fields added since the original contract:
+
+- `thread_id` — which branch produced the row. Every branch writes to
+  its own file; this field survives the run-level merge so a merged view
+  stays attributable.
+- `label` — the proposer's human-readable name (§0.2).
+- `source_sha256` — hash of the branch-private source snapshot that was
+  actually benchmarked.
+- `metrics_source` — `"measured"` or `"mock"`.
+- `tokens` — mean measured total tokens per trial, or `null` when
+  unmeasured. `cost_usd` is `null` when unpriced (§0.3).
+
+`timing_s` was never implemented; per-trial `wall_time_s` and
+candidate-level `total_wall_time_s` live in `eval-result.json` instead.
+
+**Iteration 0 is the measured baseline.** It is written before the first
+propose, so every later `delta` is a comparison against a real
+measurement rather than against zero. `parent_candidate_name` is `null`
+only for that row.
 
 ### 2.4 `proposer-sessions/iter-{N}/session.json`
 
@@ -184,14 +289,17 @@ Companion files in the same directory:
 - `events.jsonl` — raw stream-json events, one per line.
 - `tools/{NNN}_{ToolName}.txt` — one file per tool call, human-readable.
 
-### 2.5 `runs/{run_id}/candidates/{N}/eval-result.json`
+### 2.5 `runs/{run}/threads/{thread}/candidates/{N}/eval-result.json`
 
 *DERIVED — referenced as "aggregate score across all 25 trials" in
-Appendix C §C.10 but not given a verbatim shape.*
+Appendix C §C.10 but not given a verbatim shape. Produced by
+`benchmark.summarize()` from raw trial rows; identical shape for the
+measured and mock paths, differing only in `metrics_source`.*
 
 ```json
 {
   "candidate": "few-shot-tool-results",
+  "thread_id": "run-x",
   "n_tasks": 5,
   "n_trials_per_task": 5,
   "accuracy": 0.78,
@@ -199,12 +307,49 @@ Appendix C §C.10 but not given a verbatim shape.*
     "task-001-fix-typo":     {"pass_rate": 0.95, "trials": [true, true, true, true, false]},
     "task-002-add-function": {"pass_rate": 0.80, "trials": [true, true, true, false, true]}
   },
-  "tokens": {"input_tokens": 124200, "output_tokens": 19800, "total_tokens": 144000},
-  "cost_usd": 0.42,
-  "wall_time_s": 184.6,
+  "trials": [
+    {
+      "task_id": "task-001-fix-typo", "trial": 1, "passed": true, "score": 1.0,
+      "llm_calls": 7, "input_tokens": 18432, "output_tokens": 2104,
+      "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+      "total_tokens": 20536, "cost_usd": 0.0289, "wall_time_s": 23.71,
+      "metrics_source": "measured",
+      "inner_thread_id": "inner::run-x::run-x::few-shot-tool-results::task-001-fix-typo::trial-1",
+      "calls": [{"index": 1, "model": "claude-haiku-4-5-20251001", "input_tokens": 2104,
+                 "output_tokens": 318, "total_tokens": 2422, "latency_s": 1.83,
+                 "cost_usd": 0.0037, "has_usage": true}]
+    }
+  ],
+  "total_trials": 25,
+  "passed_trials": 20,
+  "tokens": {"input_tokens": 124200, "output_tokens": 19800,
+             "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+             "total_tokens": 144000},
+  "total_llm_calls": 168,
+  "total_wall_time_s": 184.6,
+  "mean_total_tokens_per_trial": 5760.0,
+  "median_total_tokens_per_trial": 5612.0,
+  "total_cost_usd": 0.42,
+  "cost_complete": true,
+  "metrics_source": "measured",
+  "_mock_bench": false,
   "timestamp": "2026-04-25T14:35:49.218Z"
 }
 ```
+
+*(Illustrative values — see §0.4.)*
+
+- `trials` holds the raw per-trial rows every aggregate is derived from,
+  so a reader can recompute `accuracy`, the token totals and the
+  mean/median independently. Each trial also writes its own row to
+  `traces/{task-id}-trial-{T}/metrics.json`.
+- `total_cost_usd` is `null` and `cost_complete` is `false` when any
+  trial used a model with no configured price (§0.3).
+- `cost_usd` (the pre-amendment field name) is gone; it was a
+  hardcoded `0.0` on the real benchmark path.
+- Holdout evaluation writes the same shape to
+  `runs/{run}/threads/{thread}/holdout-result.json` with
+  `task_set: "holdout"`.
 
 ### 2.6 `eval/tasks/<task-id>/task.json` — task specification
 
@@ -308,21 +453,30 @@ missed empty-list edge case → test_median_empty failed.")
 {"stats.py": "<full file content>", "tests/test_stats.py": "<unchanged>"}
 ```
 
-### 2.12 `runs/{run_id}/candidates/{N}/status.json`
+### 2.12 `runs/{run}/threads/{thread}/candidates/{N}/status.json`
 
 *DERIVED from Appendix C §C.10.*
 
 ```json
 {
   "candidate": "few-shot-tool-results",
+  "thread_id": "run-x",
   "accepted": true,
   "parent": "more-specific-descriptions",
+  "compared_against": "more-specific-descriptions",
+  "compared_against_accuracy": 0.73,
   "delta": 0.05,
   "reason": "accepted"
 }
 ```
 
-`reason` ∈ {`accepted`, `smoke_failed`, `regression`, `failed_holdout`}.
+`reason` ∈ {`accepted`, `smoke_failed`, `regression`, `failed_holdout`,
+`measured baseline (search root)`}.
+
+`compared_against` / `compared_against_accuracy` name the prior best this
+candidate's `delta` was computed against, so the comparison is auditable
+rather than implied. On iteration 1 that is the measured `baseline`;
+both are `null` only on the baseline's own row.
 
 ---
 
@@ -596,8 +750,8 @@ noted. Status codes are conventional (200 OK, 201 Created, 202 Accepted,
 |---|---|---|---|---|
 | `POST` | `/runs` | `{"domain": "coding-agent", "skill_path": "<optional>", "budget": 5, "model": "opus", "fresh": true, "run_name": "demo-2026-04-25", "proposer": "claude", "mock_bench": false, "trials": 5, "workers": 3}` | **201 Created** with header `Location: /runs/{run_id}`. Body: full Run object: `{"run_id", "thread_id", "status", "started_at", "domain", "skill_path", "budget", "model", "current_iteration": 0}` | **201** |
 | `GET`  | `/runs` | — | `{"runs": [{"run_id", "thread_id", "status", "started_at", "current_iteration", "best_score"}]}` | 200 |
-| `GET`  | `/runs/{run_id}` | — | full `RunInfo` (run dir manifest + frontier_val + last few summary rows) | 200 |
-| `GET`  | `/runs/{run_id}/candidates/{candidate_name}/diff` | — | `{"candidate", "parent", "from_path", "to_path", "diff"}` where `diff` is unified diff text between parent and candidate source | 200 |
+| `GET`  | `/runs/{run_id}` | — | full `RunInfo`: manifest, root-branch `frontier_val`, `branch_frontiers` (thread_id → frontier), **all** `summary_rows` across every branch each tagged with `thread_id`, run-wide `best_score`, and `metrics_source` | 200 |
+| `GET`  | `/runs/{run_id}/candidates/{candidate_name}/diff` | — | `{"candidate", "parent", "thread_id", "from_path", "to_path", "diff"}`. The diff is taken against the **branch-private source snapshot** (§0.1), not the shared repo-root file a concurrent branch may have rewritten. **404** for an unknown candidate. | 200 |
 | `GET`  | `/runs/{run_id}/candidates/{candidate_name}/test-output` | — | `{"candidate", "output"}` summarizing eval-result and available verify trace output | 200 |
 | `DELETE` | `/runs/{run_id}` | — | `{"status": "cancelled"}` (cascades to all branches via `branch_registry`) | 200 |
 
@@ -606,11 +760,30 @@ fields used by the CLI-equivalent API path and smoke tests. Omitted
 values preserve the real proposer path: `proposer="claude"`,
 `mock_bench=false`, `trials=5`, `workers=3`.
 
+`POST /runs` returns as soon as the run task is scheduled. The task
+benchmarks `agents/baseline.py` **before** the first propose, so an
+API-started run has the same measured search root as a CLI run.
+
+`metrics_source` on `GET /runs/{run_id}` is `"measured"` or `"mock"`.
+The dashboard must render the two distinguishably; a mock run may never
+be presented as an experiment.
+
+### 6.1.1 Health (`app/main.py`)
+
+| Method | Path | Response | Status |
+|---|---|---|---|
+| `GET` | `/health` | `{"status": "ok", "version", "persistence": "postgres" \| "memory", "persistence_error": <string \| null>, "memory_store": <bool>}` | 200 |
+
+`persistence: "memory"` means checkpoint history, forking and branch
+recovery are **unavailable**, and `persistence_error` says why (Postgres
+unreachable, or an event loop psycopg cannot use). Degradation is never
+silent — clients and acceptance scripts are expected to check this.
+
 ### 6.2 Checkpoints (`api/checkpoints.py`)
 
 | Method | Path | Request | Response | Status |
 |---|---|---|---|---|
-| `GET` | `/runs/{run_id}/checkpoints` | — | `{"checkpoints": [{"checkpoint_id", "thread_id", "ts", "node", "iteration", "values_summary", "parent_checkpoint_id"}]}` (output of `graph.aget_state_history` projected) | 200 |
+| `GET` | `/runs/{run_id}/checkpoints` | — | `{"checkpoints": [{"checkpoint_id", "thread_id", "ts", "node", "iteration", "values_summary", "parent_checkpoint_id", "next", "metadata"}]}` (output of `graph.aget_state_history` projected, newest first) | 200 |
 | `GET` | `/runs/{run_id}/checkpoints/{checkpoint_id}` | — | `{"checkpoint_id", "thread_id", "state": <full MetaHarnessState>, "ts", "node"}` | 200 |
 
 ### 6.3 Forks (`api/forks.py`)
@@ -630,6 +803,25 @@ from an existing branch thread without changing the route shape.
 | `GET` | `/runs/{run_id}/branches` | — | `{"branches": [<BranchMetadata>]}` | 200 |
 | `GET` | `/runs/{run_id}/trajectory` | — | `{"trajectory": {"run_id", "threads", "edges"}}` | 200 |
 | `POST` | `/runs/{run_id}/branches/{thread_id}/cancel` | — | `{"status": "cancelled"}` (calls `task.cancel()` through Step 9 branch metadata) | 200 |
+
+**Branch history is durable; branch execution is not.** Metadata is
+mirrored to `runs/{run_id}/branches.json` on every transition, so both
+endpoints reconstruct the full tree after an API restart. An asyncio
+task does not survive that restart: a branch persisted as `running`
+reloads with `status: "interrupted"` and an explanatory `error`.
+
+`BranchMetadata` fields: `branch_id`, `run_id`, `thread_id`,
+`parent_thread_id`, `parent_checkpoint_id`, `parent_candidate`, `name`,
+`mods`, `status`, `created_at`, `started_at`, `finished_at`,
+`cancelled_at`, `error`, `result`, and `live`.
+
+`status` ∈ {`created`, `running`, `completed`, `failed`, `cancelled`,
+`interrupted`}. `live` is `true` only while *this* backend process is
+driving the branch, and is never persisted as `true`.
+
+Each `edges` entry is
+`{"source", "target", "parent_checkpoint_id", "parent_candidate"}`.
+`threads` includes the run's root thread with `status: "root"`.
 
 ### 6.5 Memory (`api/memory.py`)
 
@@ -684,15 +876,26 @@ Blank line terminates each event. Reconnect via `Last-Event-ID` header
 |---|---|---|
 | `state-update` | every LangGraph node transition | `{thread_id, node, iteration, ts, summary}` |
 | `checkpoint-written` | AsyncPostgresSaver post-write | `{thread_id, checkpoint_id, parent_checkpoint_id, ts, node}` |
-| `candidate-created` | `propose` node after parsing pending_eval.json | `{thread_id, candidate, parent_candidate_name, import_path, parent, iteration, status, scores, delta, hypothesis, axis}` |
+| `candidate-created` | `propose` node after parsing pending_eval.json | `{thread_id, candidate, label, parent_candidate_name, import_path, parent, iteration, status, scores, delta, hypothesis, axis}` |
 | `validate-result` | `validate` node | `{thread_id, candidate, valid, error?}` |
-| `eval-result` | `benchmark` node | `{thread_id, candidate, parent_candidate_name, iteration, status, accuracy, scores, per_task, tokens, cost_usd, hypothesis, axis}` |
+| `eval-result` | `benchmark` node | `{thread_id, candidate, parent_candidate_name, iteration, status, accuracy, scores, per_task, tokens, cost_usd, metrics_source, hypothesis, axis}` |
 | `frontier-updated` | `update_frontier` node | `{thread_id, candidate, parent_candidate_name, iteration, frontier, best_candidate, best_score, status, accepted, delta, scores, hypothesis, axis}` |
 | `iteration-complete` | end of `update_frontier` | `{thread_id, iteration, status: "improved"\|"no_improvement"}` |
 | `fork-created` | `worktree_add` | `{thread_id, parent_thread_id, parent_checkpoint_id, mods_summary}` |
 | `branch-cancelled` | cancel endpoint | `{thread_id, reason}` |
 | `memory-pattern-stored` | end-of-run memory write | `{thread_id, namespace, key, score_delta}` |
 | `error` | any node exception | `{thread_id, node, message, traceback}` |
+
+**`thread_id` is mandatory on every event** and the registry rejects a
+payload without one (`InvalidEventPayloadError`). Consumers must key
+tree state on `(thread_id, candidate)`, never on candidate name or
+iteration number alone: two branches forked from one checkpoint reach
+the same iteration, and collapsing them merges one branch's result into
+the other's node.
+
+`eval-result.cost_usd` is `null` when the model has no configured price
+(§0.3); `metrics_source` tells the consumer whether the numbers in the
+event are measurements or mock data.
 
 ### 7.3 Closed-set enforcement rule
 
