@@ -25,7 +25,6 @@ export function ContextPanel() {
   const dispatch = useDashboardDispatch();
   const [diffResult, setDiffResult] = useState<{ candidate: string; value: string | null } | null>(null);
   const [testResult, setTestResult] = useState<{ candidate: string; value: string | null } | null>(null);
-  const [loading, setLoading] = useState(false);
 
   const tabs = ['chart', 'diff', 'test', 'memory'] as const;
   const selected = selectedNode ?? tree.find(n => n.status === 'best')?.candidate ?? tree[0]?.candidate ?? null;
@@ -45,7 +44,6 @@ export function ContextPanel() {
   useEffect(() => {
     let cancelled = false;
     if (!selected || mode !== 'live') return;
-    setLoading(true);
     Promise.allSettled([
       getDiff(params.run_id, selected),
       getTestOutput(params.run_id, selected),
@@ -59,7 +57,6 @@ export function ContextPanel() {
         candidate: selected,
         value: t.status === 'fulfilled' ? t.value : null,
       });
-      setLoading(false);
     });
     return () => {
       cancelled = true;
@@ -67,6 +64,12 @@ export function ContextPanel() {
   }, [mode, params.run_id, selected]);
 
   const stats = useMemo(() => (diff ? diffStats(diff) : null), [diff]);
+
+  // Derived rather than stored: a fetch is outstanding exactly while the
+  // results we hold are for some other candidate. Setting a `loading`
+  // flag inside the effect would trigger a cascading render.
+  const loading =
+    mode === 'live' && Boolean(selected) && diffResult?.candidate !== selected;
 
   const fixtureDiffPreview = hasFixtureTaskData
     ? perTask
