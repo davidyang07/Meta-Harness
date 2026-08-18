@@ -100,7 +100,7 @@ def test_the_branch_artifact_dir_the_proposer_reads_holds_no_holdout_data(
     thread = "leak-artifacts"
     runs_mod.write_pending_eval(run_dir, thread, {"iteration": 1, "candidates": []})
     runs_mod.write_frontier(run_dir, thread, {"iteration": 1, "candidates": []})
-    runs_mod.append_evolution_summary(
+    runs_mod.record_evolution_row(
         run_dir, thread, {"iteration": 1, "candidate": "c"}
     )
 

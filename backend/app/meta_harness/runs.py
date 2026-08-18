@@ -196,20 +196,67 @@ def read_manifest(run_dir: Path) -> dict[str, Any] | None:
 # ── thread-scoped artifacts ───────────────────────────────────────────
 
 
-def append_evolution_summary(
+def record_evolution_row(
     run_dir: Path, thread_id: str, row: dict[str, Any]
 ) -> None:
-    """Append one candidate row to this thread's evolution_summary.jsonl.
+    """Record one candidate row in this thread's evolution_summary.jsonl.
 
-    Every branch owns its own log file, so concurrent appends never
-    interleave and lineage can never be mixed up between branches. The
-    ``thread_id`` is stamped on the row so aggregated views stay
-    attributable.
+    Every branch owns its own log file, so writes never interleave across
+    branches and lineage cannot be mixed up. The ``thread_id`` is stamped
+    on the row so aggregated views stay attributable.
+
+    **Idempotent on (iteration, candidate).** A LangGraph node that is
+    interrupted after its side effects but before its checkpoint commits
+    is re-executed on resume. A plain append therefore produced a second
+    row for the same iteration — observed as
+    ``duplicate iterations in summary: [0, 1, 2, 3, 3]`` after cancelling
+    a run mid-``update_frontier`` and resuming it. The re-execution's row
+    replaces the earlier one rather than joining it, because the rerun is
+    the authoritative result.
     """
     td = thread_dir(run_dir, thread_id)
+    path = td / "evolution_summary.jsonl"
     row = {**row, "thread_id": thread_id}
-    with (td / "evolution_summary.jsonl").open("a", encoding="utf-8") as f:
-        f.write(json.dumps(row, default=str) + "\n")
+    key = (row.get("iteration"), row.get("candidate"))
+
+    existing = [
+        json.loads(line)
+        for line in (path.read_text().splitlines() if path.exists() else [])
+        if line.strip()
+    ]
+    kept = [
+        r for r in existing if (r.get("iteration"), r.get("candidate")) != key
+    ]
+    if len(kept) == len(existing):
+        # Nothing to replace: the common path is a genuine append.
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, default=str) + "\n")
+        return
+
+    body = "".join(
+        json.dumps(r, default=str) + "\n" for r in [*kept, row]
+    )
+    _write_text_atomic(path, body)
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    """Replace a text file atomically (see ``write_json_atomic``)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def read_evolution_summary(run_dir: Path, thread_id: str) -> list[dict[str, Any]]:

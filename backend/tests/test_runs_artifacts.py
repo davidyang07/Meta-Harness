@@ -65,8 +65,8 @@ def test_frontier_is_isolated_per_thread(tmp_path: Path):
 
 def test_evolution_rows_are_isolated_and_tagged(tmp_path: Path):
     run_dir = _run(tmp_path)
-    runs_mod.append_evolution_summary(run_dir, "run-a", {"iteration": 2, "candidate": "x"})
-    runs_mod.append_evolution_summary(
+    runs_mod.record_evolution_row(run_dir, "run-a", {"iteration": 2, "candidate": "x"})
+    runs_mod.record_evolution_row(
         run_dir, "run-a.fork.beef", {"iteration": 2, "candidate": "y"}
     )
 
@@ -168,3 +168,53 @@ def test_write_json_atomic_leaves_no_partial_file(tmp_path: Path):
     assert json.loads(target.read_text()) == {"a": 2}
     # No temp leftovers next to the target.
     assert [p.name for p in target.parent.iterdir()] == ["out.json"]
+
+
+def test_evolution_rows_are_idempotent_on_reexecution(tmp_path: Path):
+    """A re-run LangGraph node replaces its row instead of duplicating it.
+
+    A node interrupted after its side effects but before its checkpoint
+    commits is re-executed on resume. Plain appending produced a second
+    row for the same iteration, which surfaced as
+    `duplicate iterations in summary: [0, 1, 2, 3, 3]`.
+    """
+    run_dir = _run(tmp_path)
+    runs_mod.record_evolution_row(
+        run_dir, "run-a", {"iteration": 3, "candidate": "c", "delta": 0.1}
+    )
+    runs_mod.record_evolution_row(
+        run_dir, "run-a", {"iteration": 3, "candidate": "c", "delta": 0.2}
+    )
+
+    rows = runs_mod.read_evolution_summary(run_dir, "run-a")
+    assert len(rows) == 1
+    # The rerun is authoritative, so its value wins.
+    assert rows[0]["delta"] == 0.2
+
+
+def test_evolution_rows_keep_distinct_candidates_on_one_iteration(tmp_path: Path):
+    """Idempotency keys on (iteration, candidate), not iteration alone."""
+    run_dir = _run(tmp_path)
+    for name in ("a", "b"):
+        runs_mod.record_evolution_row(
+            run_dir, "run-a", {"iteration": 2, "candidate": name}
+        )
+    rows = runs_mod.read_evolution_summary(run_dir, "run-a")
+    assert [r["candidate"] for r in rows] == ["a", "b"]
+
+
+def test_replacing_a_row_preserves_order_of_the_others(tmp_path: Path):
+    run_dir = _run(tmp_path)
+    for i in (0, 1, 2):
+        runs_mod.record_evolution_row(
+            run_dir, "run-a", {"iteration": i, "candidate": f"c{i}"}
+        )
+    runs_mod.record_evolution_row(
+        run_dir, "run-a", {"iteration": 1, "candidate": "c1", "delta": 9}
+    )
+    rows = runs_mod.read_evolution_summary(run_dir, "run-a")
+    assert [r["iteration"] for r in rows] == [0, 2, 1]
+    assert rows[-1]["delta"] == 9
+    # No temp files left behind by the atomic rewrite.
+    td = runs_mod.thread_dir(run_dir, "run-a")
+    assert not [p for p in td.iterdir() if p.name.startswith(".")]

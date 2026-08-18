@@ -586,7 +586,7 @@ class OuterLoopRunner:
             except Exception:  # noqa: BLE001 — memory write is best-effort
                 pass
 
-        runs_mod.append_evolution_summary(
+        runs_mod.record_evolution_row(
             self.run_dir,
             thread_id,
             _evolution_row(candidate, iteration=state["iteration"]),
@@ -709,7 +709,7 @@ class OuterLoopRunner:
                 "reason": "measured baseline (search root)",
             },
         )
-        runs_mod.append_evolution_summary(
+        runs_mod.record_evolution_row(
             self.run_dir, run_id, _evolution_row(candidate, iteration=0)
         )
         return candidate
