@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -92,10 +93,8 @@ def inner(
     ),
 ) -> None:
     """Run ONE inner-loop trial on a single task (async)."""
-    import asyncio
-    import importlib
-
-    from app.meta_harness.harness import CodingAgentHarness
+    from app.meta_harness import metrics as met
+    from app.meta_harness import runs as runs_mod
     from app.meta_harness.inner import run_inner_loop
     from app.meta_harness.sandbox import sandbox_for
 
@@ -106,48 +105,45 @@ def inner(
         raise typer.Exit(1)
     task_spec = json.loads((task_dir / "task.json").read_text())
 
-    if candidate == "baseline":
-        from agents.baseline import BaselineHarness
+    harness = _resolve_harness_class(candidate)()
+    usage = met.UsageRecorder()
+    met.instrument_harness(harness, usage)
 
-        harness_class: type[CodingAgentHarness] = BaselineHarness
-    else:
-        try:
-            mod = importlib.import_module(f"agents.{candidate}")
-        except ImportError as exc:
-            typer.echo(f"failed to import agents.{candidate}: {exc}", err=True)
-            raise typer.Exit(1) from None
-        cls = _find_harness_class(mod)
-        if cls is None:
-            typer.echo(
-                f"agents.{candidate} does not export a CodingAgentHarness subclass",
-                err=True,
-            )
-            raise typer.Exit(1)
-        harness_class = cls
-
-    harness = harness_class()
-
+    run_dir = runs_mod.make_run_dir(REPO_ROOT, run_name)
     trace_dir = (
-        REPO_ROOT
-        / "runs"
-        / run_name
-        / "candidates"
-        / candidate
+        runs_mod.candidate_dir(run_dir, run_name, candidate)
         / "traces"
         / f"{task}-trial-1"
+    )
+    thread_id = met.inner_thread_id(
+        run_id=run_name,
+        thread_id=run_name,
+        candidate=candidate,
+        task_id=task,
+        trial=1,
     )
 
     async def _run() -> dict[str, Any]:
         with sandbox_for(task_dir / "workspace") as sandbox:
-            final_state = await run_inner_loop(
+            return await run_inner_loop(
                 harness,
                 task_dict=task_spec,
                 workspace=sandbox,
                 trace_dir=trace_dir,
+                thread_id=thread_id,
             )
-        return final_state
 
+    started = time.monotonic()
     final_state = _run_async(_run())
+    row = usage.to_trial_row(
+        task_id=task,
+        trial=1,
+        passed=(final_state.get("score") or 0.0) >= 1.0,
+        score=float(final_state.get("score") or 0.0),
+        wall_time_s=time.monotonic() - started,
+    )
+    row["inner_thread_id"] = thread_id
+    runs_mod.write_json_atomic(trace_dir / "metrics.json", row)
 
     typer.echo(
         json.dumps(
@@ -155,10 +151,15 @@ def inner(
                 "task": task,
                 "candidate": candidate,
                 "score": final_state.get("score"),
-                "passed": (final_state.get("score") or 0.0) >= 1.0,
+                "passed": row["passed"],
                 "turn_count": final_state.get("turn_count"),
                 "verify_attempts": final_state.get("verify_attempts"),
+                "llm_calls": row["llm_calls"],
+                "total_tokens": row["total_tokens"],
+                "cost_usd": row["cost_usd"],
+                "wall_time_s": row["wall_time_s"],
                 "trace_dir": str(trace_dir),
+                "thread_id": thread_id,
             },
             indent=2,
         )
@@ -193,20 +194,21 @@ def benchmark(
         help="Resolve tasks from eval/holdout/ instead of eval/tasks/",
     ),
 ) -> None:
-    """Run a candidate × N trials × M tasks. Writes eval-result.json
-    under runs/{run_name}/candidates/{candidate}/eval-result.json (async)."""
-    import asyncio
-    import datetime
-    import importlib
-    import time
+    """Benchmark one candidate: N trials × M tasks, with measured metrics.
 
-    from app.meta_harness.harness import CodingAgentHarness
-    from app.meta_harness.inner import run_inner_loop
-    from app.meta_harness.sandbox import sandbox_for
+    Writes raw per-trial rows and an aggregate to
+    ``runs/{run_name}/threads/{run_name}/candidates/{candidate}/eval-result.json``.
+    Uses the same benchmark core as the outer loop's ``benchmark`` node,
+    so a CLI benchmark and an in-loop benchmark are directly comparable.
+    """
+    import datetime
+
+    from app.meta_harness import benchmark as bench
+    from app.meta_harness import runs as runs_mod
 
     eval_root = REPO_ROOT / "eval"
     tasks_root = eval_root / ("holdout" if holdout else "tasks")
-    task_dirs = sorted(d for d in tasks_root.iterdir() if d.is_dir() and (d / "task.json").exists())
+    task_dirs = bench.discover_tasks(tasks_root)
     if not task_dirs:
         typer.echo(f"no tasks found in {tasks_root}", err=True)
         raise typer.Exit(1)
@@ -216,109 +218,79 @@ def benchmark(
             "%Y%m%dT%H%M%SZ"
         )
 
+    harness_class = _resolve_harness_class(candidate)
+    total = len(task_dirs) * trials
+    typer.echo(
+        f"benchmark: candidate={candidate}, tasks={len(task_dirs)}, "
+        f"trials={trials}, total={total}, workers={workers}, run={run_name}"
+    )
+
+    run_dir = runs_mod.make_run_dir(REPO_ROOT, run_name)
+    cand_dir = runs_mod.candidate_dir(run_dir, run_name, candidate)
+    n_done = 0
+
+    def _progress(row: dict[str, Any]) -> None:
+        nonlocal n_done
+        n_done += 1
+        mark = "PASS" if row["passed"] else "FAIL"
+        typer.echo(
+            f"  [{n_done}/{total}] {mark} {row['task_id']} trial-{row['trial']} "
+            f"({row['total_tokens']} tok, {row['wall_time_s']}s)"
+        )
+
+    eval_result = _run_async(
+        bench.benchmark_harness(
+            harness_factory=harness_class,
+            tasks_dir=tasks_root,
+            trials=trials,
+            workers=workers,
+            trace_root=cand_dir / ("holdout-traces" if holdout else "traces"),
+            thread_prefix=f"cli-bench::{run_name}::{candidate}",
+        )
+    )
+    eval_result["candidate"] = candidate
+    eval_result["task_set"] = "holdout" if holdout else "search"
+    eval_result["timestamp"] = datetime.datetime.now(
+        datetime.timezone.utc
+    ).isoformat()
+
+    eval_result_path = cand_dir / (
+        "holdout-result.json" if holdout else "eval-result.json"
+    )
+    runs_mod.write_json_atomic(eval_result_path, eval_result)
+
+    # Raw rows are large; keep them out of the console summary but on disk.
+    summary = {k: v for k, v in eval_result.items() if k != "trials"}
+    typer.echo("")
+    typer.echo(json.dumps(summary, indent=2))
+    typer.echo("")
+    typer.echo(f"wrote {eval_result_path}")
+
+
+def _resolve_harness_class(candidate: str) -> type:
+    """Import a candidate harness class by name under ``agents/``."""
+    import importlib
+
+    from app.meta_harness.harness import CodingAgentHarness
+
     if candidate == "baseline":
         from agents.baseline import BaselineHarness
 
-        harness_class: type[CodingAgentHarness] = BaselineHarness
-    else:
-        try:
-            mod = importlib.import_module(f"agents.{candidate}")
-        except ImportError as exc:
-            typer.echo(f"failed to import agents.{candidate}: {exc}", err=True)
-            raise typer.Exit(1) from None
-        cls = _find_harness_class(mod)
-        if cls is None:
-            typer.echo(
-                f"agents.{candidate} does not export a CodingAgentHarness subclass",
-                err=True,
-            )
-            raise typer.Exit(1)
-        harness_class = cls
-
-    work: list[tuple[Path, dict, int]] = []
-    for task_dir in task_dirs:
-        spec = json.loads((task_dir / "task.json").read_text())
-        for trial_idx in range(1, trials + 1):
-            work.append((task_dir, spec, trial_idx))
-
-    typer.echo(
-        f"benchmark: candidate={candidate}, tasks={len(task_dirs)}, "
-        f"trials={trials}, total={len(work)}, workers={workers}, run={run_name}"
-    )
-
-    started = time.monotonic()
-    results: dict[str, list[bool]] = {d.name: [False] * trials for d in task_dirs}
-
-    sem = asyncio.Semaphore(workers)
-    n_done = 0
-
-    async def _one_trial(task_dir: Path, spec: dict, trial_idx: int) -> tuple[str, int, bool]:
-        nonlocal n_done
-        task_id = task_dir.name
-        trace_dir = (
-            REPO_ROOT
-            / "runs"
-            / run_name
-            / "candidates"
-            / candidate
-            / "traces"
-            / f"{task_id}-trial-{trial_idx}"
+        return BaselineHarness
+    try:
+        mod = importlib.import_module(f"agents.{candidate}")
+    except ImportError as exc:
+        typer.echo(f"failed to import agents.{candidate}: {exc}", err=True)
+        raise typer.Exit(1) from None
+    cls = _find_harness_class(mod)
+    if cls is None:
+        typer.echo(
+            f"agents.{candidate} does not export a CodingAgentHarness subclass",
+            err=True,
         )
-        async with sem:
-            harness = harness_class()
-            with sandbox_for(task_dir / "workspace") as sandbox:
-                final = await run_inner_loop(
-                    harness,
-                    task_dict=spec,
-                    workspace=sandbox,
-                    trace_dir=trace_dir,
-                    thread_id=f"bench-{candidate}-{task_id}-trial-{trial_idx}",
-                )
-        passed = (final.get("score") or 0.0) >= 1.0
-        n_done += 1
-        mark = "✓" if passed else "✗"
-        typer.echo(f"  [{n_done}/{len(work)}] {mark} {task_id} trial-{trial_idx}")
-        return task_id, trial_idx, passed
-
-    async def _run_all() -> list[tuple[str, int, bool]]:
-        return await asyncio.gather(
-            *[_one_trial(td, spec, t) for td, spec, t in work]
-        )
-
-    trial_results = _run_async(_run_all())
-    for task_id, trial_idx, passed in trial_results:
-        results[task_id][trial_idx - 1] = passed
-
-    elapsed = time.monotonic() - started
-    total_passes = sum(sum(v) for v in results.values())
-    accuracy = total_passes / len(work) if work else 0.0
-
-    eval_result = {
-        "candidate": candidate,
-        "n_tasks": len(task_dirs),
-        "n_trials_per_task": trials,
-        "accuracy": round(accuracy, 4),
-        "per_task": {
-            task_id: {
-                "pass_rate": round(sum(trial_results) / len(trial_results), 4),
-                "trials": trial_results,
-            }
-            for task_id, trial_results in results.items()
-        },
-        "tokens": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-        "cost_usd": 0.0,
-        "wall_time_s": round(elapsed, 2),
-        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    }
-
-    out_dir = REPO_ROOT / "runs" / run_name / "candidates" / candidate
-    out_dir.mkdir(parents=True, exist_ok=True)
-    eval_result_path = out_dir / "eval-result.json"
-    eval_result_path.write_text(json.dumps(eval_result, indent=2))
-
-    typer.echo("")
-    typer.echo(json.dumps(eval_result, indent=2))
-    typer.echo(f"\nwrote {eval_result_path}")
+        raise typer.Exit(1)
+    assert issubclass(cls, CodingAgentHarness)
+    return cls
 
 
 @app.command()
@@ -497,6 +469,7 @@ def loop(
             _run_holdout_eval(
                 run_dir=run_dir,
                 repo_root=REPO_ROOT,
+                thread_id=run_name,
                 best_candidate=final_state["best_candidate"],
                 trials=trials,
                 workers=workers,
@@ -524,119 +497,62 @@ async def _run_holdout_eval(
     *,
     run_dir: Path,
     repo_root: Path,
+    thread_id: str,
     best_candidate: str,
     trials: int,
     workers: int,
 ) -> dict[str, Any]:
-    """Post-evaluate the best candidate on eval/holdout/. Writes
-    runs/<run-name>/holdout-result.json with per-task pass rates and
-    overall accuracy. The proposer never saw these tasks during search,
-    so this is the honest-reporting number (Appendix C §C.14)."""
-    import asyncio
-    import datetime as _dt
-    import importlib
+    """Post-evaluate the best candidate on ``eval/holdout/``.
 
-    from app.meta_harness.harness import CodingAgentHarness
-    from app.meta_harness.inner import run_inner_loop
-    from app.meta_harness.sandbox import sandbox_for
+    The proposer never sees holdout tasks during search (Appendix C
+    §C.14), so this is the honest generalisation number. It is written
+    to the branch's own ``holdout-result.json`` and labelled
+    ``task_set: "holdout"`` so no consumer can confuse it with a
+    search-set result.
+    """
+    import datetime as _dt
+
+    from app.meta_harness import benchmark as bench
+    from app.meta_harness import runs as runs_mod
 
     holdout_dir = repo_root / "eval" / "holdout"
-    if not holdout_dir.exists():
-        return {
-            "candidate": best_candidate,
-            "skipped": True,
-            "reason": "eval/holdout/ does not exist",
-        }
-    task_dirs = sorted(
-        d for d in holdout_dir.iterdir() if d.is_dir() and (d / "task.json").exists()
-    )
+    task_dirs = bench.discover_tasks(holdout_dir)
     if not task_dirs:
         return {
             "candidate": best_candidate,
+            "task_set": "holdout",
             "skipped": True,
-            "reason": "no holdout tasks found",
+            "reason": f"no holdout tasks found in {holdout_dir}",
         }
 
-    if best_candidate == "baseline":
-        from agents.baseline import BaselineHarness
+    try:
+        harness_class = _resolve_harness_class(best_candidate)
+    except typer.Exit:
+        return {
+            "candidate": best_candidate,
+            "task_set": "holdout",
+            "skipped": True,
+            "reason": f"could not import agents.{best_candidate}",
+        }
 
-        harness_class: type[CodingAgentHarness] = BaselineHarness
-    else:
-        try:
-            mod = importlib.import_module(f"agents.{best_candidate}")
-        except ImportError as exc:
-            return {
-                "candidate": best_candidate,
-                "skipped": True,
-                "reason": f"import failed: {exc}",
-            }
-        cls = _find_harness_class(mod)
-        if cls is None:
-            return {
-                "candidate": best_candidate,
-                "skipped": True,
-                "reason": "no CodingAgentHarness subclass found",
-            }
-        harness_class = cls
-
-    sem = asyncio.Semaphore(workers)
-    work = [
-        (td, json.loads((td / "task.json").read_text()), t)
-        for td in task_dirs
-        for t in range(1, trials + 1)
-    ]
-    results: dict[str, list[bool]] = {td.name: [False] * trials for td in task_dirs}
-
-    async def _one(td: Path, spec: dict, trial_idx: int) -> tuple[str, int, bool]:
-        async with sem:
-            harness = harness_class()
-            trace_dir = (
-                run_dir
-                / "candidates"
-                / best_candidate
-                / "holdout-traces"
-                / f"{td.name}-trial-{trial_idx}"
-            )
-            with sandbox_for(td / "workspace") as sandbox:
-                final = await run_inner_loop(
-                    harness,
-                    task_dict=spec,
-                    workspace=sandbox,
-                    trace_dir=trace_dir,
-                    thread_id=f"holdout-{best_candidate}-{td.name}-trial-{trial_idx}",
-                )
-        return td.name, trial_idx, (final.get("score") or 0.0) >= 1.0
-
-    started = _dt.datetime.now(_dt.timezone.utc)
-    trial_results = await asyncio.gather(
-        *[_one(td, spec, t) for td, spec, t in work]
+    cand_dir = runs_mod.candidate_dir(run_dir, thread_id, best_candidate)
+    holdout_result = await bench.benchmark_harness(
+        harness_factory=harness_class,
+        tasks_dir=holdout_dir,
+        trials=trials,
+        workers=workers,
+        trace_root=cand_dir / "holdout-traces",
+        thread_prefix=f"holdout::{run_dir.name}::{thread_id}::{best_candidate}",
     )
-    for task_id, trial_idx, passed in trial_results:
-        results[task_id][trial_idx - 1] = passed
+    holdout_result["candidate"] = best_candidate
+    holdout_result["task_set"] = "holdout"
+    holdout_result["thread_id"] = thread_id
+    holdout_result["n_holdout_tasks"] = len(task_dirs)
+    holdout_result["timestamp"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
 
-    per_task = {
-        task_id: {
-            "pass_rate": round(sum(ts) / len(ts), 4),
-            "trials": ts,
-        }
-        for task_id, ts in results.items()
-    }
-    total_passes = sum(sum(ts) for ts in results.values())
-    n_total = len(task_dirs) * trials
-    accuracy = total_passes / n_total if n_total else 0.0
-    elapsed = (_dt.datetime.now(_dt.timezone.utc) - started).total_seconds()
-
-    holdout_result = {
-        "candidate": best_candidate,
-        "n_holdout_tasks": len(task_dirs),
-        "n_trials_per_task": trials,
-        "accuracy": round(accuracy, 4),
-        "per_task": per_task,
-        "wall_time_s": round(elapsed, 2),
-        "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-    }
-    (run_dir / "holdout-result.json").write_text(
-        json.dumps(holdout_result, indent=2)
+    runs_mod.write_json_atomic(
+        runs_mod.thread_dir(run_dir, thread_id) / "holdout-result.json",
+        holdout_result,
     )
     return holdout_result
 
