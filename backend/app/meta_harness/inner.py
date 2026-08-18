@@ -295,9 +295,21 @@ def _append_tool_log(
 
 
 def _run_verify_subprocess(workspace: Path, test_command: str) -> tuple[bool, str]:
-    """Sync helper for verify (called via asyncio.to_thread)."""
+    """Sync helper for verify (called via asyncio.to_thread).
+
+    **Trust boundary.** ``test_command`` runs through a shell. It comes
+    from ``eval/tasks/<id>/task.json``, which is committed repository
+    content — not user input, not model output, and not anything the
+    proposer can write (the proposer authors ``agents/*.py`` only). A
+    task definition is as trusted as the rest of the source tree.
+
+    Do not widen this: if task specs ever become user-supplied, this call
+    needs an argv list and an allowlist first. The workspace itself is a
+    disposable sandbox copy (``sandbox.sandbox_for``), so a command can
+    destroy its own workspace but not the task's pristine source.
+    """
     try:
-        proc = subprocess.run(  # noqa: S602 — test_command from task spec
+        proc = subprocess.run(  # noqa: S602 — see the trust boundary above
             test_command,
             shell=True,
             cwd=workspace,
