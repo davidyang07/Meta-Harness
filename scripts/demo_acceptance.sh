@@ -148,6 +148,32 @@ check "SSE stream emits events"  bash -c "
   API_URL=$API_URL uv run python scripts/acceptance_api_flow.py --sse-only
 "
 
+# ── 5b. Restart recovery ─────────────────────────────────────────────
+# Branch history is persisted to runs/<run>/branches.json. Kill the
+# backend, start a fresh one, and confirm the branch tree is still there
+# — the asyncio tasks are gone, the history is not.
+section "5b. Trajectory survives a backend restart"
+RECOVER_RUN=""
+if RECOVER_OUT="$(API_URL=$API_URL uv run python scripts/acceptance_api_flow.py --keep 2>&1)"; then
+  RECOVER_RUN="$(echo "$RECOVER_OUT" | sed -n 's/^RUN_ID=//p' | tail -1)"
+fi
+
+if [[ -z "$RECOVER_RUN" ]]; then
+  skip "restart trajectory recovery" "could not create a run to recover"
+else
+  kill "$SERVER_PID" 2>/dev/null || true
+  wait "$SERVER_PID" 2>/dev/null || true
+  (cd backend && uv run meta-harness serve --port "$API_PORT" >"$LOG_DIR/server2.log" 2>&1) &
+  SERVER_PID=$!
+  for _ in $(seq 1 60); do
+    api "$API_URL/health" >/dev/null 2>&1 && break
+    sleep 1
+  done
+  check "branch tree recovered by a fresh process" bash -c "
+    API_URL=$API_URL uv run python scripts/acceptance_api_flow.py --recover $RECOVER_RUN
+  "
+fi
+
 # ── 6. Frontend ──────────────────────────────────────────────────────
 section "6. Frontend"
 check "npm ci"                  bash -c 'cd frontend/dashboard && npm ci --silent --no-audit --no-fund'

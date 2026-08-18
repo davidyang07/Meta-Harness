@@ -7,6 +7,8 @@ and mock benchmark, so it costs nothing.
 
     API_URL=http://127.0.0.1:8765 uv run python scripts/acceptance_api_flow.py
     API_URL=... uv run python scripts/acceptance_api_flow.py --sse-only
+    API_URL=... uv run python scripts/acceptance_api_flow.py --keep      # prints RUN_ID=
+    API_URL=... uv run python scripts/acceptance_api_flow.py --recover <run_id>
 """
 
 from __future__ import annotations
@@ -71,8 +73,55 @@ def check_sse(run_id: str) -> None:
     print(f"  SSE event types observed: {sorted(seen)}")
 
 
+def check_recovery(run_id: str) -> int:
+    """Assert a *fresh* backend process reconstructs the branch tree.
+
+    Run against a server started after the one that created the run.
+    Branch history is persisted to runs/<run_id>/branches.json, so the
+    trajectory must survive a restart even though the asyncio tasks that
+    drove those branches did not.
+    """
+    try:
+        status, t = request("GET", f"/runs/{run_id}/trajectory")
+        assert status == 200, f"GET trajectory -> {status}"
+        threads = t["trajectory"]["threads"]
+        branches = [x for x in threads if x["thread_id"] != run_id]
+        assert branches, f"no branches recovered for {run_id}"
+        for branch in branches:
+            for key in (
+                "branch_id",
+                "parent_thread_id",
+                "parent_checkpoint_id",
+                "name",
+                "mods",
+                "status",
+                "created_at",
+                "live",
+            ):
+                assert key in branch, f"recovered branch missing {key}"
+            # A branch from a dead process is never reported as live here.
+            assert branch["live"] is False, branch
+
+        status, listed = request("GET", f"/runs/{run_id}/branches")
+        assert status == 200 and len(listed["branches"]) == len(branches), listed
+
+        # Run detail still merges every branch's rows.
+        _, info = request("GET", f"/runs/{run_id}")
+        threads_in_rows = {r["thread_id"] for r in info["summary_rows"]}
+        assert len(threads_in_rows) > 1, threads_in_rows
+
+        print(f"  recovered {len(branches)} branch(es) for {run_id} after restart")
+        return 0
+    finally:
+        request("DELETE", f"/runs/{run_id}")
+
+
 def main() -> int:
+    if "--recover" in sys.argv:
+        return check_recovery(sys.argv[sys.argv.index("--recover") + 1])
+
     sse_only = "--sse-only" in sys.argv
+    keep = "--keep" in sys.argv
     run_id = f"acceptance-api-{int(time.time())}"
 
     status, _ = request(
@@ -192,7 +241,11 @@ def main() -> int:
         print(f"  branches: {[b.split('.fork.')[-1] for b in branches]}")
         return 0
     finally:
-        request("DELETE", f"/runs/{run_id}")
+        if keep:
+            # Hand the run to a later --recover invocation instead.
+            print(f"RUN_ID={run_id}")
+        else:
+            request("DELETE", f"/runs/{run_id}")
 
 
 if __name__ == "__main__":
