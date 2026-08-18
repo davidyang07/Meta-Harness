@@ -1,0 +1,182 @@
+name: backend
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: backend-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: pytest (Postgres)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: meta_harness
+          POSTGRES_PASSWORD: meta_harness
+          POSTGRES_DB: meta_harness
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U meta_harness -d meta_harness"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      POSTGRES_DSN: postgresql://meta_harness:meta_harness@localhost:5432/meta_harness
+      # Live-model tests must never run in CI. The repo owner can enable
+      # them locally; no API key is configured here by design.
+      ANTHROPIC_API_KEY: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync workspace
+        run: uv sync --frozen
+
+      - name: Assert Postgres is actually reachable
+        # The Postgres-backed suites skip themselves when the DSN is
+        # unreachable. Without this gate a broken service container turns
+        # into a green build that tested none of the persistence layer.
+        run: |
+          cd backend
+          uv run python - <<'PY'
+          import asyncio, sys
+          from app.meta_harness.persistence import healthcheck
+          if not asyncio.run(healthcheck()):
+              print("Postgres unreachable at POSTGRES_DSN", file=sys.stderr)
+              sys.exit(1)
+          print("Postgres reachable")
+          PY
+
+      - name: Run tests
+        run: cd backend && uv run pytest tests/ -q --junitxml=../pytest-report.xml
+
+      - name: Assert the Postgres integration tests ran
+        # Guards the same failure mode from the other side: these files
+        # exist to exercise persistence, forking and inner checkpointing.
+        # If they collectively report zero passes, the build is a lie.
+        run: |
+          cd backend
+          uv run pytest -q --no-header \
+            tests/test_persistence.py \
+            tests/test_branch_isolation.py \
+            tests/test_branch_persistence.py \
+            tests/test_inner_checkpoints.py \
+            tests/test_replay.py 2>&1 | tee pg.log
+          if grep -qE '[0-9]+ skipped' pg.log; then
+            echo "::error::Postgres-backed tests were skipped; persistence was not verified"
+            exit 1
+          fi
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-report
+          path: pytest-report.xml
+
+  benchmark-schema:
+    name: benchmark schema + published results
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - run: uv sync --frozen
+
+      - name: Validate the committed benchmark protocol
+        run: |
+          cd backend
+          uv run pytest tests/test_experiment.py -q --no-header
+
+      - name: Re-derive every published summary from its raw rows
+        # A published number must be recomputable from the committed
+        # trial rows. If it is not, the evidence does not support it.
+        run: |
+          uv run python - <<'PY'
+          import json, sys
+          from pathlib import Path
+          sys.path.insert(0, "backend")
+          from app.meta_harness import experiment as exp
+
+          results = sorted(p for p in Path("benchmarks/results").glob("*") if p.is_dir())
+          if not results:
+              print("no published results yet — nothing to verify")
+              raise SystemExit(0)
+
+          failed = False
+          for d in results:
+              summary = json.loads((d / "summary.json").read_text())
+              env = json.loads((d / "environment.json").read_text())
+              recomputed = exp.summarize(
+                  baseline_rows=exp.read_rows(d / "baseline-results.jsonl"),
+                  candidate_rows=exp.read_rows(d / "candidate-results.jsonl"),
+                  task_ids=[t["task_id"] for t in env["tasks"]],
+                  baseline_label=summary["baseline_label"],
+                  candidate_label=summary["candidate_label"],
+              )
+              for key in (
+                  "baseline_passes", "baseline_trials",
+                  "candidate_passes", "candidate_trials",
+                  "absolute_percentage_point_delta",
+              ):
+                  if recomputed[key] != summary[key]:
+                      print(f"::error::{d}: {key} {summary[key]!r} != recomputed {recomputed[key]!r}")
+                      failed = True
+              print(f"{d.name}: verified")
+          raise SystemExit(1 if failed else 0)
+          PY
+
+  hygiene:
+    name: repository hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No committed .env
+        run: |
+          if git ls-files | grep -qE '(^|/)\.env$'; then
+            echo "::error::a .env file is tracked"; exit 1
+          fi
+
+      - name: No API key patterns
+        run: |
+          if git grep -nE 'sk-ant-[A-Za-z0-9_-]{20,}' -- . ':(exclude).github/workflows/*'; then
+            echo "::error::an Anthropic API key pattern is committed"; exit 1
+          fi
+
+      - name: No generated run or benchmark artifacts
+        run: |
+          if git ls-files | grep -qE '^(runs|benchmark-results)/'; then
+            echo "::error::generated run artifacts are tracked"; exit 1
+          fi
+
+      - name: Only committed harnesses under agents/
+        run: |
+          extra="$(git ls-files agents/ | grep -vE 'agents/(__init__|baseline)\.py' || true)"
+          if [ -n "$extra" ]; then
+            echo "::error::proposer-generated candidates are tracked: $extra"; exit 1
+          fi
+
+      - name: No tool caches or OS junk
+        run: |
+          if git ls-files | grep -qE '(^|/)(\.DS_Store|__pycache__|graphify-out)(/|$)'; then
+            echo "::error::generated caches are tracked"; exit 1
+          fi
