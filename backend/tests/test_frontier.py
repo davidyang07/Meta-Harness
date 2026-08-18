@@ -7,6 +7,7 @@ from app.meta_harness.frontier import (
     build_frontier_val,
     compute_pareto,
     dominates,
+    frontier_entry,
     pareto_names,
 )
 
@@ -80,3 +81,90 @@ def test_build_frontier_val_full_shape():
     assert frontier["_pareto_names"] == ["a"]
     assert frontier["_best"]["name"] == "a"
     assert frontier["per_task"] == per_task
+
+
+# ── measured-metrics integration (unknown tokens must not win) ────────
+
+
+def test_frontier_entry_reads_measured_mean_tokens():
+    entry = frontier_entry(
+        "cand",
+        {
+            "accuracy": 0.8,
+            "mean_total_tokens_per_trial": 24800.0,
+            "metrics_source": "measured",
+        },
+    )
+    assert entry == {
+        "name": "cand",
+        "accuracy": 0.8,
+        "avg_tokens": 24800.0,
+        "metrics_source": "measured",
+    }
+
+
+def test_frontier_entry_falls_back_to_median_then_unknown():
+    with_median = frontier_entry(
+        "c", {"accuracy": 0.5, "median_total_tokens_per_trial": 999}
+    )
+    assert with_median["avg_tokens"] == 999.0
+
+    unknown = frontier_entry("c", {"accuracy": 0.5})
+    assert unknown["avg_tokens"] is None
+
+
+def test_unmeasured_candidate_never_dominates_on_cost():
+    """avg_tokens=None means 'not measured', not 'free'."""
+    unmeasured = {"name": "unmeasured", "accuracy": 0.8, "avg_tokens": None}
+    measured = {"name": "measured", "accuracy": 0.8, "avg_tokens": 24000}
+    assert not dominates(unmeasured, measured)
+    assert not dominates(measured, unmeasured)
+
+    # A strictly more accurate candidate still dominates the unmeasured one.
+    better = {"name": "better", "accuracy": 0.9, "avg_tokens": 40000}
+    assert dominates(better, unmeasured)
+    assert not dominates(unmeasured, better)
+
+
+def test_best_candidate_prefers_measured_on_an_accuracy_tie():
+    cands = [
+        {"name": "unmeasured", "accuracy": 0.85, "avg_tokens": None},
+        {"name": "measured", "accuracy": 0.85, "avg_tokens": 30000},
+    ]
+    assert best_candidate(cands)["name"] == "measured"
+
+
+def test_frontier_labels_its_metrics_source():
+    measured = build_frontier_val(
+        1,
+        [
+            {"name": "a", "accuracy": 0.8, "avg_tokens": 1, "metrics_source": "measured"},
+            {"name": "b", "accuracy": 0.7, "avg_tokens": 2, "metrics_source": "measured"},
+        ],
+        {},
+    )
+    assert measured["metrics_source"] == "measured"
+
+    mixed = build_frontier_val(
+        1,
+        [
+            {"name": "a", "accuracy": 0.8, "avg_tokens": 1, "metrics_source": "measured"},
+            {"name": "b", "accuracy": 0.7, "avg_tokens": 2, "metrics_source": "mock"},
+        ],
+        {},
+    )
+    assert mixed["metrics_source"] == "mixed"
+
+
+def test_baseline_can_sit_on_the_frontier():
+    """A cheap baseline is Pareto-optimal even when a candidate scores higher."""
+    frontier = build_frontier_val(
+        1,
+        [
+            {"name": "baseline", "accuracy": 0.6, "avg_tokens": 10_000},
+            {"name": "evolved", "accuracy": 0.8, "avg_tokens": 30_000},
+        ],
+        {},
+    )
+    assert set(frontier["_pareto_names"]) == {"baseline", "evolved"}
+    assert frontier["_best"]["name"] == "evolved"
