@@ -9,14 +9,24 @@ concurrency over (task × trial) tuples — explicitly **not**
 ``asyncio.gather`` over branches that may interrupt (per Appendix A
 §A.4 Gotcha 2). Inner-loop trials don't use ``interrupt()``, so
 gather over them is safe.
+
+Two invariants this module enforces:
+
+1. **Every filesystem write is thread-scoped.** Node bodies resolve
+   ``thread_id`` from the LangGraph config and write through
+   ``runs.py``'s thread-scoped helpers, so two branches forked from the
+   same checkpoint never share a pending-eval handoff, frontier,
+   evolution log, proposer session, or candidate directory.
+2. **The baseline is a measured candidate, not an implicit zero.** The
+   run's first benchmark evaluates ``agents/baseline.py`` under exactly
+   the same task/trial protocol as evolved candidates, so every reported
+   delta is relative to a real measurement.
 """
 
 from __future__ import annotations
 
 import asyncio
-import importlib
 import json
-import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,14 +35,15 @@ from typing import Any
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
+from app.meta_harness import candidates as cand_mod
 from app.meta_harness import frontier as fr
 from app.meta_harness import memory as mem
+from app.meta_harness import metrics as met
 from app.meta_harness import proposer as prp
 from app.meta_harness import runs as runs_mod
-from app.meta_harness.harness import CodingAgentHarness
 from app.meta_harness.inner import run_inner_loop
 from app.meta_harness.sandbox import sandbox_for
-from app.meta_harness.state import MetaHarnessState
+from app.meta_harness.state import BASELINE_CANDIDATE_NAME, MetaHarnessState
 from app.streaming import emit_run_event
 
 
@@ -68,15 +79,40 @@ def _emit(
         pass
 
 
+def baseline_candidate(run_id: str) -> dict[str, Any]:
+    """The measured root of every run's search tree.
+
+    ``agents/baseline.py`` is committed and immutable, so it needs no
+    per-branch source snapshot: ``source_path`` stays ``None`` and the
+    loader falls back to the ordinary module import.
+    """
+    return {
+        "name": BASELINE_CANDIDATE_NAME,
+        "import_path": "agents.baseline:BaselineHarness",
+        "source_path": None,
+        "parent": None,
+        "hypothesis": "immutable starting harness (no overrides)",
+        "axis": "baseline",
+        "expected_score_delta": None,
+        "iteration": 0,
+        "status": "pending",
+        "scores": None,
+        "delta": None,
+        "cost_usd": None,
+    }
+
+
 class OuterLoopRunner:
     """Builds the outer LangGraph for one run.
 
     Flags:
     - ``mock_proposer``: use ``proposer.mock_propose`` (step 5).
     - ``mock_bench``: skip the inner loop and synthesize scores per
-      candidate (fast outer-loop testing).
+      candidate. Synthesized results are always tagged
+      ``metrics_source="mock"``.
     - ``checkpointer``: ``AsyncPostgresSaver`` (step 7) or ``None`` for
-      in-memory.
+      in-memory. When set, it is threaded into every inner-loop trial so
+      inner graph transitions are checkpointed too.
     """
 
     def __init__(
@@ -92,6 +128,7 @@ class OuterLoopRunner:
         skill_path: Path | None = None,
         checkpointer: Any = None,
         memory_store: Any = None,
+        checkpoint_inner: bool = True,
     ) -> None:
         self.run_dir = run_dir
         self.repo_root = repo_root
@@ -103,6 +140,7 @@ class OuterLoopRunner:
         self.skill_path = skill_path
         self.checkpointer = checkpointer
         self.memory_store = memory_store
+        self.checkpoint_inner = checkpoint_inner
 
     # ── propose ───────────────────────────────────────────────────────
 
@@ -111,12 +149,14 @@ class OuterLoopRunner:
         state: MetaHarnessState,
         config: RunnableConfig = None,
     ) -> dict[str, Any]:
+        thread_id = _thread_id(state, config)
         iteration = state["iteration"] + 1
         parent_name = state.get("best_candidate")
         if self.mock_proposer:
             payload = await asyncio.to_thread(
                 prp.mock_propose,
                 run_dir=self.run_dir,
+                thread_id=thread_id,
                 iteration=iteration,
                 parent_name=parent_name,
                 repo_root=self.repo_root,
@@ -147,6 +187,7 @@ class OuterLoopRunner:
             payload = await asyncio.to_thread(
                 prp.claude_propose,
                 run_dir=self.run_dir,
+                thread_id=thread_id,
                 iteration=iteration,
                 parent_name=parent_name,
                 repo_root=self.repo_root,
@@ -155,14 +196,35 @@ class OuterLoopRunner:
             )
         new_candidates = list(state.get("candidates") or [])
         for c in payload["candidates"]:
+            label = str(c["name"])
             try:
-                candidate_name = runs_mod.validate_artifact_name(c["name"], kind="candidate")
+                runs_mod.validate_artifact_name(label, kind="candidate")
+                candidate_name = runs_mod.qualify_candidate_name(
+                    label, thread_id, state["run_id"]
+                )
             except ValueError as exc:
                 raise ValueError(f"invalid proposer candidate: {exc}") from exc
+
+            # Snapshot the authored source into this branch's private
+            # directory before anything benchmarks it. A concurrently
+            # running fork can rewrite agents/<label>.py at any moment;
+            # the snapshot is what this branch actually evaluates.
+            source_path = await asyncio.to_thread(
+                cand_mod.snapshot_candidate_source,
+                repo_root=self.repo_root,
+                run_dir=self.run_dir,
+                thread_id=thread_id,
+                candidate_name=candidate_name,
+                label=label,
+            )
+
             new_candidates.append(
                 {
                     "name": candidate_name,
+                    "label": label,
                     "import_path": c["import_path"],
+                    "source_path": str(source_path),
+                    "source_sha256": cand_mod.source_sha256(source_path),
                     "parent": c.get("parent"),
                     "hypothesis": c.get("hypothesis", ""),
                     "axis": c.get("axis", "exploitation"),
@@ -180,6 +242,7 @@ class OuterLoopRunner:
                 "candidate-created",
                 {
                     "candidate": candidate_name,
+                    "label": label,
                     "parent_candidate_name": c.get("parent"),
                     "import_path": c["import_path"],
                     "parent": c.get("parent"),
@@ -215,23 +278,12 @@ class OuterLoopRunner:
         config: RunnableConfig = None,
     ) -> dict[str, Any]:
         candidate = state["candidates"][-1]
-        if str(self.repo_root) not in sys.path:
-            sys.path.insert(0, str(self.repo_root))
-        module_path, _, class_name = candidate["import_path"].partition(":")
         error: str | None = None
         try:
-            # Pop stale module cache entry before importing. Mock candidate
-            # stubs are rewritten on each iteration; a prior run or test may
-            # have deleted the .py file while leaving an orphaned sys.modules
-            # entry pointing at a now-missing path. Fresh import_module is
-            # the safest approach.
-            sys.modules.pop(module_path, None)
-            importlib.invalidate_caches()
-            mod = await asyncio.to_thread(importlib.import_module, module_path)
-            cls = getattr(mod, class_name)
-            assert issubclass(cls, CodingAgentHarness) or cls.__name__.startswith(
-                "MockHarness"
-            ), f"{candidate['import_path']} is not a CodingAgentHarness subclass"
+            cls = await asyncio.to_thread(
+                cand_mod.load_harness_class, candidate, repo_root=self.repo_root
+            )
+            cand_mod.assert_is_harness(cls, import_path=candidate["import_path"])
             candidate["status"] = "pending"
             valid = True
         except Exception as exc:  # noqa: BLE001 — record any error
@@ -261,11 +313,193 @@ class OuterLoopRunner:
 
     # ── benchmark ─────────────────────────────────────────────────────
 
+    def _task_dirs(self) -> list[Path]:
+        return sorted(
+            d
+            for d in self.eval_tasks_dir.iterdir()
+            if d.is_dir() and (d / "task.json").exists()
+        )
+
+    async def evaluate_candidate(
+        self,
+        candidate: dict[str, Any],
+        *,
+        thread_id: str,
+        run_id: str,
+    ) -> dict[str, Any]:
+        """Benchmark one candidate over (tasks × trials) and persist the result.
+
+        Returns the ``eval-result.json`` payload. Both the mock and the
+        measured path produce the same schema; only ``metrics_source``
+        differs, and callers must not mix the two.
+        """
+        task_dirs = self._task_dirs()
+        n_tasks = len(task_dirs)
+
+        if self.mock_bench:
+            eval_result = self._mock_eval_result(
+                candidate, task_dirs=task_dirs, thread_id=thread_id
+            )
+        else:
+            eval_result = await self._measured_eval_result(
+                candidate, task_dirs=task_dirs, thread_id=thread_id, run_id=run_id
+            )
+
+        eval_result["n_tasks"] = n_tasks
+        eval_result["n_trials_per_task"] = self.trials
+        eval_result["candidate"] = candidate["name"]
+        eval_result["thread_id"] = thread_id
+        eval_result["timestamp"] = _now()
+
+        cand_dir = runs_mod.candidate_dir(self.run_dir, thread_id, candidate["name"])
+        runs_mod.write_json_atomic(cand_dir / "eval-result.json", eval_result)
+        return eval_result
+
+    def _mock_eval_result(
+        self,
+        candidate: dict[str, Any],
+        *,
+        task_dirs: list[Path],
+        thread_id: str,
+    ) -> dict[str, Any]:
+        """Deterministic synthetic scores, explicitly marked as mock.
+
+        The baseline starts lower than evolved candidates so the mock
+        demo shows a visible-but-honest progression; nothing here is
+        ever presented as a measurement.
+        """
+        iteration = int(candidate.get("iteration") or 0)
+        base_acc = 0.60
+        target_acc = min(0.95, base_acc + iteration * 0.10)
+        per_task: dict[str, Any] = {}
+        trial_rows: list[dict[str, Any]] = []
+        total_passes = 0
+        total_obs = 0
+        for td in task_dirs:
+            trials = [True] * int(round(self.trials * target_acc))
+            trials += [False] * (self.trials - len(trials))
+            per_task[td.name] = {
+                "pass_rate": sum(trials) / len(trials) if trials else 0.0,
+                "trials": trials,
+            }
+            for idx, passed in enumerate(trials, start=1):
+                trial_rows.append(
+                    met.mock_trial_metrics(
+                        task_id=td.name,
+                        trial=idx,
+                        passed=passed,
+                        iteration=iteration,
+                    )
+                )
+            total_passes += sum(trials)
+            total_obs += len(trials)
+
+        accuracy = total_passes / total_obs if total_obs else 0.0
+        aggregate = met.aggregate_trials(trial_rows, metrics_source="mock")
+        return {
+            "accuracy": round(accuracy, 4),
+            "per_task": per_task,
+            "trials": trial_rows,
+            "metrics_source": "mock",
+            "_mock_bench": True,
+            **aggregate,
+        }
+
+    async def _measured_eval_result(
+        self,
+        candidate: dict[str, Any],
+        *,
+        task_dirs: list[Path],
+        thread_id: str,
+        run_id: str,
+    ) -> dict[str, Any]:
+        """Run the real inner loop over (tasks × trials) and measure it."""
+        harness_class = await asyncio.to_thread(
+            cand_mod.load_harness_class, candidate, repo_root=self.repo_root
+        )
+
+        work = [
+            (td, json.loads((td / "task.json").read_text()), t)
+            for td in task_dirs
+            for t in range(1, self.trials + 1)
+        ]
+        sem = asyncio.Semaphore(self.bench_workers)
+        inner_checkpointer = self.checkpointer if self.checkpoint_inner else None
+
+        async def _one_trial(td: Path, spec: dict, trial_idx: int) -> dict[str, Any]:
+            task_id = td.name
+            trace_dir = (
+                runs_mod.candidate_dir(self.run_dir, thread_id, candidate["name"])
+                / "traces"
+                / f"{task_id}-trial-{trial_idx}"
+            )
+            inner_thread_id = met.inner_thread_id(
+                run_id=run_id,
+                thread_id=thread_id,
+                candidate=candidate["name"],
+                task_id=task_id,
+                trial=trial_idx,
+            )
+            started = time.monotonic()
+            async with sem:
+                harness = harness_class()
+                usage = met.UsageRecorder()
+                met.instrument_harness(harness, usage)
+                with sandbox_for(td / "workspace") as sandbox:
+                    final = await run_inner_loop(
+                        harness,
+                        task_dict=spec,
+                        workspace=sandbox,
+                        trace_dir=trace_dir,
+                        thread_id=inner_thread_id,
+                        checkpointer=inner_checkpointer,
+                    )
+            row = usage.to_trial_row(
+                task_id=task_id,
+                trial=trial_idx,
+                passed=(final.get("score") or 0.0) >= 1.0,
+                score=float(final.get("score") or 0.0),
+                wall_time_s=round(time.monotonic() - started, 3),
+            )
+            row["inner_thread_id"] = inner_thread_id
+            runs_mod.write_json_atomic(trace_dir / "metrics.json", row)
+            return row
+
+        trial_rows = await asyncio.gather(
+            *[_one_trial(td, spec, t) for td, spec, t in work],
+            return_exceptions=False,
+        )
+
+        per_task: dict[str, Any] = {}
+        for td in task_dirs:
+            rows = sorted(
+                (r for r in trial_rows if r["task_id"] == td.name),
+                key=lambda r: r["trial"],
+            )
+            outcomes = [bool(r["passed"]) for r in rows]
+            per_task[td.name] = {
+                "pass_rate": (sum(outcomes) / len(outcomes)) if outcomes else 0.0,
+                "trials": outcomes,
+            }
+
+        total_passes = sum(1 for r in trial_rows if r["passed"])
+        accuracy = total_passes / len(trial_rows) if trial_rows else 0.0
+        aggregate = met.aggregate_trials(list(trial_rows), metrics_source="measured")
+        return {
+            "accuracy": round(accuracy, 4),
+            "per_task": per_task,
+            "trials": list(trial_rows),
+            "metrics_source": "measured",
+            "_mock_bench": False,
+            **aggregate,
+        }
+
     async def benchmark(
         self,
         state: MetaHarnessState,
         config: RunnableConfig = None,
     ) -> dict[str, Any]:
+        thread_id = _thread_id(state, config)
         candidate = state["candidates"][-1]
         if candidate["status"] == "smoke_failed":
             _emit(
@@ -281,99 +515,13 @@ class OuterLoopRunner:
             )
             return {"candidates": state["candidates"]}
 
-        task_dirs = sorted(
-            d
-            for d in self.eval_tasks_dir.iterdir()
-            if d.is_dir() and (d / "task.json").exists()
+        eval_result = await self.evaluate_candidate(
+            candidate, thread_id=thread_id, run_id=state["run_id"]
         )
-        n_tasks = len(task_dirs)
-        per_task: dict[str, dict[str, Any]] = {}
-        total_passes = 0
-        total_obs = 0
-
-        if self.mock_bench:
-            base_acc = 0.60
-            bump_per_iter = 0.20
-            iteration = state["iteration"]
-            target_acc = min(0.95, base_acc + (iteration - 1) * bump_per_iter)
-            for td in task_dirs:
-                trials = [True] * int(round(self.trials * target_acc))
-                trials += [False] * (self.trials - len(trials))
-                pr = sum(trials) / len(trials) if trials else 0.0
-                per_task[td.name] = {"pass_rate": pr, "trials": trials}
-                total_passes += sum(trials)
-                total_obs += len(trials)
-            avg_tokens = 24000 + (iteration * 800)
-            wall_time_s = 0.05 * n_tasks * self.trials
-        else:
-            module_path, _, class_name = candidate["import_path"].partition(":")
-            mod = importlib.import_module(module_path)
-            harness_class = getattr(mod, class_name)
-
-            started = time.monotonic()
-            work = [
-                (td, json.loads((td / "task.json").read_text()), t)
-                for td in task_dirs
-                for t in range(1, self.trials + 1)
-            ]
-            results: dict[str, list[bool]] = {td.name: [False] * self.trials for td in task_dirs}
-
-            sem = asyncio.Semaphore(self.bench_workers)
-
-            async def _one_trial(td: Path, spec: dict, trial_idx: int) -> tuple[str, int, bool]:
-                task_id = td.name
-                trace_dir = (
-                    runs_mod.candidate_dir(self.run_dir, candidate["name"])
-                    / "traces"
-                    / f"{task_id}-trial-{trial_idx}"
-                )
-                async with sem:
-                    harness = harness_class()
-                    with sandbox_for(td / "workspace") as sandbox:
-                        final = await run_inner_loop(
-                            harness,
-                            task_dict=spec,
-                            workspace=sandbox,
-                            trace_dir=trace_dir,
-                            thread_id=(
-                                f"bench-{candidate['name']}-{task_id}-trial-{trial_idx}"
-                            ),
-                        )
-                return task_id, trial_idx, (final.get("score") or 0.0) >= 1.0
-
-            trial_results = await asyncio.gather(
-                *[_one_trial(td, spec, t) for td, spec, t in work],
-                return_exceptions=False,
-            )
-            for task_id, trial_idx, passed in trial_results:
-                results[task_id][trial_idx - 1] = passed
-
-            for task_id, ts in results.items():
-                pr = sum(ts) / len(ts)
-                per_task[task_id] = {"pass_rate": pr, "trials": ts}
-                total_passes += sum(ts)
-                total_obs += len(ts)
-            avg_tokens = 0
-            wall_time_s = round(time.monotonic() - started, 2)
-
-        accuracy = total_passes / total_obs if total_obs else 0.0
-        eval_result = {
-            "candidate": candidate["name"],
-            "n_tasks": n_tasks,
-            "n_trials_per_task": self.trials,
-            "accuracy": round(accuracy, 4),
-            "per_task": per_task,
-            "tokens": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-            "cost_usd": 0.0,
-            "wall_time_s": wall_time_s,
-            "avg_tokens": avg_tokens,
-            "_mock_bench": self.mock_bench,
-        }
-        cand_dir = runs_mod.candidate_dir(self.run_dir, candidate["name"])
-        (cand_dir / "eval-result.json").write_text(json.dumps(eval_result, indent=2))
 
         candidate["scores"] = eval_result
         candidate["status"] = "evaluated"
+        candidate["cost_usd"] = eval_result.get("total_cost_usd")
         _emit(
             state,
             config,
@@ -390,7 +538,8 @@ class OuterLoopRunner:
                 },
                 "per_task": eval_result["per_task"],
                 "tokens": eval_result["tokens"],
-                "cost_usd": eval_result["cost_usd"],
+                "cost_usd": eval_result.get("total_cost_usd"),
+                "metrics_source": eval_result["metrics_source"],
                 "hypothesis": candidate.get("hypothesis", ""),
                 "axis": candidate.get("axis"),
             },
@@ -415,14 +564,11 @@ class OuterLoopRunner:
         state: MetaHarnessState,
         config: RunnableConfig = None,
     ) -> dict[str, Any]:
+        thread_id = _thread_id(state, config)
         candidate = state["candidates"][-1]
         scored_statuses = {"evaluated", "accepted", "rejected"}
         evaluated = [
-            {
-                "name": c["name"],
-                "accuracy": (c["scores"] or {}).get("accuracy", 0.0),
-                "avg_tokens": (c["scores"] or {}).get("avg_tokens", 0),
-            }
+            fr.frontier_entry(c["name"], c["scores"] or {})
             for c in state["candidates"]
             if c["status"] in scored_statuses and c.get("scores")
         ]
@@ -439,29 +585,38 @@ class OuterLoopRunner:
                     }
 
         frontier = fr.build_frontier_val(state["iteration"], evaluated, per_task_bests)
-        runs_mod.write_frontier(self.run_dir, frontier)
+        frontier["thread_id"] = thread_id
+        runs_mod.write_frontier(self.run_dir, thread_id, frontier)
 
+        # Deltas compare against the *measured* accuracy of the prior
+        # best candidate — which, on iteration 1, is the benchmarked
+        # baseline rather than an implicit zero.
         prev_best = state.get("best_candidate")
-        prev_best_acc = 0.0
+        prev_best_acc: float | None = None
         for c in state["candidates"]:
             if c["name"] == prev_best:
-                prev_best_acc = (c["scores"] or {}).get("accuracy", 0.0)
+                prev_best_acc = (c["scores"] or {}).get("accuracy")
                 break
         cand_acc = (candidate["scores"] or {}).get("accuracy", 0.0)
-        delta = cand_acc - prev_best_acc if prev_best else cand_acc
+        baseline_acc = prev_best_acc if prev_best_acc is not None else 0.0
+        delta = cand_acc - baseline_acc
         candidate["delta"] = round(delta, 4)
         accepted = candidate["status"] == "evaluated" and (
-            prev_best is None or cand_acc > prev_best_acc
+            prev_best_acc is None or cand_acc > prev_best_acc
         )
         candidate["status"] = "accepted" if accepted else "rejected"
 
         runs_mod.write_status(
             self.run_dir,
+            thread_id,
             candidate["name"],
             {
                 "candidate": candidate["name"],
+                "thread_id": thread_id,
                 "accepted": accepted,
                 "parent": candidate.get("parent"),
+                "compared_against": prev_best,
+                "compared_against_accuracy": prev_best_acc,
                 "delta": candidate["delta"],
                 "reason": "accepted" if accepted else "regression",
             },
@@ -493,25 +648,11 @@ class OuterLoopRunner:
             except Exception:  # noqa: BLE001 — memory write is best-effort
                 pass
 
-        row = {
-            "iteration": state["iteration"],
-            "candidate": candidate["name"],
-            "import_path": candidate["import_path"],
-            "parent_candidate_name": candidate.get("parent"),
-            "axis": candidate.get("axis"),
-            "hypothesis": candidate.get("hypothesis", ""),
-            "scores": {
-                "accuracy": cand_acc,
-                "per_task": (candidate["scores"] or {}).get("per_task", {}),
-            },
-            "delta": candidate["delta"],
-            "outcome": (
-                f"{cand_acc:.1%} ({candidate['delta']:+.1%})" if cand_acc else "failed"
-            ),
-            "tokens": (candidate["scores"] or {}).get("avg_tokens", 0),
-            "cost_usd": candidate.get("cost_usd") or 0.0,
-        }
-        runs_mod.append_evolution_summary(self.run_dir, row)
+        runs_mod.append_evolution_summary(
+            self.run_dir,
+            thread_id,
+            _evolution_row(candidate, iteration=state["iteration"]),
+        )
 
         new_best = candidate["name"] if accepted else prev_best
         new_frontier_names = frontier.get("_pareto_names", [])
@@ -526,9 +667,7 @@ class OuterLoopRunner:
                 "frontier": new_frontier_names,
                 "best_candidate": new_best,
                 "best_score": (
-                    (candidate["scores"] or {}).get("accuracy")
-                    if new_best == candidate["name"]
-                    else prev_best_acc
+                    cand_acc if new_best == candidate["name"] else prev_best_acc
                 ),
                 "status": (
                     "best"
@@ -599,6 +738,93 @@ class OuterLoopRunner:
             else g.compile()
         )
 
+    # ── baseline ──────────────────────────────────────────────────────
+
+    async def benchmark_baseline(self, *, run_id: str) -> dict[str, Any]:
+        """Measure ``agents/baseline.py`` before any candidate is proposed.
+
+        Returns the baseline candidate dict with ``scores`` populated.
+        This runs on the run's root thread: a fork inherits the measured
+        baseline through checkpoint state rather than re-paying for it.
+        """
+        candidate = baseline_candidate(run_id)
+        eval_result = await self.evaluate_candidate(
+            candidate, thread_id=run_id, run_id=run_id
+        )
+        candidate["scores"] = eval_result
+        candidate["status"] = "evaluated"
+        candidate["delta"] = 0.0
+        candidate["cost_usd"] = eval_result.get("total_cost_usd")
+
+        runs_mod.write_status(
+            self.run_dir,
+            run_id,
+            candidate["name"],
+            {
+                "candidate": candidate["name"],
+                "thread_id": run_id,
+                "accepted": True,
+                "parent": None,
+                "compared_against": None,
+                "compared_against_accuracy": None,
+                "delta": 0.0,
+                "reason": "measured baseline (search root)",
+            },
+        )
+        runs_mod.append_evolution_summary(
+            self.run_dir, run_id, _evolution_row(candidate, iteration=0)
+        )
+        return candidate
+
+
+def _evolution_row(candidate: dict[str, Any], *, iteration: int) -> dict[str, Any]:
+    """Project a candidate into one ``evolution_summary.jsonl`` row."""
+    scores = candidate.get("scores") or {}
+    acc = scores.get("accuracy", 0.0)
+    delta = candidate.get("delta")
+    return {
+        "iteration": iteration,
+        "candidate": candidate["name"],
+        "label": candidate.get("label", candidate["name"]),
+        "import_path": candidate["import_path"],
+        "source_sha256": candidate.get("source_sha256"),
+        "parent_candidate_name": candidate.get("parent"),
+        "axis": candidate.get("axis"),
+        "hypothesis": candidate.get("hypothesis", ""),
+        "scores": {
+            "accuracy": acc,
+            "per_task": scores.get("per_task", {}),
+        },
+        "delta": delta,
+        "outcome": (
+            f"{acc:.1%} ({delta:+.1%})" if delta is not None else f"{acc:.1%}"
+        ),
+        "tokens": scores.get("mean_total_tokens_per_trial"),
+        "cost_usd": scores.get("total_cost_usd"),
+        "metrics_source": scores.get("metrics_source"),
+    }
+
+
+def initial_state(
+    *, run_id: str, budget: int, seed_candidates: list[dict[str, Any]] | None = None
+) -> MetaHarnessState:
+    """Build the outer graph's initial state.
+
+    ``seed_candidates`` normally holds exactly the measured baseline, so
+    the very first proposed candidate is compared against a real number.
+    """
+    seeds = list(seed_candidates or [])
+    best = seeds[-1]["name"] if seeds else None
+    return {
+        "run_id": run_id,
+        "iteration": 0,
+        "budget_remaining": budget,
+        "candidates": seeds,
+        "frontier": [c["name"] for c in seeds],
+        "best_candidate": best,
+        "proposer_prior": "",
+    }
+
 
 async def run_outer_loop(
     *,
@@ -613,6 +839,7 @@ async def run_outer_loop(
     skill_path: Path | None = None,
     checkpointer: Any = None,
     memory_store: Any = None,
+    evaluate_baseline: bool = True,
 ) -> MetaHarnessState:
     """Run the outer loop end-to-end (async). Returns the final state."""
     runner = OuterLoopRunner(
@@ -630,23 +857,21 @@ async def run_outer_loop(
     runs_mod.write_manifest(
         run_dir,
         run_id=run_dir.name,
+        thread_id=run_dir.name,
         budget=budget,
         trials=trials,
         mock_proposer=mock_proposer,
         mock_bench=mock_bench,
+        metrics_source="mock" if mock_bench else "measured",
     )
-    initial: MetaHarnessState = {
-        "run_id": run_dir.name,
-        "iteration": 0,
-        "budget_remaining": budget,
-        "candidates": [],
-        "frontier": [],
-        "best_candidate": None,
-        "proposer_prior": "",
-    }
+
+    seeds: list[dict[str, Any]] = []
+    if evaluate_baseline:
+        seeds.append(await runner.benchmark_baseline(run_id=run_dir.name))
+
     graph = runner.build()
     final = await graph.ainvoke(
-        initial,
+        initial_state(run_id=run_dir.name, budget=budget, seed_candidates=seeds),
         config={"configurable": {"thread_id": run_dir.name}, "recursion_limit": 200},
     )
     return final  # type: ignore[return-value]
@@ -699,3 +924,12 @@ async def resume_outer_loop(
     # ``None`` input + existing thread_id → resume from last checkpoint.
     final = await graph.ainvoke(None, config=config)
     return final  # type: ignore[return-value]
+
+
+__all__ = [
+    "OuterLoopRunner",
+    "baseline_candidate",
+    "initial_state",
+    "resume_outer_loop",
+    "run_outer_loop",
+]
