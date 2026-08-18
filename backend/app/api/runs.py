@@ -17,7 +17,8 @@ from pydantic import BaseModel, Field
 
 from app.meta_harness import runs as runs_mod
 from app.meta_harness.branches import cancel_branch, list_branches
-from app.meta_harness.outer import OuterLoopRunner
+from app.meta_harness.outer import OuterLoopRunner, initial_state
+from app.meta_harness.state import BASELINE_CANDIDATE_NAME
 from app.streaming import emit_run_event
 
 
@@ -39,6 +40,7 @@ class RunRecord:
     current_iteration: int
     run_dir: Path
     graph: Any
+    runner: Any = None
     task: asyncio.Task[Any] | None = None
     error: str | None = None
     checkpointer: Any = None
@@ -110,7 +112,7 @@ def _resolve_skill_path(
     return resolved
 
 
-def _build_graph(
+def _build_runner(
     *,
     run_dir: Path,
     repo_root: Path,
@@ -122,8 +124,8 @@ def _build_graph(
     skill_path: Path | None,
     checkpointer: Any,
     memory_store: Any = None,
-) -> Any:
-    runner = OuterLoopRunner(
+) -> OuterLoopRunner:
+    return OuterLoopRunner(
         run_dir=run_dir,
         repo_root=repo_root,
         eval_tasks_dir=eval_tasks_dir,
@@ -135,7 +137,6 @@ def _build_graph(
         checkpointer=checkpointer,
         memory_store=memory_store,
     )
-    return runner.build()
 
 
 def _manifest_path(run_dir: Path) -> Path:
@@ -152,49 +153,23 @@ def _read_manifest(run_dir: Path) -> dict[str, Any] | None:
 def _write_manifest_status(run_dir: Path, **updates: Any) -> None:
     manifest = _read_manifest(run_dir) or {}
     manifest.update(updates)
-    _manifest_path(run_dir).write_text(json.dumps(manifest, indent=2, default=str))
+    runs_mod.write_json_atomic(_manifest_path(run_dir), manifest)
 
 
 def _read_summary_rows(run_dir: Path, *, limit: int = 5) -> list[dict[str, Any]]:
-    path = run_dir / "evolution_summary.jsonl"
-    if not path.exists():
-        return []
-    rows = [
-        json.loads(line)
-        for line in path.read_text().splitlines()
-        if line.strip()
-    ]
-    return rows[-limit:]
+    """Most recent evolution rows across every branch in the run."""
+    rows = runs_mod.aggregate_evolution_rows(run_dir)
+    return rows[-limit:] if limit else rows
 
 
 def _read_all_summary_rows(run_dir: Path) -> list[dict[str, Any]]:
-    path = run_dir / "evolution_summary.jsonl"
-    if not path.exists():
-        return []
-    return [
-        json.loads(line)
-        for line in path.read_text().splitlines()
-        if line.strip()
-    ]
+    return runs_mod.aggregate_evolution_rows(run_dir)
 
 
 def _candidate_artifact_dir(run_dir: Path, candidate_name: str) -> Path:
-    try:
-        safe_name = runs_mod.validate_artifact_name(candidate_name, kind="candidate")
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="candidate not found",
-        ) from exc
-    candidate_dir = (run_dir / "candidates" / safe_name).resolve()
-    try:
-        candidate_dir.relative_to((run_dir / "candidates").resolve())
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="candidate not found",
-        ) from exc
-    if not candidate_dir.exists():
+    """Locate a candidate's artifact dir in whichever branch owns it."""
+    candidate_dir = runs_mod.find_candidate_dir(run_dir, candidate_name)
+    if candidate_dir is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="candidate not found",
@@ -213,9 +188,24 @@ def _candidate_row(run_dir: Path, candidate_name: str) -> dict[str, Any] | None:
     )
 
 
-def _agent_source_path(repo_root: Path, candidate_name: str) -> Path:
-    safe_name = runs_mod.validate_artifact_name(candidate_name, kind="candidate")
-    return repo_root / "agents" / f"{safe_name}.py"
+def _candidate_source(
+    *, repo_root: Path, run_dir: Path, candidate_name: str
+) -> tuple[Path | None, str]:
+    """Resolve a candidate's source file and the label to show in the diff.
+
+    Prefers the branch-private snapshot — that is the source the branch
+    actually benchmarked, and it cannot have been rewritten by a
+    concurrently running branch. Falls back to the committed baseline.
+    """
+    snapshot = runs_mod.find_candidate_source(run_dir, candidate_name)
+    if snapshot is not None:
+        return snapshot, f"agents/{candidate_name}.py"
+    try:
+        safe = runs_mod.validate_artifact_name(candidate_name, kind="candidate")
+    except ValueError:
+        return None, f"agents/{candidate_name}.py"
+    committed = repo_root / "agents" / f"{safe}.py"
+    return (committed if committed.is_file() else None), f"agents/{safe}.py"
 
 
 def _unified_candidate_diff(
@@ -225,29 +215,38 @@ def _unified_candidate_diff(
     candidate_name: str,
 ) -> dict[str, str]:
     row = _candidate_row(run_dir, candidate_name) or {}
-    parent = row.get("parent_candidate_name") or "baseline"
-    parent_path = _agent_source_path(repo_root, parent)
-    candidate_path = _agent_source_path(repo_root, candidate_name)
-    if not candidate_path.exists():
+    parent = row.get("parent_candidate_name") or BASELINE_CANDIDATE_NAME
+    parent_path, parent_label = _candidate_source(
+        repo_root=repo_root, run_dir=run_dir, candidate_name=str(parent)
+    )
+    candidate_path, candidate_label = _candidate_source(
+        repo_root=repo_root, run_dir=run_dir, candidate_name=candidate_name
+    )
+    if candidate_path is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="candidate source not found",
         )
-    parent_text = parent_path.read_text().splitlines(keepends=True) if parent_path.exists() else []
+    parent_text = (
+        parent_path.read_text().splitlines(keepends=True)
+        if parent_path is not None
+        else []
+    )
     candidate_text = candidate_path.read_text().splitlines(keepends=True)
     diff = "".join(
         difflib.unified_diff(
             parent_text,
             candidate_text,
-            fromfile=f"agents/{parent}.py",
-            tofile=f"agents/{candidate_name}.py",
+            fromfile=parent_label,
+            tofile=candidate_label,
         )
     )
     return {
         "candidate": candidate_name,
         "parent": str(parent),
-        "from_path": f"agents/{parent}.py",
-        "to_path": f"agents/{candidate_name}.py",
+        "thread_id": str(row.get("thread_id") or run_dir.name),
+        "from_path": parent_label,
+        "to_path": candidate_label,
         "diff": diff,
     }
 
@@ -260,20 +259,31 @@ def _format_accuracy(value: Any) -> str:
 
 
 def _candidate_test_output(candidate_dir: Path) -> str:
+    """Render a candidate's recorded evaluation for the dashboard.
+
+    Everything here comes from files the benchmark actually wrote. A
+    candidate with no traces yields an empty string, so the UI shows an
+    empty state rather than fixture text.
+    """
     chunks: list[str] = []
     eval_path = candidate_dir / "eval-result.json"
     if eval_path.exists():
         eval_result = json.loads(eval_path.read_text())
-        chunks.append(
-            "\n".join(
-                [
-                    f"candidate: {eval_result.get('candidate', candidate_dir.name)}",
-                    f"accuracy: {_format_accuracy(eval_result.get('accuracy'))}",
-                    f"tasks: {eval_result.get('n_tasks', 0)}",
-                    f"trials_per_task: {eval_result.get('n_trials_per_task', 0)}",
-                ]
-            )
+        header = [
+            f"candidate: {eval_result.get('candidate', candidate_dir.name)}",
+            f"metrics_source: {eval_result.get('metrics_source', 'unknown')}",
+            f"accuracy: {_format_accuracy(eval_result.get('accuracy'))}",
+            f"tasks: {eval_result.get('n_tasks', 0)}",
+            f"trials_per_task: {eval_result.get('n_trials_per_task', 0)}",
+            f"llm_calls: {eval_result.get('total_llm_calls', 0)}",
+            f"total_tokens: {(eval_result.get('tokens') or {}).get('total_tokens', 0)}",
+        ]
+        cost = eval_result.get("total_cost_usd")
+        # Unknown cost is reported as unknown, never as $0.00.
+        header.append(
+            f"total_cost_usd: {cost}" if cost is not None else "total_cost_usd: unknown"
         )
+        chunks.append("\n".join(header))
     for verify_path in sorted((candidate_dir / "traces").glob("*/*verify.json"))[:10]:
         verify = json.loads(verify_path.read_text())
         chunks.append(
@@ -296,6 +306,26 @@ def _best_score(frontier: dict[str, Any] | None) -> float | None:
     return float(score) if score is not None else None
 
 
+def _root_frontier(run_dir: Path) -> dict[str, Any] | None:
+    """The run's root-branch frontier (the dashboard's default view)."""
+    return runs_mod.read_frontier(run_dir, run_dir.name)
+
+
+def _branch_frontiers(run_dir: Path) -> dict[str, dict[str, Any]]:
+    """Every branch's frontier, keyed by thread_id."""
+    return runs_mod.aggregate_frontiers(run_dir)
+
+
+def _run_best_score(run_dir: Path) -> float | None:
+    """Best measured accuracy across every branch in the run."""
+    scores = [
+        s
+        for s in (_best_score(f) for f in _branch_frontiers(run_dir).values())
+        if s is not None
+    ]
+    return max(scores) if scores else None
+
+
 def _run_info_from_record(record: RunRecord) -> dict[str, Any]:
     return {
         "run_id": record.run_id,
@@ -312,7 +342,7 @@ def _run_info_from_record(record: RunRecord) -> dict[str, Any]:
 
 def _run_info_from_files(run_dir: Path) -> dict[str, Any]:
     manifest = _read_manifest(run_dir) or {}
-    frontier = runs_mod.read_frontier(run_dir)
+    frontier = _root_frontier(run_dir)
     rows = _read_summary_rows(run_dir, limit=5)
     current_iteration = manifest.get("current_iteration")
     if current_iteration is None and rows:
@@ -333,13 +363,25 @@ def _run_info_from_files(run_dir: Path) -> dict[str, Any]:
 
 def _full_run_info(run_dir: Path, record: RunRecord | None = None) -> dict[str, Any]:
     base = _run_info_from_record(record) if record else _run_info_from_files(run_dir)
-    frontier = runs_mod.read_frontier(run_dir)
+    frontier = _root_frontier(run_dir)
+    manifest = _read_manifest(run_dir) or {}
+    branch_frontiers = _branch_frontiers(run_dir)
     base.update(
         {
-            "manifest": _read_manifest(run_dir) or {},
+            "manifest": manifest,
             "frontier_val": frontier,
-            "summary_rows": _read_summary_rows(run_dir, limit=5),
-            "best_score": _best_score(frontier),
+            # Every branch's evolution rows, each tagged with the
+            # thread_id that produced it, so the dashboard can draw the
+            # whole search tree rather than one linear branch.
+            "summary_rows": _read_all_summary_rows(run_dir),
+            "branch_frontiers": branch_frontiers,
+            "best_score": _run_best_score(run_dir),
+            # "measured" | "mock" — the dashboard must be able to tell a
+            # synthetic demo run from a real experiment at a glance.
+            "metrics_source": manifest.get(
+                "metrics_source",
+                "mock" if manifest.get("mock_bench") else "measured",
+            ),
         }
     )
     if record and record.error:
@@ -369,13 +411,24 @@ async def _emit_checkpoint_events(record: RunRecord) -> None:
         )
 
 
-async def _execute_run(record: RunRecord, initial_state: dict[str, Any]) -> None:
+async def _execute_run(record: RunRecord, budget: int) -> None:
+    """Measure the baseline, then drive the outer graph to completion.
+
+    The baseline benchmark runs inside the task rather than in the POST
+    handler so ``POST /runs`` still returns immediately, but it always
+    completes *before* the first propose — the run's first candidate is
+    compared against a real measurement, never against zero.
+    """
     config = {
         "configurable": {"thread_id": record.thread_id},
         "recursion_limit": 200,
     }
     try:
-        final = await record.graph.ainvoke(initial_state, config=config)
+        seeds = [await record.runner.benchmark_baseline(run_id=record.run_id)]
+        state = initial_state(
+            run_id=record.run_id, budget=budget, seed_candidates=seeds
+        )
+        final = await record.graph.ainvoke(state, config=config)
     except asyncio.CancelledError:
         record.status = "cancelled"
         _write_manifest_status(record.run_dir, status="cancelled")
@@ -447,7 +500,7 @@ def get_run_graph(request: Request, run_id: str) -> Any:
     repo_root = _repo_root(request)
     skill_raw = manifest.get("skill_path")
     skill_path = Path(skill_raw) if skill_raw else None
-    graph = _build_graph(
+    runner = _build_runner(
         run_dir=run_dir,
         repo_root=repo_root,
         eval_tasks_dir=_eval_tasks_dir(request),
@@ -459,7 +512,7 @@ def get_run_graph(request: Request, run_id: str) -> Any:
         checkpointer=checkpointer,
         memory_store=_app_memory_store(request),
     )
-    return graph
+    return runner.build()
 
 
 async def cancel_active_runs() -> None:
@@ -533,10 +586,11 @@ async def create_run(
         mock_bench=mock_bench,
         trials=payload.trials,
         workers=payload.workers,
+        metrics_source="mock" if mock_bench else "measured",
     )
 
     checkpointer = _app_checkpointer(request) or MemorySaver()
-    graph = _build_graph(
+    runner = _build_runner(
         run_dir=run_dir,
         repo_root=repo_root,
         eval_tasks_dir=_eval_tasks_dir(request),
@@ -548,6 +602,7 @@ async def create_run(
         checkpointer=checkpointer,
         memory_store=_app_memory_store(request),
     )
+    graph = runner.build()
     record = RunRecord(
         run_id=run_id,
         thread_id=run_id,
@@ -560,19 +615,11 @@ async def create_run(
         current_iteration=0,
         run_dir=run_dir,
         graph=graph,
+        runner=runner,
         checkpointer=checkpointer,
     )
-    initial_state = {
-        "run_id": run_id,
-        "iteration": 0,
-        "budget_remaining": payload.budget,
-        "candidates": [],
-        "frontier": [],
-        "best_candidate": None,
-        "proposer_prior": "",
-    }
     record.task = asyncio.create_task(
-        _execute_run(record, initial_state),
+        _execute_run(record, payload.budget),
         name=f"run:{run_id}",
     )
     run_registry[run_id] = record
@@ -590,7 +637,7 @@ async def list_runs(request: Request) -> dict[str, Any]:
             record = run_registry.get(run_dir.name)
             info = _run_info_from_record(record) if record else _run_info_from_files(run_dir)
             if "best_score" not in info:
-                info["best_score"] = _best_score(runs_mod.read_frontier(run_dir))
+                info["best_score"] = _run_best_score(run_dir)
             runs.append(
                 {
                     "run_id": info["run_id"],
