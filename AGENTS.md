@@ -21,3 +21,40 @@ Write tests in `backend/tests/` using `test_<feature>.py` and `test_<behavior>()
 
 ## Commit & Pull Request Guidelines
 Recent history follows step-oriented subjects like `step 6: real proposer ...`; use that format for milestone work and `fixup:` only for small follow-ups. PRs should state the affected area, reference the relevant build step or interface contract when applicable, and list the exact verification commands you ran. Include artifact paths or screenshots only when the change produces user-visible output.
+
+## Commit Authorship Policy (mandatory)
+
+Every commit in this repository is authored **and** committed by the repository
+owner's configured Git identity. Automated assistants operating in this repo
+must use the existing local identity and must never rewrite it:
+
+```bash
+git config user.name     # David
+git config user.email    # the owner's configured address
+```
+
+Commits must **not** contain AI attribution of any kind. Specifically, none of
+the following may appear in a commit message, trailer, author field, or
+committer field:
+
+- `Co-Authored-By: Claude ...` / `Co-Authored-By: Anthropic ...` / any other
+  `Co-Authored-By:` trailer naming a model or vendor
+- `Generated-by:`, `Made-with:`, `AI-generated-by:` trailers
+- "Claude", "Anthropic", "Codex", or similar as an author, co-author,
+  committer, or contributor
+
+Verify after every commit:
+
+```bash
+git log -1 --format='Author: %an <%ae>%nCommitter: %cn <%ce>%n%B'
+```
+
+Historical commits are never rewritten to satisfy this policy — it applies to
+new commits only.
+
+## Artifact Hygiene
+
+`runs/`, `benchmark-results/`, proposer-generated `agents/*.py`, tool caches,
+and Playwright `test-results/` are build artifacts. They must stay untracked.
+Published benchmark evidence is the one exception and lives under
+`benchmarks/results/<experiment-id>/`, which is committed deliberately.
