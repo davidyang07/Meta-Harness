@@ -62,9 +62,12 @@ def test_loop_mock_no_persistent_writes_artifacts(tmp_path: Path, monkeypatch) -
         assert data["iterations_completed"] == 1
         assert data["budget_remaining"] == 0
         run_dir = REPO_ROOT / "runs" / run_name
-        assert (run_dir / "frontier_val.json").exists()
-        assert (run_dir / "evolution_summary.jsonl").exists()
         assert (run_dir / "manifest.json").exists()
+        # Execution artifacts live under the run's root thread.
+        td = run_dir / "threads" / run_name
+        assert (td / "frontier_val.json").exists()
+        assert (td / "evolution_summary.jsonl").exists()
+        assert (td / "pending_eval.json").exists()
     finally:
         run_dir = REPO_ROOT / "runs" / run_name
         if run_dir.exists():

@@ -32,7 +32,12 @@ from app.meta_harness.memory import (
 )
 from app.meta_harness.outer import run_outer_loop
 from app.meta_harness.persistence import healthcheck, persistence_layer
-from app.meta_harness.runs import make_run_dir
+from app.meta_harness.runs import (
+    make_run_dir,
+    read_evolution_summary,
+    read_frontier,
+    thread_dir,
+)
 
 _PG_OK = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(healthcheck())
 
@@ -112,12 +117,6 @@ async def test_cross_run_pattern_propagation(tmp_path: Path):
         patterns_after_b = await search_patterns(mstore, domain=domain, limit=10)
         assert len(patterns_after_b) >= 1  # not wiped by run-B
 
-    # Cleanup mock stubs
-    for final in (final_a, final_b):
-        for c in final.get("candidates", []):
-            stub = REPO_ROOT / "agents" / f"{c['name']}.py"
-            if stub.exists():
-                stub.unlink()
 
 
 # ── 2. Format injection into proposer prior ──────────────────────────
@@ -303,10 +302,6 @@ async def test_accepted_candidate_writes_memory_pattern(tmp_path: Path):
                 f"among {len(entries)} entries scanned"
             )
 
-    for c in final.get("candidates", []):
-        stub = REPO_ROOT / "agents" / f"{c['name']}.py"
-        if stub.exists():
-            stub.unlink()
 
 
 # ── 8. Filesystem artifacts still correct ────────────────────────────
@@ -332,26 +327,24 @@ async def test_filesystem_artifacts_unaffected_by_memory(tmp_path: Path):
             memory_store=mstore,
         )
 
-    # All standard artifacts must exist
+    # All standard artifacts must exist, under the run's root thread.
+    root = run_dir.name
+    td = thread_dir(run_dir, root)
     assert (run_dir / "manifest.json").exists()
-    assert (run_dir / "pending_eval.json").exists()
-    assert (run_dir / "frontier_val.json").exists()
-    assert (run_dir / "evolution_summary.jsonl").exists()
+    assert (td / "pending_eval.json").exists()
+    assert (td / "frontier_val.json").exists()
+    assert (td / "evolution_summary.jsonl").exists()
 
     # Frontier shape intact
-    frontier = json.loads((run_dir / "frontier_val.json").read_text())
+    frontier = read_frontier(run_dir, root)
     assert "candidates" in frontier
     assert "_pareto_names" in frontier
     for c in frontier["candidates"]:
         assert "dominated_by_names" in c
 
-    # Evolution summary shape intact
-    rows = [
-        json.loads(line)
-        for line in (run_dir / "evolution_summary.jsonl").read_text().strip().split("\n")
-        if line.strip()
-    ]
-    assert len(rows) == 2
+    # Evolution summary shape intact: measured baseline + 2 candidates.
+    rows = read_evolution_summary(run_dir, root)
+    assert len(rows) == 3
     for row in rows:
         assert "parent_candidate_name" in row
         assert "iteration" in row
@@ -359,12 +352,8 @@ async def test_filesystem_artifacts_unaffected_by_memory(tmp_path: Path):
 
     # Per-candidate artifacts
     for c in final["candidates"]:
-        cand_dir = run_dir / "candidates" / c["name"]
+        cand_dir = td / "candidates" / c["name"]
         assert (cand_dir / "eval-result.json").exists()
         assert (cand_dir / "status.json").exists()
 
     # Cleanup
-    for c in final.get("candidates", []):
-        stub = REPO_ROOT / "agents" / f"{c['name']}.py"
-        if stub.exists():
-            stub.unlink()

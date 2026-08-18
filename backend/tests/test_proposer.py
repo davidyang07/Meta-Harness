@@ -6,7 +6,10 @@ import json
 import shutil
 from pathlib import Path
 
+import pytest
+
 from app.meta_harness import proposer
+from app.meta_harness import runs as runs_mod
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -58,22 +61,27 @@ def test_claude_propose_preserves_anthropic_api_key_for_cli(monkeypatch, tmp_pat
     monkeypatch.setattr(proposer.subprocess, "Popen", fake_popen)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
 
-    run_dir = REPO_ROOT / "runs" / f"test-proposer-{tmp_path.name}"
-    run_dir.mkdir()
+    run_name = f"test-proposer-{tmp_path.name}"
+    run_dir = runs_mod.make_run_dir(REPO_ROOT, run_name, fresh=True)
+    thread_id = f"{run_name}.fork.beef"
     try:
-        (run_dir / "pending_eval.json").write_text(
-            json.dumps({
+        # The proposer writes its handoff into ITS branch directory.
+        runs_mod.write_pending_eval(
+            run_dir,
+            thread_id,
+            {
                 "name": "candidate",
                 "import_path": "agents.candidate:CandidateHarness",
                 "hypothesis": "test",
                 "mechanism_axis": "test",
-            })
+            },
         )
         skill = tmp_path / "SKILL.md"
         skill.write_text("skill")
 
         payload = proposer.claude_propose(
             run_dir=run_dir,
+            thread_id=thread_id,
             iteration=1,
             parent_name=None,
             repo_root=REPO_ROOT,
@@ -82,5 +90,49 @@ def test_claude_propose_preserves_anthropic_api_key_for_cli(monkeypatch, tmp_pat
 
         assert captured["api_key"] == "test-key"
         assert payload["name"] == "candidate"
+        # The session log lands under the branch, not the run root.
+        session = runs_mod.proposer_session_dir(run_dir, thread_id, 1) / "session.json"
+        assert json.loads(session.read_text())["thread_id"] == thread_id
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
+
+
+def test_claude_propose_fails_loudly_when_the_branch_handoff_is_missing(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A sibling branch's pending_eval.json must not satisfy this branch."""
+
+    def fake_popen(cmd, stdout, stderr, stdin, text, encoding, errors, cwd, env):
+        del cmd, stdout, stderr, stdin, text, encoding, errors, cwd
+        return _Proc(env, str(REPO_ROOT))
+
+    monkeypatch.setattr(proposer.subprocess, "Popen", fake_popen)
+
+    run_name = f"test-proposer-iso-{tmp_path.name}"
+    run_dir = runs_mod.make_run_dir(REPO_ROOT, run_name, fresh=True)
+    try:
+        # Another branch wrote its handoff; ours did not.
+        runs_mod.write_pending_eval(run_dir, f"{run_name}.fork.other", {"name": "theirs"})
+        skill = tmp_path / "SKILL.md"
+        skill.write_text("skill")
+
+        with pytest.raises(RuntimeError, match="did not write"):
+            proposer.claude_propose(
+                run_dir=run_dir,
+                thread_id=f"{run_name}.fork.mine",
+                iteration=1,
+                parent_name=None,
+                repo_root=REPO_ROOT,
+                skill_path=skill,
+            )
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+
+def test_mock_propose_labels_are_branch_unique(tmp_path: Path) -> None:
+    """Two forks on the same iteration must not author the same file."""
+    root = proposer.mock_label(3, "run-a", "run-a")
+    fork_a = proposer.mock_label(3, "run-a.fork.aaaa", "run-a")
+    fork_b = proposer.mock_label(3, "run-a.fork.bbbb", "run-a")
+    assert root == "_mock_iter_3"
+    assert len({root, fork_a, fork_b}) == 3

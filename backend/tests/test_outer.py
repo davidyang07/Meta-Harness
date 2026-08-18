@@ -35,14 +35,6 @@ from app.meta_harness.runs import (  # noqa: E402
 from app.meta_harness.state import BASELINE_CANDIDATE_NAME  # noqa: E402
 
 
-def _cleanup_stubs(final) -> None:
-    """Remove mock harness files the proposer authored in repo-root agents/."""
-    for c in final["candidates"]:
-        stub = REPO_ROOT / "agents" / f"{c.get('label') or c['name']}.py"
-        if stub.exists():
-            stub.unlink()
-
-
 def test_run_and_candidate_names_reject_path_traversal(tmp_path: Path):
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -131,8 +123,6 @@ async def test_mock_outer_loop_produces_all_files(tmp_path: Path):
         assert (cand_dir / "eval-result.json").exists()
         assert (cand_dir / "status.json").exists()
 
-    _cleanup_stubs(final)
-
 
 async def test_baseline_is_benchmarked_before_any_candidate(tmp_path: Path):
     """The first proposed candidate's delta is measured against the baseline.
@@ -173,8 +163,6 @@ async def test_baseline_is_benchmarked_before_any_candidate(tmp_path: Path):
     assert status["compared_against"] == BASELINE_CANDIDATE_NAME
     assert status["compared_against_accuracy"] == baseline_acc
 
-    _cleanup_stubs(final)
-
 
 async def test_candidate_source_is_snapshotted_per_branch(tmp_path: Path):
     """What a branch benchmarks is its own snapshot, not the shared file."""
@@ -201,5 +189,3 @@ async def test_candidate_source_is_snapshotted_per_branch(tmp_path: Path):
     original = snapshot.read_text()
     authored.write_text("# another branch overwrote this\n")
     assert snapshot.read_text() == original
-
-    _cleanup_stubs(final)

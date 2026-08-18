@@ -188,8 +188,3 @@ async def test_outer_loop_with_memory_store(tmp_path: Path):
         # At minimum, verify the store is queryable without error.
         assert isinstance(results, list)
 
-    # Cleanup mock harness stubs from repo-root agents/.
-    for c in final["candidates"]:
-        stub = REPO_ROOT / "agents" / f"{c['name']}.py"
-        if stub.exists():
-            stub.unlink()

@@ -9,7 +9,6 @@ DSN. Bring it up with::
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
 from pathlib import Path
 
@@ -21,7 +20,11 @@ if str(REPO_ROOT) not in sys.path:
 
 from app.meta_harness.outer import resume_outer_loop, run_outer_loop  # noqa: E402
 from app.meta_harness.persistence import healthcheck, persistence_layer  # noqa: E402
-from app.meta_harness.runs import make_run_dir  # noqa: E402
+from app.meta_harness.runs import (  # noqa: E402
+    make_run_dir,
+    read_evolution_summary,
+    thread_dir,
+)
 
 
 # Module-level skip if Postgres isn't reachable. Each test is async so
@@ -63,18 +66,14 @@ async def test_outer_loop_with_postgres_persistence(tmp_path: Path):
     assert final["iteration"] == 2
     assert final["budget_remaining"] == 0
 
-    # The run-dir filesystem artifacts still get written (separate
+    # The thread-scoped filesystem artifacts still get written (separate
     # from Postgres checkpoints).
-    assert (run_dir / "frontier_val.json").exists()
-    assert (run_dir / "evolution_summary.jsonl").exists()
-    rows = (run_dir / "evolution_summary.jsonl").read_text().strip().split("\n")
-    assert len(rows) == 2
+    td = thread_dir(run_dir, run_dir.name)
+    assert (td / "frontier_val.json").exists()
+    assert (td / "evolution_summary.jsonl").exists()
+    # measured baseline + 2 evolved candidates
+    assert len(read_evolution_summary(run_dir, run_dir.name)) == 3
 
-    # Cleanup mock harness stubs from repo-root agents/.
-    for c in final["candidates"]:
-        stub = REPO_ROOT / "agents" / f"{c['name']}.py"
-        if stub.exists():
-            stub.unlink()
 
 
 async def test_checkpoints_persist_in_postgres(tmp_path: Path):
@@ -107,10 +106,6 @@ async def test_checkpoints_persist_in_postgres(tmp_path: Path):
             f"expected ≥4 checkpoints for one iteration; got {len(history)}"
         )
 
-    for c_dir in (run_dir / "candidates").iterdir():
-        stub = REPO_ROOT / "agents" / f"{c_dir.name}.py"
-        if stub.exists():
-            stub.unlink()
 
 
 async def test_resume_of_completed_run_is_a_no_op(tmp_path: Path):
@@ -135,7 +130,8 @@ async def test_resume_of_completed_run_is_a_no_op(tmp_path: Path):
             budget=2,
             checkpointer=saver,
         )
-        rows_before = (run_dir / "evolution_summary.jsonl").read_text()
+        summary_path = thread_dir(run_dir, run_dir.name) / "evolution_summary.jsonl"
+        rows_before = summary_path.read_text()
 
         resumed = await resume_outer_loop(
             run_dir=run_dir,
@@ -145,12 +141,8 @@ async def test_resume_of_completed_run_is_a_no_op(tmp_path: Path):
         )
 
     assert resumed["iteration"] == first["iteration"] == 2
-    assert (run_dir / "evolution_summary.jsonl").read_text() == rows_before
+    assert summary_path.read_text() == rows_before
 
-    for c in first["candidates"]:
-        stub = REPO_ROOT / "agents" / f"{c['name']}.py"
-        if stub.exists():
-            stub.unlink()
 
 
 async def test_resume_completes_remaining_iterations(tmp_path: Path):
@@ -193,12 +185,8 @@ async def test_resume_completes_remaining_iterations(tmp_path: Path):
     # Either the cancellation landed before any checkpoint
     # (rare-but-possible), or we have a completed 3-iteration run.
     assert final["iteration"] >= 1
-    rows = (run_dir / "evolution_summary.jsonl").read_text().strip().split("\n")
-    # No duplicate iterations across rows.
-    iters = [json.loads(r)["iteration"] for r in rows if r.strip()]
+    rows = read_evolution_summary(run_dir, run_dir.name)
+    # No duplicate iterations across rows (iteration 0 is the baseline).
+    iters = [r["iteration"] for r in rows]
     assert len(iters) == len(set(iters)), f"duplicate iterations in summary: {iters}"
 
-    for c_dir in (run_dir / "candidates").iterdir():
-        stub = REPO_ROOT / "agents" / f"{c_dir.name}.py"
-        if stub.exists():
-            stub.unlink()
