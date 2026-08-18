@@ -165,6 +165,12 @@ right-click → "Fork from here" on any checkpoint.
 
 ## The 90-second demo script (validation walkthrough)
 
+> **The scores in this script are placeholders for narration.** They are
+> not results, and they must not be read aloud as measurements. When
+> demoing, read the numbers off the screen — a mock-bench run is
+> labelled "Mock data (synthetic)" in the status bar, and a live run
+> reports whatever it actually measured.
+
 ```
 [0:00–0:08] HOOK
 "Stanford published Meta-Harness four weeks ago — Lee, Khattab, Finn.
