@@ -113,6 +113,46 @@ async def test_checkpoints_persist_in_postgres(tmp_path: Path):
             stub.unlink()
 
 
+async def test_resume_of_completed_run_is_a_no_op(tmp_path: Path):
+    """Resuming a thread that already reached END must not replay it.
+
+    ``ainvoke(None, ...)`` on a finished thread re-enters at START, which
+    would double every evolution_summary row and re-spend the proposer
+    budget. ``resume_outer_loop`` returns the stored terminal state.
+    """
+    run_dir = make_run_dir(tmp_path, "test-resume-noop", fresh=True)
+    eval_tasks_dir = REPO_ROOT / "eval" / "tasks"
+
+    async with persistence_layer() as saver:
+        first = await run_outer_loop(
+            run_dir=run_dir,
+            repo_root=REPO_ROOT,
+            eval_tasks_dir=eval_tasks_dir,
+            mock_proposer=True,
+            mock_bench=True,
+            trials=2,
+            bench_workers=1,
+            budget=2,
+            checkpointer=saver,
+        )
+        rows_before = (run_dir / "evolution_summary.jsonl").read_text()
+
+        resumed = await resume_outer_loop(
+            run_dir=run_dir,
+            repo_root=REPO_ROOT,
+            eval_tasks_dir=eval_tasks_dir,
+            checkpointer=saver,
+        )
+
+    assert resumed["iteration"] == first["iteration"] == 2
+    assert (run_dir / "evolution_summary.jsonl").read_text() == rows_before
+
+    for c in first["candidates"]:
+        stub = REPO_ROOT / "agents" / f"{c['name']}.py"
+        if stub.exists():
+            stub.unlink()
+
+
 async def test_resume_completes_remaining_iterations(tmp_path: Path):
     """Cancel a run mid-flight; ``resume_outer_loop`` must complete
     the remaining iterations without duplication."""

@@ -684,9 +684,18 @@ async def resume_outer_loop(
         checkpointer=checkpointer,
     )
     graph = runner.build()
+    config = {"configurable": {"thread_id": run_dir.name}, "recursion_limit": 200}
+
+    # Guard: a thread that already ran to completion has no pending
+    # nodes. Calling ``ainvoke(None, ...)`` on it re-enters the graph at
+    # START and replays the whole loop, which double-appends every
+    # evolution_summary row and re-spends the proposer budget. Return
+    # the stored terminal state instead.
+    snapshot = await graph.aget_state(config)
+    values = getattr(snapshot, "values", None)
+    if values and not getattr(snapshot, "next", ()):
+        return values  # type: ignore[return-value]
+
     # ``None`` input + existing thread_id → resume from last checkpoint.
-    final = await graph.ainvoke(
-        None,
-        config={"configurable": {"thread_id": run_dir.name}, "recursion_limit": 200},
-    )
+    final = await graph.ainvoke(None, config=config)
     return final  # type: ignore[return-value]
