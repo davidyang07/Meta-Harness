@@ -589,7 +589,7 @@ def fork(
     """
     import asyncio
 
-    from app.meta_harness.branches import worktree_add
+    from app.meta_harness.branches import set_runs_root, worktree_add
     from app.meta_harness.outer import OuterLoopRunner
     from app.meta_harness.persistence import persistence_layer
 
@@ -602,6 +602,8 @@ def fork(
         typer.echo(f"manifest.json missing in {run_dir}; cannot fork", err=True)
         raise typer.Exit(1)
     manifest = json.loads(manifest_path.read_text())
+    # Persist branch metadata so the API/dashboard can see this fork.
+    set_runs_root(REPO_ROOT / "runs")
 
     mods: dict[str, Any] = {}
     for raw in mod:
@@ -646,6 +648,129 @@ def fork(
 
     metadata = _run_async(_run())
     typer.echo(json.dumps(metadata, indent=2, default=str))
+
+
+@app.command()
+def checkpoints(
+    run_name: str = typer.Argument(..., help="Run name (under runs/)"),
+    thread: str = typer.Option(
+        None,
+        "--thread",
+        help="Thread id to list. Defaults to the run's root thread.",
+    ),
+    limit: int = typer.Option(20, "--limit", help="Max checkpoints to show."),
+) -> None:
+    """List a thread's LangGraph checkpoint history (newest first)."""
+    from app.meta_harness.branches import get_state_history
+    from app.meta_harness.persistence import persistence_layer
+
+    run_dir, manifest = _require_run(run_name)
+    thread_id = thread or run_name
+
+    async def _run() -> list[dict[str, Any]]:
+        async with persistence_layer() as saver:
+            graph = _rebuild_graph(run_dir, manifest, saver)
+            history = await get_state_history(
+                graph, thread_id=thread_id, limit=limit
+            )
+            return [record.to_dict() for record in history]
+
+    records = _run_async(_run())
+    if not records:
+        typer.echo(f"no checkpoints for thread {thread_id!r}", err=True)
+        raise typer.Exit(1)
+    typer.echo(json.dumps(records, indent=2, default=str))
+
+
+@app.command()
+def replay(
+    run_name: str = typer.Argument(..., help="Run name (under runs/)"),
+    thread: str = typer.Option(
+        None,
+        "--thread",
+        help="Thread id to replay. Defaults to the run's root thread.",
+    ),
+    checkpoint: str = typer.Option(
+        None,
+        "--checkpoint",
+        help="Restore one checkpoint's exact state instead of replaying the thread.",
+    ),
+    limit: int = typer.Option(
+        None, "--limit", help="Max checkpoints to walk when replaying a thread."
+    ),
+) -> None:
+    """Restore historical state from Postgres. No model calls are issued.
+
+    With ``--checkpoint``: return the exact stored state at that
+    checkpoint plus a SHA-256 of its canonical JSON encoding.
+
+    Without it: walk the thread's recorded transitions oldest-first.
+
+    This is checkpoint recovery and recorded-event replay. It does NOT
+    re-run the agent, and it makes no claim that re-executing from a
+    restored checkpoint would reproduce the same model output.
+    """
+    from app.meta_harness import replay as replay_mod
+    from app.meta_harness.persistence import persistence_layer
+
+    run_dir, manifest = _require_run(run_name)
+    thread_id = thread or run_name
+
+    async def _run() -> dict[str, Any]:
+        async with persistence_layer() as saver:
+            graph = _rebuild_graph(run_dir, manifest, saver)
+            if checkpoint:
+                return await replay_mod.restore_checkpoint(
+                    graph, thread_id=thread_id, checkpoint_id=checkpoint
+                )
+            return await replay_mod.replay_thread(
+                graph, thread_id=thread_id, limit=limit
+            )
+
+    try:
+        result = _run_async(_run())
+    except KeyError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from None
+    typer.echo(json.dumps(result, indent=2, default=str))
+
+
+def _require_run(run_name: str) -> tuple[Path, dict[str, Any]]:
+    """Resolve runs/<run_name> and its manifest, or exit with a message."""
+    from app.meta_harness import runs as runs_mod
+
+    try:
+        run_dir = runs_mod.make_run_path(REPO_ROOT, run_name)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from None
+    if not run_dir.exists():
+        typer.echo(f"run not found: {run_dir}", err=True)
+        raise typer.Exit(1)
+    manifest = runs_mod.read_manifest(run_dir)
+    if manifest is None:
+        typer.echo(f"manifest.json missing in {run_dir}", err=True)
+        raise typer.Exit(1)
+    return run_dir, manifest
+
+
+def _rebuild_graph(run_dir: Path, manifest: dict[str, Any], saver: Any) -> Any:
+    """Recompile a run's outer graph from its manifest, for read-only use."""
+    from app.meta_harness.outer import OuterLoopRunner
+
+    skill_path = REPO_ROOT / "skills" / "meta-harness-coding-agent" / "SKILL.md"
+    runner = OuterLoopRunner(
+        run_dir=run_dir,
+        repo_root=REPO_ROOT,
+        eval_tasks_dir=REPO_ROOT / "eval" / "tasks",
+        mock_proposer=bool(manifest.get("mock_proposer", False)),
+        mock_bench=bool(manifest.get("mock_bench", False)),
+        trials=int(manifest.get("trials", 5)),
+        bench_workers=int(manifest.get("workers", 3)),
+        skill_path=skill_path if skill_path.exists() else None,
+        checkpointer=saver,
+    )
+    return runner.build()
 
 
 @app.command()
