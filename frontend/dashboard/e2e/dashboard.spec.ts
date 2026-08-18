@@ -1,5 +1,10 @@
 import { test, expect } from '@playwright/test';
 
+/**
+ * Mock mode: the built-in demo fixtures, with the backend deliberately
+ * unreachable. This proves the UI renders offline. It proves nothing
+ * about the API contracts — see live-backend.spec.ts for those.
+ */
 test.describe('Dashboard (mock mode, no backend)', () => {
   test.beforeEach(async ({ page }) => {
     await page.route('http://localhost:8000/health', route => route.abort());
@@ -14,8 +19,11 @@ test.describe('Dashboard (mock mode, no backend)', () => {
   });
 
   test('decision log shows iteration chapters', async ({ page }) => {
+    // The mock playback schedules iteration 4 at ~9.7s
+    // (startMockSSE: (1500 + 3 * 1300) * 1.8). A 10s window raced it and
+    // flaked; wait comfortably past the fixture's own schedule instead.
     const chapter = page.getByText('ITER 4 — more-specific-descriptions');
-    await expect(chapter).toBeVisible({ timeout: 10_000 });
+    await expect(chapter).toBeVisible({ timeout: 25_000 });
   });
 
   test('score chart renders data points', async ({ page }) => {
