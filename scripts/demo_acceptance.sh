@@ -9,8 +9,15 @@
 # benchmark number. Those are LEVEL 2 — see scripts/live_smoke.sh.
 #
 # Usage:
-#   bash scripts/demo_acceptance.sh            # full ladder
-#   SKIP_E2E=1 bash scripts/demo_acceptance.sh # skip Playwright
+#   bash scripts/demo_acceptance.sh              # full ladder
+#   SKIP_E2E=1 bash scripts/demo_acceptance.sh   # skip Playwright
+#   SKIP_NPM_CI=1 bash scripts/demo_acceptance.sh
+#
+# NOTE: `npm ci` deletes and reinstalls frontend/dashboard/node_modules.
+# Do not run this concurrently with a dev server, another acceptance run,
+# or an `npx` invocation — they will race over node_modules and produce
+# spurious "'next' is not recognized" failures. SKIP_NPM_CI=1 reuses the
+# existing install (faster, but no longer proves a clean install works).
 #
 set -uo pipefail
 
@@ -176,7 +183,12 @@ fi
 
 # ── 6. Frontend ──────────────────────────────────────────────────────
 section "6. Frontend"
-check "npm ci"                  bash -c 'cd frontend/dashboard && npm ci --silent --no-audit --no-fund'
+if [[ "${SKIP_NPM_CI:-0}" == "1" ]]; then
+  skip "npm ci" "SKIP_NPM_CI=1"
+else
+  # No --silent: a failure here must be diagnosable from the log.
+  check "npm ci"                bash -c 'cd frontend/dashboard && npm ci --no-audit --no-fund'
+fi
 check "eslint"                  bash -c 'cd frontend/dashboard && npm run lint'
 check "next build"              bash -c 'cd frontend/dashboard && npm run build'
 
