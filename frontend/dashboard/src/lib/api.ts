@@ -1,4 +1,11 @@
-import type { CandidateStatus, MemoryEntry, RunSummary, Scores, TreeNode } from "./types";
+import type {
+  BranchNode,
+  CandidateStatus,
+  MemoryEntry,
+  RunSummary,
+  Scores,
+  TreeNode,
+} from "./types";
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
@@ -81,9 +88,12 @@ type RunDetail = {
   iteration?: number;
   summary_rows?: EvolutionRow[];
   frontier_val?: FrontierVal | null;
+  branch_frontiers?: Record<string, FrontierVal>;
+  metrics_source?: string;
   manifest?: {
     mock_proposer?: boolean;
     mock_bench?: boolean;
+    metrics_source?: string;
   };
 };
 
@@ -100,6 +110,8 @@ type EvolutionRow = {
   is_fork_branch?: boolean;
   thread_id?: string;
   checkpoint_id?: string;
+  label?: string;
+  metrics_source?: string;
 };
 
 type FrontierVal = {
@@ -117,8 +129,18 @@ export async function getRunDetail(runId: string): Promise<RunDetail> {
   return asRunDetail(await fetchRunInfo(runId));
 }
 
+function metricsSourceOf(detail: RunDetail): RunSummary["metricsSource"] {
+  const raw = detail.metrics_source ?? detail.manifest?.metrics_source;
+  if (raw === "measured" || raw === "mock") return raw;
+  // Fall back to the manifest flags for runs written before the field
+  // existed, rather than guessing "measured".
+  if (detail.manifest?.mock_bench || detail.manifest?.mock_proposer) return "mock";
+  return "unknown";
+}
+
 export function toRunInfo(value: RunDetail): RunSummary {
   const detail = asRunDetail(value);
+  const metricsSource = metricsSourceOf(detail);
   return {
     runId: detail.run_id ?? detail.runId ?? "",
     threadId: detail.thread_id ?? detail.threadId ?? detail.run_id ?? "",
@@ -127,13 +149,20 @@ export function toRunInfo(value: RunDetail): RunSummary {
     bestScore: detail.best_score ?? detail.bestScore ?? null,
     status: detail.status ?? "unknown",
     iteration: detail.current_iteration ?? detail.iteration ?? 0,
-    isMock: Boolean(detail.manifest?.mock_proposer || detail.manifest?.mock_bench),
+    isMock: metricsSource === "mock",
+    metricsSource,
   };
+}
+
+/** A thread id of the form "<run>.fork.<id>" identifies a forked branch. */
+export function isForkThread(threadId: string | undefined): boolean {
+  return Boolean(threadId && threadId.includes(".fork."));
 }
 
 export function toTreeNodes(rows: EvolutionRow[]): TreeNode[] {
   return rows.map((r) => {
     const candidate = r.candidate ?? r.candidate_name ?? "";
+    const threadId = r.thread_id;
     return {
       candidate,
       parent_candidate_name: r.parent_candidate_name ?? null,
@@ -143,8 +172,10 @@ export function toTreeNodes(rows: EvolutionRow[]): TreeNode[] {
       hypothesis: r.hypothesis,
       axis: r.axis,
       delta: r.delta ?? null,
-      isForkBranch: r.is_fork_branch ?? false,
-      threadId: r.thread_id,
+      // Branch identity comes from the thread id the backend stamped on
+      // the row, not from a separate flag that can drift out of sync.
+      isForkBranch: r.is_fork_branch ?? isForkThread(threadId),
+      threadId,
       checkpointId: r.checkpoint_id,
     };
   });
@@ -238,6 +269,41 @@ export async function resolveCheckpointForNode(
   if (bySummaryIteration?.checkpoint_id) return bySummaryIteration.checkpoint_id;
 
   return null;
+}
+
+// ── Trajectory (branch tree) ──
+
+type TrajectoryThread = {
+  thread_id?: string;
+  parent_thread_id?: string | null;
+  parent_checkpoint_id?: string | null;
+  branch_id?: string | null;
+  name?: string | null;
+  status?: string;
+  live?: boolean;
+};
+
+export async function fetchTrajectory(runId: string): Promise<BranchNode[]> {
+  const res = await fetch(`${BASE_URL}/runs/${encodeURIComponent(runId)}/trajectory`);
+  if (!res.ok) throw new Error(`trajectory for ${runId} not available (${res.status})`);
+  const data = await res.json();
+  const threads = data?.trajectory?.threads;
+  if (!Array.isArray(threads)) return [];
+  return threads.flatMap((raw: TrajectoryThread) =>
+    raw?.thread_id
+      ? [
+          {
+            threadId: raw.thread_id,
+            parentThreadId: raw.parent_thread_id ?? null,
+            parentCheckpointId: raw.parent_checkpoint_id ?? null,
+            branchId: raw.branch_id ?? null,
+            name: raw.name ?? null,
+            status: raw.status ?? "unknown",
+            live: Boolean(raw.live),
+          },
+        ]
+      : [],
+  );
 }
 
 // ── Forking ──

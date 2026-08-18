@@ -3,7 +3,7 @@
 // closed allowlist from streaming.py; backend rejects unknowns with a
 // 500 so dashboard typings can stay tight.
 
-import { API_BASE_URL } from "./api";
+import { API_BASE_URL, fetchTrajectory, isForkThread } from "./api";
 
 export type StreamingEventType =
   | "state-update"
@@ -88,6 +88,8 @@ type RunEventData = {
   delta?: number | null;
   parent_thread_id?: string;
   parent_checkpoint_id?: string;
+  parent_candidate_name?: string | null;
+  mods_summary?: { keys?: string[]; count?: number };
 };
 
 function eventLogEntry(e: StreamingEvent, text: string, tag: LogEntry["tag"]): LogEntry {
@@ -119,7 +121,7 @@ function candidateNodeFromEvent(data: RunEventData): TreeNode | null {
     status: "seed",
     scores: { accuracy: 0 },
     delta: null,
-    isForkBranch: threadId?.includes(".fork.") ?? false,
+    isForkBranch: isForkThread(threadId),
     threadId,
   };
 }
@@ -127,14 +129,19 @@ function candidateNodeFromEvent(data: RunEventData): TreeNode | null {
 function evalNodeFromEvent(data: RunEventData): TreeNode | null {
   if (typeof data.candidate !== "string") return null;
   const accuracy = typeof data.accuracy === "number" ? data.accuracy : 0;
+  // Carry thread identity through. Dropping it here used to let an
+  // eval-result from one branch merge into the other branch's node.
+  const threadId = valueLabel(data.thread_id) ?? undefined;
   return {
     candidate: data.candidate,
-    parent_candidate_name: data.parent ?? null,
+    parent_candidate_name: data.parent ?? data.parent_candidate_name ?? null,
     iteration: typeof data.iteration === "number" ? data.iteration : 0,
     checkpointId: valueLabel(data.checkpoint_id) ?? undefined,
     status: "accepted",
     scores: { accuracy, per_task: data.per_task },
     delta: null,
+    isForkBranch: isForkThread(threadId),
+    threadId,
   };
 }
 
@@ -182,6 +189,19 @@ function forkEventFromEvent(data: RunEventData): ForkEvent {
     branchId: threadId,
     rationale: "Fork created from checkpoint",
   };
+}
+
+/** Pull the authoritative branch tree from the backend. */
+export async function refreshBranches(
+  runId: string,
+  dispatch: Dispatch<DashboardAction>,
+): Promise<void> {
+  try {
+    dispatch({ type: "SET_BRANCHES", payload: await fetchTrajectory(runId) });
+  } catch {
+    // A run with no trajectory endpoint yet simply has no branches to
+    // show; that is an empty state, not an error banner.
+  }
 }
 
 export function startSSE(
@@ -301,7 +321,21 @@ export function startSSE(
       });
     },
     "fork-created": (e) => {
-      dispatch({ type: "ADD_FORK_EVENT", payload: forkEventFromEvent(e.data as RunEventData) });
+      const data = e.data as RunEventData;
+      dispatch({ type: "ADD_FORK_EVENT", payload: forkEventFromEvent(data) });
+      dispatch({
+        type: "ADD_LOG_ENTRY",
+        payload: eventLogEntry(
+          e,
+          `branch ${valueLabel(data.thread_id) ?? "?"} forked from ` +
+            `${valueLabel(data.parent_thread_id) ?? "run"}@` +
+            `${(valueLabel(data.parent_checkpoint_id) ?? "").slice(0, 8)}`,
+          "fork",
+        ),
+      });
+      // Re-read the authoritative branch tree rather than guessing it
+      // from the event payload.
+      void refreshBranches(runId, dispatch);
     },
     "branch-cancelled": (e) => {
       const data = e.data as RunEventData;
