@@ -15,6 +15,7 @@ tier).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import queue
@@ -24,6 +25,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from app.meta_harness import runs as runs_mod
 
 
 _MOCK_HARNESS_TEMPLATE = '''"""Mock candidate harness for outer-loop testing (iteration {iteration}).
@@ -36,7 +39,7 @@ benchmark runs would actually exercise the override.
 from agents.baseline import BaselineHarness
 
 
-class MockHarness_iter_{iteration}(BaselineHarness):
+class {class_name}(BaselineHarness):
     """Mock candidate. Hypothesis: {hypothesis}"""
 
     HYPOTHESIS = {hypothesis_repr}
@@ -44,22 +47,42 @@ class MockHarness_iter_{iteration}(BaselineHarness):
 '''
 
 
+def mock_label(iteration: int, thread_id: str, run_id: str) -> str:
+    """Branch-unique label for the mock proposer's authored file.
+
+    Two forks that reach the same iteration would otherwise both author
+    ``agents/_mock_iter_3.py`` and clobber each other in the shared repo
+    root. The root thread keeps the plain label so single-branch runs
+    stay readable.
+    """
+    base = f"_mock_iter_{iteration}"
+    if thread_id == run_id:
+        return base
+    suffix = hashlib.sha256(thread_id.encode("utf-8")).hexdigest()[:8]
+    return f"{base}__{suffix}"
+
+
 def mock_propose(
     *,
     run_dir: Path,
+    thread_id: str,
     iteration: int,
     parent_name: str | None,
     repo_root: Path,
 ) -> dict[str, Any]:
-    """Generate a mock candidate. Writes the harness file under
-    ``agents/_mock_iter_{N}.py`` and ``pending_eval.json`` under the run
-    directory. Returns the pending_eval payload."""
-    name = f"_mock_iter_{iteration}"
+    """Generate a deterministic mock candidate for one branch.
+
+    Writes the harness file under ``agents/<label>.py`` and this
+    thread's ``pending_eval.json``. Returns the pending_eval payload.
+    """
+    label = mock_label(iteration, thread_id, run_dir.name)
     hypothesis = f"mock hypothesis #{iteration}: pretend we tweaked something"
     expected_delta = 0.05
+    class_name = f"MockHarness_iter_{iteration}"
 
     harness_src = _MOCK_HARNESS_TEMPLATE.format(
         iteration=iteration,
+        class_name=class_name,
         hypothesis=hypothesis,
         hypothesis_repr=repr(hypothesis),
         expected_delta=expected_delta,
@@ -67,15 +90,15 @@ def mock_propose(
 
     agents_dir = repo_root / "agents"
     agents_dir.mkdir(exist_ok=True)
-    harness_path = agents_dir / f"{name}.py"
+    harness_path = agents_dir / f"{label}.py"
     harness_path.write_text(harness_src)
 
     payload: dict[str, Any] = {
         "iteration": iteration,
         "candidates": [
             {
-                "name": name,
-                "import_path": f"agents.{name}:MockHarness_iter_{iteration}",
+                "name": label,
+                "import_path": f"agents.{label}:{class_name}",
                 "parent": parent_name,
                 "hypothesis": hypothesis,
                 "axis": "exploitation",
@@ -83,22 +106,23 @@ def mock_propose(
             }
         ],
     }
-    (run_dir / "pending_eval.json").write_text(json.dumps(payload, indent=2))
+    runs_mod.write_pending_eval(run_dir, thread_id, payload)
 
-    sess_dir = run_dir / "proposer-sessions" / f"iter-{iteration}"
-    sess_dir.mkdir(parents=True, exist_ok=True)
-    (sess_dir / "session.json").write_text(
-        json.dumps(
-            {
-                "mode": "mock",
-                "iteration": iteration,
-                "exit_code": 0,
-                "duration_seconds": 0.0,
-                "cost_usd": 0.0,
-                "files_written": {f"agents/{name}.py": {"lines_written": harness_src.count("\\n")}},
+    sess_dir = runs_mod.proposer_session_dir(run_dir, thread_id, iteration)
+    runs_mod.write_json_atomic(
+        sess_dir / "session.json",
+        {
+            "mode": "mock",
+            "thread_id": thread_id,
+            "iteration": iteration,
+            "exit_code": 0,
+            "duration_seconds": 0.0,
+            "cost_usd": 0.0,
+            "metrics_source": "mock",
+            "files_written": {
+                f"agents/{label}.py": {"lines_written": harness_src.count("\n")}
             },
-            indent=2,
-        )
+        },
     )
     return payload
 
@@ -112,12 +136,27 @@ _PROPOSER_ALLOWED_TOOLS = ["Read", "Glob", "Grep", "Edit", "Write", "Bash"]
 
 
 def _render_proposer_prompt(
-    iteration: int, run_dir: Path, repo_root: Path, parent_name: str | None
+    iteration: int,
+    run_dir: Path,
+    repo_root: Path,
+    parent_name: str | None,
+    thread_id: str,
 ) -> str:
-    """Render the user-message prompt for the proposer subprocess."""
-    rel_run = run_dir.resolve().relative_to(repo_root.resolve())
+    """Render the user-message prompt for the proposer subprocess.
+
+    All paths handed to the proposer are scoped to *its own* branch, so
+    a concurrently running fork can neither read nor overwrite this
+    branch's handoff file.
+    """
+    thread_root = runs_mod.thread_dir(run_dir, thread_id)
+    rel_run = thread_root.resolve().relative_to(repo_root.resolve())
     parent_line = (
-        f"Parent candidate: `agents/{parent_name}.py`. Read it, then evolve from it."
+        # Point at this branch's immutable snapshot rather than the
+        # shared repo-root file, which a concurrent branch may have
+        # rewritten since this branch's parent was benchmarked.
+        f"Parent candidate: `{rel_run}/agents/{parent_name}.py` "
+        f"(this branch's snapshot of what was actually benchmarked). "
+        f"Read it, then evolve from it."
         if parent_name
         else "No parent yet — this is iteration 1. Read `agents/baseline.py` and evolve from it."
     )
@@ -184,6 +223,7 @@ def _enqueue_lines(pipe, q: queue.Queue, stream_name: str) -> None:
 def claude_propose(
     *,
     run_dir: Path,
+    thread_id: str,
     iteration: int,
     parent_name: str | None,
     repo_root: Path,
@@ -200,8 +240,7 @@ def claude_propose(
     Mirrors Stanford's reference ``claude_wrapper.run`` shape; uses
     subscription auth by stripping ``ANTHROPIC_API_KEY`` before exec.
     """
-    sess_dir = run_dir / "proposer-sessions" / f"iter-{iteration}"
-    sess_dir.mkdir(parents=True, exist_ok=True)
+    sess_dir = runs_mod.proposer_session_dir(run_dir, thread_id, iteration)
 
     # 1) Build the system prompt: SKILL.md + (optional) proposer_prior.
     skill_text = skill_path.read_text()
@@ -213,7 +252,9 @@ def claude_propose(
     )
 
     # 2) Build the user-message prompt.
-    prompt = _render_proposer_prompt(iteration, run_dir, repo_root, parent_name)
+    prompt = _render_proposer_prompt(
+        iteration, run_dir, repo_root, parent_name, thread_id
+    )
 
     # 3) Empty plugin dir for hermeticity.
     empty_plugin_dir = run_dir / ".empty_plugins"
@@ -320,7 +361,9 @@ def claude_propose(
             {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "mode": "claude",
+                "thread_id": thread_id,
                 "iteration": iteration,
+                "metrics_source": "measured",
                 "model": model,
                 "session_id": session_id,
                 "exit_code": exit_code,
@@ -353,8 +396,9 @@ def claude_propose(
             f"see {sess_dir}/session.json"
         )
 
-    # 5) Read pending_eval.json that the proposer wrote.
-    pending_path = run_dir / "pending_eval.json"
+    # 5) Read pending_eval.json that the proposer wrote — from this
+    # branch's own thread directory, never the shared run root.
+    pending_path = runs_mod.thread_dir(run_dir, thread_id) / "pending_eval.json"
     if not pending_path.exists():
         raise RuntimeError(
             f"proposer exited 0 but did not write {pending_path}; "
