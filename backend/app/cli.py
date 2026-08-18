@@ -651,6 +651,31 @@ def fork(
 
 
 @app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind address."),
+    port: int = typer.Option(8000, "--port", help="Bind port."),
+    reload: bool = typer.Option(False, "--reload", help="Auto-reload on edits."),
+) -> None:
+    """Serve the FastAPI backend on a Postgres-compatible event loop.
+
+    Prefer this over a bare ``uvicorn app.main:app``. uvicorn selects
+    Windows' ProactorEventLoop by default, and psycopg's async driver
+    cannot run on it — the server would come up with checkpointing
+    silently degraded to in-memory, which disables checkpoint history,
+    forking and branch recovery.
+    """
+    import uvicorn
+
+    uvicorn.run(
+        "app.main:app",
+        host=host,
+        port=port,
+        reload=reload,
+        loop="app.event_loop:selector_loop_factory",
+    )
+
+
+@app.command()
 def experiment(
     candidate: str = typer.Option(
         ...,
