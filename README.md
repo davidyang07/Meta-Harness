@@ -27,13 +27,14 @@ needs branching: rewind to iter 2, try a different proposer prior, fork,
 compare. By mapping the loop onto LangGraph state machines, three properties
 fall out **by construction**:
 
-| Property | Mechanism |
-|---|---|
-| **Secure** | Each candidate is a sandboxed subgraph — a buggy candidate cannot corrupt the run |
-| **Consistent** | Every state transition is checkpointed via `AsyncPostgresSaver`; replays are deterministic |
-| **Reversible** | Time-travel via `get_state_history` + `update_state` + `ainvoke(None, ckpt_id)` |
+| Property | Mechanism | What that does *not* mean |
+|---|---|---|
+| **Isolated** | Each candidate runs in a fresh temp workspace, and every artifact a branch writes is scoped to its LangGraph thread — two branches cannot overwrite each other | Not container or network isolation; see [Security posture](#security-posture) |
+| **Recoverable** | Every state transition is checkpointed via `AsyncPostgresSaver`; any checkpoint restores to byte-identical state, provable by SHA-256 | Not that re-running from a checkpoint reproduces the same model output — LLM inference is stochastic |
+| **Reversible** | Time-travel via `get_state_history` + `update_state` + `ainvoke(None, ckpt_id)`, with branch history persisted to disk so it survives a restart | Not that a running branch's asyncio task survives a restart — it doesn't, and it reports as `interrupted` |
 
-The substrate IS the contribution.
+The substrate IS the contribution. Every claim above maps to a test in
+[`docs/RESUME_CLAIMS.md`](docs/RESUME_CLAIMS.md).
 
 ---
 
@@ -77,22 +78,29 @@ The substrate IS the contribution.
 
 ## The demo arc
 
+> **These numbers are illustrative, not measured.** They show the shape of
+> a run — a linear trajectory, a fork, two Pareto-optimal branches — not
+> results this repository has produced. No benchmark has been published
+> yet; see [Measured results](#measured-results).
+
 ```text
-Baseline harness, 5 coding-agent tasks × 5 trials each, on Haiku 4.5:
+Illustrative shape of a run (baseline harness, 5 tasks x 5 trials):
 
-Iter 1:   retry on schema_drift errors          →  0.70  (+0.08)  ✓
-Iter 2:   stricter tool-description hashing     →  0.66  (-0.04)  ✗
-Iter 3:   early-exit on auth failures           →  0.74  (+0.04)  ✓
-Iter 4:   more specific tool descriptions       →  0.80  (+0.06)  ✓ NEW BEST
+Iter 0:   baseline (benchmarked first, the search root)   ->  b
+Iter 1:   retry on schema_drift errors                    ->  b + d1
+Iter 2:   stricter tool-description hashing               ->  regression
+Iter 3:   early-exit on auth failures                     ->  new best
+Iter 4:   more specific tool descriptions                 ->  new best
 
-      ┌─ right-click iter 2  →  "Fork from here"  →  edit proposer prior  ┐
-      │                                                                   │
-      ▼                                                                   ▼
-Iter 2':  rewrite tool descriptions w/ examples  →  0.78  (+0.16)  ✓
-Iter 3':  add few-shot demos to descriptions     →  0.85  (+0.07)  ✓ GLOBAL BEST
+      +- right-click iter 2 -> "Fork from here" -> edit proposer prior -+
+      |                                                                 |
+      v                                                                 v
+Iter 2':  rewrite tool descriptions w/ examples          ->  branch best
+Iter 3':  add few-shot demos to descriptions             ->  global best
 
-Two branches. Both Pareto-optimal at different (accuracy, tokens) tradeoffs.
-The meta-harness loop is no longer a sequence — it's a search tree.
+Two branches, running concurrently, each with its own artifacts and its
+own Pareto frontier. The meta-harness loop is no longer a sequence --
+it is a search tree.
 ```
 
 ---
@@ -104,76 +112,146 @@ The meta-harness loop is no longer a sequence — it's a search tree.
 - Python 3.11+ and [uv](https://github.com/astral-sh/uv)
 - Docker (for local Postgres)
 - Node.js 20+ + npm (for the dashboard)
-- The [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/overview) (`claude`) for the real proposer
-- An Anthropic API key (`ANTHROPIC_API_KEY`)
+- For live model runs only: an `ANTHROPIC_API_KEY`, and the
+  [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/overview)
+  (`claude`) for the real proposer
 
-**Get running**
+Everything in "Deterministic demo" below runs with **no API key**.
 
 ```bash
-git clone https://github.com/ManagementMO/Meta-Harness.git
+git clone https://github.com/davidyang07/Meta-Harness.git
 cd Meta-Harness
-cp .env.example .env                                          # add ANTHROPIC_API_KEY
+cp .env.example .env                                          # ANTHROPIC_API_KEY optional
 uv sync
 docker compose -f infra/docker-compose.yml up -d postgres
 
-# Run the backend test suite (live LLM test skips without ANTHROPIC_API_KEY)
-cd backend && uv run pytest tests/ -q
-
-# Smoke-test the inner loop end-to-end on one task (~24 s, ~$0.05)
-uv run meta-harness inner --task task-001-fix-typo --candidate baseline
-
-# Run the meta-harness with the mock proposer (no LLM, completes in <1 s)
-uv run meta-harness loop --proposer mock --mock-bench --budget 2 --fresh
-
-# Run with the real claude CLI proposer (~3 min on subscription auth)
-uv run meta-harness loop --proposer claude --budget 1 --fresh --mock-bench
-
-# Resume an interrupted run from its last Postgres checkpoint
-uv run meta-harness resume <run-name>
-
-# Post-evaluate the best candidate against the unseen holdout tasks
-uv run meta-harness loop --proposer mock --mock-bench --budget 2 --fresh --holdout
-```
-
-**Run the dashboard**
-
-```bash
-# Terminal 1 — FastAPI backend (REST + SSE) on :8000
-cd backend && uv run uvicorn app.main:app --port 8000 --reload
-
-# Terminal 2 — Next.js dashboard on :3000 (reads NEXT_PUBLIC_API_BASE_URL,
-# defaults to http://localhost:8000)
-cd frontend/dashboard && npm install && npm run dev
+cd backend && uv run pytest tests/ -q                         # backend suite
 ```
 
 ---
 
-## Build status
+## Demo modes
 
-The implementation is tracked as a topological sequence of 13 verified
-steps in `docs/BUILD_ORDER.md`, each with a literal **definition-of-done**
-command that proves it works. Steps 1–12 are complete; the only remaining
-work is step 13, the formal end-to-end acceptance dry-run. Backend tests
-pass with the live LLM test skipped when `ANTHROPIC_API_KEY` is unavailable.
+Three distinct things, deliberately never blended.
 
-| Step | Goal | Status |
-|---|---|---|
-| 1 | Repo skeleton + Postgres + first eval task | ✓ |
-| 2 | Sandbox + 6 fixed inner-loop tools | ✓ |
-| 3 | Inner StateGraph end-to-end on one task (live LLM) | ✓ |
-| 4 | 5 eval tasks + multi-trial benchmark | ✓ |
-| 5 | Outer StateGraph + mock proposer + Pareto frontier | ✓ |
-| 6 | Real proposer (`claude` CLI subprocess) + SKILL.md | ✓ |
-| 7 | AsyncPostgresSaver + full async refactor | ✓ |
-| 8 | Cross-run memory (PostgresStore) | ✓ |
-| 9 | Time-travel + concurrent branches | ✓ |
-| 10 | FastAPI REST + SSE with closed-set event registry | ✓ |
-| 11 | Frontend dashboard (Next.js + ReactFlow + D3 + Monaco) | ✓ |
-| 12 | CLI completeness + holdout evaluation | ✓ |
-| 13 | End-to-end demo dry-run (formal acceptance) | final |
+### 1. Deterministic demo — no API key, no cost
 
-Run `cd backend && uv run pytest tests/ -q` at any commit to confirm the
-test floor.
+Mock proposer, mock benchmark. Synthetic scores, always labelled
+`metrics_source: "mock"` in artifacts, the API, and the dashboard status
+bar. Proves the substrate: two state machines, checkpointing, forking,
+branch isolation, the full REST/SSE surface, the dashboard.
+
+```bash
+# outer loop, completes in seconds
+uv run meta-harness loop --proposer mock --mock-bench --budget 2 --fresh
+
+# backend + dashboard
+uv run meta-harness serve --port 8000                       # terminal 1
+cd frontend/dashboard && npm install && npm run dev         # terminal 2
+
+# the whole acceptance ladder, end to end
+bash scripts/demo_acceptance.sh
+```
+
+> Start the backend with `meta-harness serve`, not a bare
+> `uvicorn app.main:app`. uvicorn selects Windows' `ProactorEventLoop`,
+> which psycopg cannot use — the server would come up with checkpointing
+> degraded to in-memory. `/health` reports `persistence` and
+> `persistence_error` so a degraded backend is never silent.
+
+### 2. Live model demo — needs credentials, small cost
+
+Real Haiku 4.5 inner loop, real `claude` CLI proposer, measured token
+and cost metrics.
+
+```bash
+uv run meta-harness inner --task task-001-fix-typo --candidate baseline
+uv run meta-harness loop --proposer claude --budget 1 --fresh --mock-bench
+bash scripts/live_smoke.sh        # prints SKIPPED without credentials
+```
+
+### 3. Published benchmark experiment — needs credentials, real cost
+
+The canonical 200-trial protocol behind the one quantitative claim.
+
+```bash
+uv run meta-harness experiment --candidate <evolved-candidate-name>
+```
+
+See [`benchmarks/resume-claim/README.md`](benchmarks/resume-claim/README.md).
+
+---
+
+## Measured results
+
+**Status: no benchmark has been published yet.**
+
+The experiment runner, the committed 200-trial protocol, the raw-trial
+schema, provenance capture and the summary derivation are implemented and
+tested — but the benchmark has not been executed, so there is no
+measured pass-rate number in this repository and none is claimed
+anywhere in it.
+
+- Protocol: [`benchmarks/resume-claim/README.md`](benchmarks/resume-claim/README.md)
+- Published results (currently empty): [`benchmarks/results/`](benchmarks/results/)
+- Claim-by-claim status: [`docs/RESUME_CLAIMS.md`](docs/RESUME_CLAIMS.md)
+
+The summary is derived mechanically from raw per-trial rows —
+`summarize()` accepts no target or expected value — and CI re-derives
+every published summary from its committed rows on each push. Any number
+that appears here in future will be reproducible from
+`benchmarks/results/<experiment-id>/`.
+
+Numbers you will **not** find presented as measurements: average context
+tokens, total run cost, or a pass-rate delta. Those require a run that
+has not happened.
+
+---
+
+## Other useful commands
+
+```bash
+# resume an interrupted run from its last Postgres checkpoint
+uv run meta-harness resume <run-name>
+
+# inspect checkpoint history, restore one checkpoint's exact state
+uv run meta-harness checkpoints <run-name>
+uv run meta-harness replay <run-name> --checkpoint <checkpoint-id>
+
+# fork a run from a checkpoint into a concurrent branch
+uv run meta-harness fork <run-name> --checkpoint <id> --mod proposer_prior="try X"
+
+# post-evaluate on the unseen holdout tasks
+uv run meta-harness benchmark --candidate <name> --holdout
+
+# cross-run memory
+uv run meta-harness memory list
+```
+
+---
+
+## Security posture
+
+Stated plainly, because the honest version is short:
+
+- **Sandboxing is process isolation only.** Each trial gets a fresh
+  temp-directory workspace, a wall-clock timeout, and — on Unix —
+  `RLIMIT_CPU` / `RLIMIT_AS`. There is **no container, no network
+  restriction, and no binary allowlist**. On Windows the rlimits do not
+  apply at all.
+- **Eval task commands are trusted repository content.** `test_command`
+  from `eval/tasks/*/task.json` runs with `shell=True`. That is a
+  deliberate trust boundary: task definitions are committed source, not
+  user input.
+- **The proposer runs with `--dangerously-skip-permissions`** in the
+  repository working directory. Treat a run as "this repo executes model-
+  written code", because it does.
+- **Path inputs are validated.** Run ids, candidate names, branch names
+  and thread ids from HTTP are validated against a strict name pattern
+  and containment-checked before being joined to a path.
+
+Do not run this against untrusted task definitions or on a host you care
+about without adding real isolation.
 
 ---
 
@@ -181,7 +259,8 @@ test floor.
 
 1. **Two LangGraph state machines, not one.** The outer machine evolves
    the inner machine's source code. Both are checkpointed via
-   `AsyncPostgresSaver`, and both support time-travel forking.
+   `AsyncPostgresSaver` — the outer loop threads its saver down into
+   every inner trial — and the outer graph supports time-travel forking.
 2. **The "meta-harness tool" is a SKILL.md, not a framework feature.**
    ~150 lines of Markdown injected via `--append-system-prompt` when
    the proposer's `claude` subprocess is spawned. Anti-overfitting and
@@ -196,10 +275,24 @@ test floor.
    diff fails to apply, the tool surfaces the file's actual current
    content at the failed range so the model fixes the patch without
    re-reading the file.
-5. **Forks are concurrent, not sequential.** Per Appendix A,
-   `asyncio.create_task` over `graph.ainvoke` calls share a single
-   `AsyncPostgresSaver`; both branches grow on the dashboard at once.
-6. **Cross-run memory persists across runs.** A pattern learned in
+5. **Forks are concurrent, and genuinely isolated.** `asyncio.create_task`
+   over `graph.ainvoke` calls share one `AsyncPostgresSaver`, so both
+   branches grow on the dashboard at once. The part that makes that a
+   real search tree: **every artifact a branch writes is scoped to its
+   LangGraph thread** — `runs/<run>/threads/<thread_id>/` — and each
+   branch snapshots its own candidate source. Two branches that reach
+   the same iteration cannot overwrite each other's pending evaluation,
+   frontier, evolution log, proposer session or traces.
+6. **The baseline is measured, not assumed.** Every run benchmarks
+   `agents/baseline.py` under the identical task/trial protocol before
+   the first propose, so iteration 1's delta is a real comparison rather
+   than a comparison against zero.
+7. **Unknown is not zero.** A model with no configured price yields
+   `cost_usd: null`, not `$0.00`; an unmeasured candidate cannot dominate
+   a measured one on the Pareto cost axis; and mock results are tagged
+   `metrics_source: "mock"` and refuse to be aggregated with measured
+   ones.
+8. **Cross-run memory persists across runs.** A pattern learned in
    run A flows into run B's proposer system prompt, so each new run
    starts smarter than cold.
 
@@ -213,23 +306,37 @@ meta-harness/
 │   ├── app/
 │   │   ├── cli.py                             # `meta-harness` CLI (typer)
 │   │   ├── main.py                            # FastAPI app factory
+│   │   ├── event_loop.py                      # psycopg-compatible loop for uvicorn
 │   │   ├── streaming.py                       # closed-set SSE event registry
-│   │   ├── api/                               # FastAPI routers (runs, checkpoints, forks, memory, events)
+│   │   ├── api/                               # FastAPI routers (runs, checkpoints, forks, branches, memory, events)
 │   │   └── meta_harness/                      # internal namespace
 │   │       ├── outer.py                       # outer 4-node StateGraph
 │   │       ├── inner.py                       # inner 5-phase StateGraph
 │   │       ├── state.py                       # MetaHarnessState + CodingAgentState
 │   │       ├── harness.py                     # CodingAgentHarness (11 override points)
 │   │       ├── proposer.py                    # claude_propose + mock_propose
+│   │       ├── candidates.py                  # per-branch source snapshot + isolated import
+│   │       ├── benchmark.py                   # shared (tasks × trials) measured core
+│   │       ├── metrics.py                     # per-call/trial/candidate token + cost
+│   │       ├── experiment.py                  # canonical 200-trial pass-rate experiment
+│   │       ├── replay.py                      # checkpoint restore + state hashing
 │   │       ├── tools.py                       # 6 fixed inner-loop tools
-│   │       ├── sandbox.py                     # /tmp/meta-harness-task-{uuid}/
-│   │       ├── frontier.py                    # Pareto on (accuracy × tokens)
+│   │       ├── sandbox.py                     # <temp>/meta-harness-task-{uuid}/
+│   │       ├── frontier.py                    # Pareto on (accuracy × measured tokens)
 │   │       ├── persistence.py                 # AsyncPostgresSaver
-│   │       ├── runs.py                        # filesystem lifecycle
+│   │       ├── runs.py                        # thread-scoped artifact lifecycle
 │   │       ├── memory.py                      # cross-run patterns (AsyncPostgresStore)
-│   │       └── branches.py                    # time-travel forks + branch registry
+│   │       └── branches.py                    # forks + durable branch metadata
 │   └── tests/                                 # backend pytest suite
 ├── frontend/dashboard/                        # Next.js 16 dashboard
+│   └── e2e/                                   # playwright: mock + live-backend projects
+├── benchmarks/
+│   ├── resume-claim/                          # committed 200-trial protocol
+│   └── results/                               # published, immutable evidence
+├── scripts/
+│   ├── demo_acceptance.sh                     # LEVEL 1 acceptance (no API key)
+│   ├── live_smoke.sh                          # LEVEL 2 acceptance (credentialed)
+│   └── acceptance_api_flow.py                 # shared API assertions
 ├── sdk/meta_harness/                          # public Python library
 ├── skills/meta-harness-coding-agent/SKILL.md  # the proposer's workflow
 ├── eval/
@@ -240,7 +347,25 @@ meta-harness/
 │   ├── baseline.py                            # immutable starting harness
 │   └── (...)                                  # proposer-generated candidates (gitignored)
 ├── infra/docker-compose.yml                   # postgres:16 service
-└── docs/                                      # phase-0 contracts (read these first)
+└── docs/                                      # contracts + claim evidence
+```
+
+### Run artifact layout
+
+Execution state is **thread-scoped**, which is what makes concurrent
+branches safe:
+
+```
+runs/<run_id>/
+├── manifest.json                      # run config + metrics_source
+├── branches.json                      # durable branch metadata (survives restart)
+└── threads/<thread_id>/
+    ├── pending_eval.json              # this branch's proposer -> benchmark handoff
+    ├── frontier_val.json              # this branch's Pareto frontier
+    ├── evolution_summary.jsonl        # this branch's candidates, tagged by thread_id
+    ├── agents/<candidate>.py          # what this branch actually benchmarked
+    ├── candidates/<candidate>/        # eval-result.json, status.json, traces/
+    └── proposer-sessions/iter-N/      # transcript, events, session.json
 ```
 
 ---
@@ -262,6 +387,8 @@ and end up oriented:
 | [`relay_v7_appendix_a_worktrees.md`](relay_v7_appendix_a_worktrees.md) | For step 9 — concurrent branches via asyncio |
 | [`relay_v7_appendix_b_metaharness_internals.md`](relay_v7_appendix_b_metaharness_internals.md) | For step 6+ — Stanford repo deep-dive |
 | [`relay_v7_appendix_c_inner_loop.md`](relay_v7_appendix_c_inner_loop.md) | For inner-loop work — 5-phase agent design |
+| [`docs/RESUME_CLAIMS.md`](docs/RESUME_CLAIMS.md) | **Before quoting any capability** — claim → code → the command that proves it |
+| [`benchmarks/resume-claim/README.md`](benchmarks/resume-claim/README.md) | Before running or citing a benchmark |
 | [`skills/meta-harness-coding-agent/SKILL.md`](skills/meta-harness-coding-agent/SKILL.md) | When debugging the proposer — what it actually reads |
 
 The single most important rule: **`docs/INTERFACES.md` is the contract.**
