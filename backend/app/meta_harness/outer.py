@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -35,14 +34,13 @@ from typing import Any
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
+from app.meta_harness import benchmark as bench
 from app.meta_harness import candidates as cand_mod
 from app.meta_harness import frontier as fr
 from app.meta_harness import memory as mem
 from app.meta_harness import metrics as met
 from app.meta_harness import proposer as prp
 from app.meta_harness import runs as runs_mod
-from app.meta_harness.inner import run_inner_loop
-from app.meta_harness.sandbox import sandbox_for
 from app.meta_harness.state import BASELINE_CANDIDATE_NAME, MetaHarnessState
 from app.streaming import emit_run_event
 
@@ -334,7 +332,6 @@ class OuterLoopRunner:
         differs, and callers must not mix the two.
         """
         task_dirs = self._task_dirs()
-        n_tasks = len(task_dirs)
 
         if self.mock_bench:
             eval_result = self._mock_eval_result(
@@ -345,8 +342,6 @@ class OuterLoopRunner:
                 candidate, task_dirs=task_dirs, thread_id=thread_id, run_id=run_id
             )
 
-        eval_result["n_tasks"] = n_tasks
-        eval_result["n_trials_per_task"] = self.trials
         eval_result["candidate"] = candidate["name"]
         eval_result["thread_id"] = thread_id
         eval_result["timestamp"] = _now()
@@ -369,20 +364,12 @@ class OuterLoopRunner:
         ever presented as a measurement.
         """
         iteration = int(candidate.get("iteration") or 0)
-        base_acc = 0.60
-        target_acc = min(0.95, base_acc + iteration * 0.10)
-        per_task: dict[str, Any] = {}
+        target_acc = min(0.95, 0.60 + iteration * 0.10)
         trial_rows: list[dict[str, Any]] = []
-        total_passes = 0
-        total_obs = 0
         for td in task_dirs:
-            trials = [True] * int(round(self.trials * target_acc))
-            trials += [False] * (self.trials - len(trials))
-            per_task[td.name] = {
-                "pass_rate": sum(trials) / len(trials) if trials else 0.0,
-                "trials": trials,
-            }
-            for idx, passed in enumerate(trials, start=1):
+            outcomes = [True] * int(round(self.trials * target_acc))
+            outcomes += [False] * (self.trials - len(outcomes))
+            for idx, passed in enumerate(outcomes, start=1):
                 trial_rows.append(
                     met.mock_trial_metrics(
                         task_id=td.name,
@@ -391,19 +378,14 @@ class OuterLoopRunner:
                         iteration=iteration,
                     )
                 )
-            total_passes += sum(trials)
-            total_obs += len(trials)
-
-        accuracy = total_passes / total_obs if total_obs else 0.0
-        aggregate = met.aggregate_trials(trial_rows, metrics_source="mock")
-        return {
-            "accuracy": round(accuracy, 4),
-            "per_task": per_task,
-            "trials": trial_rows,
-            "metrics_source": "mock",
-            "_mock_bench": True,
-            **aggregate,
-        }
+        # Same summarizer as the measured path, so the two payloads have
+        # identical shape and differ only in metrics_source.
+        return bench.summarize(
+            trial_rows,
+            task_ids=[d.name for d in task_dirs],
+            trials=self.trials,
+            metrics_source=met.MOCK,
+        )
 
     async def _measured_eval_result(
         self,
@@ -413,86 +395,42 @@ class OuterLoopRunner:
         thread_id: str,
         run_id: str,
     ) -> dict[str, Any]:
-        """Run the real inner loop over (tasks × trials) and measure it."""
+        """Run the real inner loop over (tasks × trials) and measure it.
+
+        The Postgres checkpointer is threaded through to every inner
+        trial, so inner graph transitions get their own checkpoint
+        history under a thread id that identifies the exact
+        (run, branch, candidate, task, trial) that produced it.
+        """
         harness_class = await asyncio.to_thread(
             cand_mod.load_harness_class, candidate, repo_root=self.repo_root
         )
+        traces_root = (
+            runs_mod.candidate_dir(self.run_dir, thread_id, candidate["name"]) / "traces"
+        )
 
-        work = [
-            (td, json.loads((td / "task.json").read_text()), t)
-            for td in task_dirs
-            for t in range(1, self.trials + 1)
-        ]
-        sem = asyncio.Semaphore(self.bench_workers)
-        inner_checkpointer = self.checkpointer if self.checkpoint_inner else None
-
-        async def _one_trial(td: Path, spec: dict, trial_idx: int) -> dict[str, Any]:
-            task_id = td.name
-            trace_dir = (
-                runs_mod.candidate_dir(self.run_dir, thread_id, candidate["name"])
-                / "traces"
-                / f"{task_id}-trial-{trial_idx}"
-            )
-            inner_thread_id = met.inner_thread_id(
+        rows = await bench.run_trials(
+            harness_factory=harness_class,
+            task_dirs=task_dirs,
+            trials=self.trials,
+            workers=self.bench_workers,
+            trace_dir_for=lambda task_id, trial: traces_root
+            / f"{task_id}-trial-{trial}",
+            inner_thread_id_for=lambda task_id, trial: met.inner_thread_id(
                 run_id=run_id,
                 thread_id=thread_id,
                 candidate=candidate["name"],
                 task_id=task_id,
-                trial=trial_idx,
-            )
-            started = time.monotonic()
-            async with sem:
-                harness = harness_class()
-                usage = met.UsageRecorder()
-                met.instrument_harness(harness, usage)
-                with sandbox_for(td / "workspace") as sandbox:
-                    final = await run_inner_loop(
-                        harness,
-                        task_dict=spec,
-                        workspace=sandbox,
-                        trace_dir=trace_dir,
-                        thread_id=inner_thread_id,
-                        checkpointer=inner_checkpointer,
-                    )
-            row = usage.to_trial_row(
-                task_id=task_id,
-                trial=trial_idx,
-                passed=(final.get("score") or 0.0) >= 1.0,
-                score=float(final.get("score") or 0.0),
-                wall_time_s=round(time.monotonic() - started, 3),
-            )
-            row["inner_thread_id"] = inner_thread_id
-            runs_mod.write_json_atomic(trace_dir / "metrics.json", row)
-            return row
-
-        trial_rows = await asyncio.gather(
-            *[_one_trial(td, spec, t) for td, spec, t in work],
-            return_exceptions=False,
+                trial=trial,
+            ),
+            checkpointer=self.checkpointer if self.checkpoint_inner else None,
         )
-
-        per_task: dict[str, Any] = {}
-        for td in task_dirs:
-            rows = sorted(
-                (r for r in trial_rows if r["task_id"] == td.name),
-                key=lambda r: r["trial"],
-            )
-            outcomes = [bool(r["passed"]) for r in rows]
-            per_task[td.name] = {
-                "pass_rate": (sum(outcomes) / len(outcomes)) if outcomes else 0.0,
-                "trials": outcomes,
-            }
-
-        total_passes = sum(1 for r in trial_rows if r["passed"])
-        accuracy = total_passes / len(trial_rows) if trial_rows else 0.0
-        aggregate = met.aggregate_trials(list(trial_rows), metrics_source="measured")
-        return {
-            "accuracy": round(accuracy, 4),
-            "per_task": per_task,
-            "trials": list(trial_rows),
-            "metrics_source": "measured",
-            "_mock_bench": False,
-            **aggregate,
-        }
+        return bench.summarize(
+            rows,
+            task_ids=[d.name for d in task_dirs],
+            trials=self.trials,
+            metrics_source=met.MEASURED,
+        )
 
     async def benchmark(
         self,
