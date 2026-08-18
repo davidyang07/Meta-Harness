@@ -651,6 +651,177 @@ def fork(
 
 
 @app.command()
+def experiment(
+    candidate: str = typer.Option(
+        ...,
+        "--candidate",
+        help="Evolved candidate harness under agents/ to compare against baseline.",
+    ),
+    config: str = typer.Option(
+        "benchmarks/resume-claim/config.json",
+        "--config",
+        help="Canonical protocol file.",
+    ),
+    baseline: str = typer.Option(
+        "baseline", "--baseline", help="Control-arm harness under agents/."
+    ),
+    trials: int = typer.Option(
+        None,
+        "--trials",
+        help="Override trials per task per arm (default: from config).",
+    ),
+    workers: int = typer.Option(
+        None, "--workers", help="Override parallel workers (default: from config)."
+    ),
+    output: str = typer.Option(
+        None,
+        "--output",
+        help="Result directory. Defaults to benchmark-results/<experiment-id>/.",
+    ),
+) -> None:
+    """Run the canonical two-arm pass-rate experiment behind the resume claim.
+
+    Both arms run the identical protocol — same tasks, same trial count,
+    same worker pool, same model — so the measured difference is
+    attributable to the harness. The summary is derived mechanically
+    from raw per-trial rows; no target number exists anywhere in this
+    command.
+
+    THIS ISSUES REAL LLM CALLS. The committed protocol is
+    5 tasks x 20 trials x 2 arms = 200 trials.
+    """
+    import datetime as _dt
+
+    from app.meta_harness import benchmark as bench
+    from app.meta_harness import experiment as exp
+    from app.meta_harness.harness import CodingAgentHarness
+
+    config_path = Path(config)
+    if not config_path.is_absolute():
+        config_path = REPO_ROOT / config_path
+    if not config_path.exists():
+        typer.echo(f"config not found: {config_path}", err=True)
+        raise typer.Exit(2)
+    cfg = exp.load_config(config_path)
+
+    n_trials = trials if trials is not None else int(cfg["trials_per_task"])
+    n_workers = workers if workers is not None else int(cfg["workers"])
+    tasks_dir = REPO_ROOT / cfg["task_set"]
+    task_dirs = bench.discover_tasks(tasks_dir)
+    if not task_dirs:
+        typer.echo(f"no tasks found in {tasks_dir}", err=True)
+        raise typer.Exit(1)
+
+    expected = cfg.get("tasks")
+    if expected and sorted(d.name for d in task_dirs) != sorted(expected):
+        typer.echo("task set does not match the committed protocol:", err=True)
+        typer.echo(f"  expected: {sorted(expected)}", err=True)
+        typer.echo(f"  found:    {sorted(d.name for d in task_dirs)}", err=True)
+        raise typer.Exit(1)
+
+    experiment_id = (
+        f"{cfg['experiment']}-"
+        + _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    )
+    output_dir = (
+        Path(output)
+        if output
+        else REPO_ROOT / "benchmark-results" / experiment_id
+    )
+    if not output_dir.is_absolute():
+        output_dir = REPO_ROOT / output_dir
+
+    baseline_cls = _resolve_harness_class(baseline)
+    candidate_cls = _resolve_harness_class(candidate)
+    model = getattr(candidate_cls, "MODEL", CodingAgentHarness.MODEL)
+
+    total_per_arm = len(task_dirs) * n_trials
+    for line in (
+        f"experiment {experiment_id}",
+        f"  tasks:     {len(task_dirs)}",
+        f"  trials:    {n_trials} per task per arm",
+        f"  arms:      {baseline} (control) vs {candidate}",
+        f"  total:     {total_per_arm * 2} task trials",
+        f"  model:     {model}",
+        f"  output:    {output_dir}",
+    ):
+        typer.echo(line)
+
+    done = {"baseline": 0, "candidate": 0}
+
+    def _progress(arm: str, row: dict[str, Any]) -> None:
+        done[arm] += 1
+        mark = "PASS" if row["passed"] else "FAIL"
+        typer.echo(
+            f"  [{arm} {done[arm]}/{total_per_arm}] {mark} "
+            f"{row['task_id']} trial-{row['trial']}"
+        )
+
+    async def _run() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        baseline_rows = await exp.run_arm(
+            arm="baseline",
+            harness_factory=baseline_cls,
+            tasks_dir=tasks_dir,
+            trials=n_trials,
+            workers=n_workers,
+            output_dir=output_dir,
+            experiment_id=experiment_id,
+            on_trial=_progress,
+        )
+        candidate_rows = await exp.run_arm(
+            arm="candidate",
+            harness_factory=candidate_cls,
+            tasks_dir=tasks_dir,
+            trials=n_trials,
+            workers=n_workers,
+            output_dir=output_dir,
+            experiment_id=experiment_id,
+            on_trial=_progress,
+        )
+        return baseline_rows, candidate_rows
+
+    baseline_rows, candidate_rows = _run_async(_run())
+
+    resolved = {
+        **cfg,
+        "experiment_id": experiment_id,
+        "arms": {"baseline": baseline, "candidate": candidate},
+        "trials_per_task": n_trials,
+        "workers": n_workers,
+        "total_trials": len(baseline_rows) + len(candidate_rows),
+    }
+    environment = exp.capture_environment(
+        repo_root=REPO_ROOT,
+        model=model,
+        tasks=task_dirs,
+        arm_sources={
+            baseline: REPO_ROOT / "agents" / f"{baseline}.py",
+            candidate: REPO_ROOT / "agents" / f"{candidate}.py",
+        },
+    )
+    summary = exp.summarize(
+        baseline_rows=baseline_rows,
+        candidate_rows=candidate_rows,
+        task_ids=[d.name for d in task_dirs],
+        baseline_label=baseline,
+        candidate_label=candidate,
+    )
+    paths = exp.write_results(
+        output_dir=output_dir,
+        config=resolved,
+        environment=environment,
+        baseline_rows=baseline_rows,
+        candidate_rows=candidate_rows,
+        summary=summary,
+    )
+
+    typer.echo("")
+    typer.echo(exp.render_report(summary))
+    typer.echo("")
+    typer.echo(f"wrote {paths['summary']}")
+
+
+@app.command()
 def checkpoints(
     run_name: str = typer.Argument(..., help="Run name (under runs/)"),
     thread: str = typer.Option(
