@@ -1,0 +1,24 @@
+{
+  "experiment": "resume-claim",
+  "description": "Two-arm pass-rate experiment: the immutable baseline harness vs an evolved candidate, over the five frozen search tasks. Both arms run the identical protocol so the difference is attributable to the harness.",
+  "task_set": "eval/tasks",
+  "tasks": [
+    "task-001-fix-typo",
+    "task-002-add-function",
+    "task-003-refactor",
+    "task-004-handle-error",
+    "task-005-implement-spec"
+  ],
+  "trials_per_task": 20,
+  "arms": {
+    "baseline": "baseline",
+    "candidate": null
+  },
+  "workers": 5,
+  "total_trials": 200,
+  "notes": [
+    "arms.candidate is null in the committed config: the evolved harness is whatever the outer loop produced, and is supplied at run time with --candidate.",
+    "trials_per_task x 5 tasks x 2 arms = 200 task trials.",
+    "The model is not pinned here; it is read from META_HARNESS_INNER_MODEL (default claude-haiku-4-5-20251001) and recorded in environment.json."
+  ]
+}
