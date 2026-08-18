@@ -1,5 +1,14 @@
 # Appendix B — The Meta-Harness Two-Loop Architecture & Our Minimal Coding Agent
 
+> **Historical design record.** This document captures the design
+> intent from before implementation, and is preserved for the *why*
+> behind the architecture. It is **not** a description of current
+> behaviour and its aspirational wording — including phrasing like
+> "reversible by construction" — is not a claim about the shipped system.
+> For what is actually implemented and how it is proven, read
+> [`docs/RESUME_CLAIMS.md`](docs/RESUME_CLAIMS.md) and
+> [`docs/INTERFACES.md`](docs/INTERFACES.md) (§0 Amendments).
+
 *A deep-dive into how Stanford's Meta-Harness actually works internally, and a precise spec for what we ship: the inner harness (a minimal coding agent) and the outer meta-harness skill (the proposer's instruction set).*
 
 ---

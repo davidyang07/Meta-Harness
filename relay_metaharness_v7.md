@@ -1,5 +1,14 @@
 # RELAY — Time-Travel for Meta-Harness Optimization (v7, hackathon-scoped PoC)
 
+> **Historical design record.** This document captures the design
+> intent from before implementation, and is preserved for the *why*
+> behind the architecture. It is **not** a description of current
+> behaviour and its aspirational wording — including phrasing like
+> "reversible by construction" — is not a claim about the shipped system.
+> For what is actually implemented and how it is proven, read
+> [`docs/RESUME_CLAIMS.md`](docs/RESUME_CLAIMS.md) and
+> [`docs/INTERFACES.md`](docs/INTERFACES.md) (§0 Amendments).
+
 *A great proof-of-concept that maps the Stanford Meta-Harness loop onto LangGraph state machines, with rewind, fork, and memory.*
 *Secure, consistent, reversible — by construction.*
 *LA Hacks 2026 — definitive build doc, v7 (post-scope-correction).*
