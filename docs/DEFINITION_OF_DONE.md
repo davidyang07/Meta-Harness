@@ -12,14 +12,17 @@ disagrees, the implementation is wrong.*
 # One-time setup
 docker compose -f infra/docker-compose.yml up -d postgres
 uv sync
-(cd frontend && npm install && npm run build)
+(cd frontend/dashboard && npm install && npm run build)
+
+# Prove the system is demo-ready before the demo (no API key needed)
+bash scripts/demo_acceptance.sh
 
 # Three terminals at demo time
-# Terminal 1 — backend
-cd backend && uv run uvicorn app.main:app --port 8000 --reload
+# Terminal 1 — backend (NOT a bare `uvicorn app.main:app`; see the note below)
+cd backend && uv run meta-harness serve --port 8000
 
 # Terminal 2 — frontend
-cd frontend && npm run dev
+cd frontend/dashboard && npm run dev
 
 # Terminal 3 — kick off the run
 uv run meta-harness loop \
@@ -33,55 +36,106 @@ uv run meta-harness loop \
 # Browser: http://localhost:3000/runs/demo
 ```
 
-ANTHROPIC_API_KEY is loaded from `.env`. Claude Code (`claude` CLI)
-must be on `PATH` per Phase-1.1 resolution.
+`ANTHROPIC_API_KEY` is loaded from `.env`; Claude Code (`claude` CLI)
+must be on `PATH` for the real proposer. Without credentials, swap in
+`--proposer mock --mock-bench` and everything below still holds except
+the model-dependent parts.
+
+**Use `meta-harness serve`.** uvicorn selects Windows'
+`ProactorEventLoop`, which psycopg's async driver cannot use, so a bare
+`uvicorn app.main:app` starts a backend with checkpointing silently
+degraded to in-memory — no checkpoint history, no forking, no branch
+recovery. `GET /health` reports `persistence` and `persistence_error`;
+check it before demoing.
 
 ---
 
 ## Expected output structure
 
-### Linear branch (~6 minutes, baseline ≈ 0.62)
+> **The tables below are illustrative, not measured.** They describe the
+> *shape* a run should take so a reader knows what "working" looks like.
+> No benchmark has been executed in this repository, so no accuracy,
+> token or cost figure here is a measurement. See
+> [`docs/RESUME_CLAIMS.md`](RESUME_CLAIMS.md) for what is actually
+> verified and [`benchmarks/resume-claim/README.md`](../benchmarks/resume-claim/README.md)
+> for the protocol that would produce real numbers.
 
-| Iter | Hypothesis | Score | Δ | Outcome |
-|---|---|---|---|---|
-| 1 | retry on schema_drift errors | 0.70 | +0.08 | keep ✓ |
-| 2 | stricter tool-description hashing | 0.66 | −0.04 | reject ✗ |
-| 3 | early-exit on auth failures | 0.74 | +0.04 | keep ✓ |
-| 4 | more specific tool descriptions | 0.80 | +0.06 | keep, new best ✓ |
+### Linear branch — illustrative shape
 
-Linear best: **0.80** at iter 4, ≈24,800 avg context tokens.
+| Iter | Candidate | Outcome |
+|---|---|---|
+| 0 | `baseline` | **benchmarked first**; the measured search root |
+| 1 | retry on schema_drift errors | keep, if it beats the measured baseline |
+| 2 | stricter tool-description hashing | reject on regression |
+| 3 | early-exit on auth failures | keep |
+| 4 | more specific tool descriptions | keep, new best |
 
-### Forked branch (live during demo Act 3)
+The delta on every row is computed against the *measured* accuracy of
+the prior best, and `status.json` records `compared_against` and
+`compared_against_accuracy` so the comparison is auditable.
 
-Right-click iter-2 checkpoint → **Fork from here** → edit
-`proposer_prior` → click **Resume**. Branch grows concurrently with
-linear branch (Appendix A `asyncio.create_task`).
+### Forked branch — illustrative shape
 
-| Iter | Hypothesis | Score | Δ | Outcome |
-|---|---|---|---|---|
-| 2′ | rewrite tool descriptions w/ examples | 0.78 | +0.16 from iter 1 | keep ✓ |
-| 3′ | add few-shot demos to descriptions | 0.85 | +0.07 | keep, new global best ✓ |
+Right-click a checkpoint in the trajectory → **Fork from here** → edit
+`proposer_prior` → **Create Fork**. The branch runs concurrently with
+the root branch (`asyncio.create_task` over a shared
+`AsyncPostgresSaver`).
 
-Fork best: **0.85** at iter 3′, ≈26,200 avg context tokens.
+| Iter | Candidate | Outcome |
+|---|---|---|
+| 2′ | rewrite tool descriptions w/ examples | keep |
+| 3′ | add few-shot demos to descriptions | keep, branch best |
+
+What must be **verifiably true** during this, and is covered by
+`backend/tests/test_branch_isolation.py`:
+
+- both branches reach the same iteration number concurrently;
+- neither can read or overwrite the other's `pending_eval.json`,
+  `frontier_val.json`, `evolution_summary.jsonl`, proposer session,
+  candidate directory or candidate source snapshot;
+- every evolution row is attributable to its originating `thread_id`;
+- no candidate name is claimed by two branches.
 
 ### Pareto frontier at end of run
 
-Both `more-specific-descriptions` (0.80, 24800) and
-`few-shot-demos-on-descriptions` (0.85, 26200) Pareto-optimal —
-different (accuracy, tokens) tradeoffs. `dominated_by_names == []`
-on both; rejected `tighter-tool-hashing` has both as dominators.
+Each branch keeps its own `frontier_val.json`. A candidate is
+non-dominated when no other has `accuracy >=` and `avg_tokens <=` with
+at least one strict. A candidate whose tokens were never measured
+carries `avg_tokens: null` and is compared on accuracy alone — it can be
+dominated, but it can never dominate on a cost it never paid.
 
-### Holdout (run automatically after the search loop)
+The frontier payload carries `metrics_source`, and reports `"mixed"`
+when mock and measured candidates appear together, so no consumer can
+present a synthetic frontier as a measurement.
 
-Iter-4 (linear best) and iter-3′ (fork best) re-evaluated against
-2 unseen tasks in `eval/holdout/`. Holdout score reported separately
-from search-set score; the gap tells us whether the proposer
-overfit. Reported on the Devpost writeup.
+### Holdout
+
+`--holdout` re-evaluates the best candidate against the two unseen tasks
+in `eval/holdout/`. The result is written to the branch's
+`holdout-result.json` tagged `task_set: "holdout"`, kept separate from
+search-set numbers. The gap between the two is the honest signal about
+overfitting; the proposer never sees holdout tasks during search.
 
 ### Cost & runtime
 
-- Total wall time: **< 8 minutes** (target 6).
-- Total cost: **≈ $3.30** (Appendix C §C.12), hard cap **< $5**.
+Not asserted here, because nothing has been measured. Every real run
+records what it actually spent:
+
+- per trial: `llm_calls`, `input_tokens`, `output_tokens`,
+  `total_tokens`, `cost_usd`, `wall_time_s` in the trace's
+  `metrics.json`;
+- per candidate: totals, mean and median tokens per trial, and
+  `cost_complete` in `eval-result.json`;
+- proposer cost separately, in each `proposer-sessions/iter-N/session.json`.
+
+`cost_usd` is `null` when the model has no configured price
+(`META_HARNESS_PRICING`). It is never `0.0` to mean "unknown".
+
+To estimate before committing to a big run:
+
+```bash
+uv run meta-harness inner --task task-001-fix-typo --candidate baseline
+```
 
 ---
 
