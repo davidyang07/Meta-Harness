@@ -219,6 +219,17 @@ __marimo__/
 
 # === Meta-Harness project-specific ===
 
+# OS / editor junk
+.DS_Store
+Thumbs.db
+
+# Third-party code-graph tool output (regenerated locally, never source)
+/graphify-out/
+
+# Benchmark runner scratch output. Published, immutable evidence lives in
+# benchmarks/results/<experiment-id>/ and IS committed.
+/benchmark-results/
+
 # Per-run outputs (filesystem traces, candidate harnesses, proposer sessions)
 /runs/
 
@@ -241,3 +252,9 @@ agents/*.py
 
 # Local Claude Code guidance — not committed
 CLAUDE.md
+
+# Playwright artifacts
+/frontend/dashboard/test-results/
+/frontend/dashboard/playwright-report/
+/frontend/dashboard/blob-report/
+/frontend/dashboard/.playwright/
