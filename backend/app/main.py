@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -14,6 +15,7 @@ from fastapi.responses import JSONResponse
 
 from app import __version__
 from app.api import branches, checkpoints, events, forks, memory, runs
+from app.event_loop import incompatible_loop_hint, is_psycopg_compatible_loop
 from app.api.runs import cancel_active_runs
 from app.meta_harness.branches import cancel_all_branches, set_runs_root
 from app.meta_harness.memory import memory_store as memory_store_cm
@@ -22,6 +24,8 @@ from app.streaming import StreamingRegistryError
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+log = logging.getLogger("meta_harness.api")
 
 
 def _should_try_persistence(use_persistence: bool | None) -> bool:
@@ -64,19 +68,44 @@ def create_app(
         app.state.persistence_backend = "memory"
         app.state.persistence_cm = None
         app.state.memory_store_cm = None
+        app.state.persistence_error = None
 
-        if _should_try_persistence(use_persistence) and await healthcheck():
-            cm = persistence_layer()
-            app.state.checkpointer = await cm.__aenter__()
-            app.state.persistence_cm = cm
-            app.state.persistence_backend = "postgres"
-            # Best-effort memory store (same Postgres instance)
-            try:
-                mem_cm = memory_store_cm()
-                app.state.memory_store = await mem_cm.__aenter__()
-                app.state.memory_store_cm = mem_cm
-            except Exception:  # noqa: BLE001 — memory is optional
-                pass
+        if _should_try_persistence(use_persistence):
+            # Falling back to in-memory checkpointing is a real capability
+            # loss: no checkpoint history, no forking, no branch recovery.
+            # It used to happen silently. Say why, loudly.
+            if not is_psycopg_compatible_loop():
+                app.state.persistence_error = incompatible_loop_hint()
+                log.error(
+                    "Postgres persistence disabled: %s",
+                    app.state.persistence_error,
+                )
+            elif not await healthcheck():
+                app.state.persistence_error = (
+                    "Postgres is not reachable at the configured POSTGRES_DSN; "
+                    "start it with "
+                    "'docker compose -f infra/docker-compose.yml up -d postgres'"
+                )
+                log.warning(
+                    "Postgres persistence disabled: %s",
+                    app.state.persistence_error,
+                )
+            else:
+                cm = persistence_layer()
+                app.state.checkpointer = await cm.__aenter__()
+                app.state.persistence_cm = cm
+                app.state.persistence_backend = "postgres"
+                # Best-effort memory store (same Postgres instance)
+                try:
+                    mem_cm = memory_store_cm()
+                    app.state.memory_store = await mem_cm.__aenter__()
+                    app.state.memory_store_cm = mem_cm
+                except Exception as exc:  # noqa: BLE001 — memory is optional
+                    log.warning(
+                        "cross-run memory store unavailable (%s); "
+                        "the memory panel will show an empty state",
+                        type(exc).__name__,
+                    )
 
         try:
             yield
@@ -116,11 +145,18 @@ def create_app(
         )
 
     @app.get("/health")
-    async def health() -> dict[str, str]:
+    async def health() -> dict[str, Any]:
+        """Liveness plus an honest report of which backend is in use.
+
+        ``persistence: "memory"`` means checkpoint history, forking and
+        branch recovery are unavailable; ``persistence_error`` says why.
+        """
         return {
             "status": "ok",
             "version": __version__,
             "persistence": app.state.persistence_backend,
+            "persistence_error": getattr(app.state, "persistence_error", None),
+            "memory_store": bool(getattr(app.state, "memory_store", None)),
         }
 
     app.include_router(runs.router)
