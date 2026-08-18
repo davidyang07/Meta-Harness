@@ -123,6 +123,23 @@ def test_qualify_candidate_name_is_unique_per_branch():
     )
 
 
+def test_qualify_candidate_name_is_idempotent():
+    """A proposer that already branch-qualified its label is left alone.
+
+    The mock proposer suffixes its authored agents/<label>.py so two
+    forks do not clobber each other's file. Re-qualifying that label
+    produced names like _mock_iter_2__abc12345__abc12345.
+    """
+    once = runs_mod.qualify_candidate_name("_mock_iter_2", "run-a.fork.beef", "run-a")
+    twice = runs_mod.qualify_candidate_name(once, "run-a.fork.beef", "run-a")
+    assert twice == once
+    assert once.count("__") == 1
+
+    # A different branch still qualifies it, since the suffix differs.
+    other = runs_mod.qualify_candidate_name(once, "run-a.fork.cafe", "run-a")
+    assert other != once and other.startswith(once + "__")
+
+
 def test_find_candidate_dir_searches_all_threads(tmp_path: Path):
     run_dir = _run(tmp_path)
     runs_mod.candidate_dir(run_dir, "run-a.fork.beef", "only-on-fork")

@@ -361,10 +361,17 @@ def qualify_candidate_name(label: str, thread_id: str, run_id: str) -> str:
     suffix derived from the thread id is appended so two branches that
     reach the same iteration — and therefore propose the same default
     label — cannot claim the same artifact directory or source file.
+
+    Idempotent: a proposer that already branch-qualified its label (the
+    mock proposer does, so its authored ``agents/<label>.py`` files do
+    not collide either) gets that label back unchanged rather than
+    ``name__abc12345__abc12345``.
     """
     validate_artifact_name(label, kind="candidate")
     if thread_id == run_id:
         return label
     suffix = hashlib.sha256(thread_id.encode("utf-8")).hexdigest()[:8]
+    if label.endswith(f"__{suffix}"):
+        return label
     qualified = f"{label}__{suffix}"
     return validate_artifact_name(qualified, kind="candidate")
