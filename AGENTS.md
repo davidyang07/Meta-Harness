@@ -12,6 +12,49 @@ Use `uv` for all Python workflows.
 - `cd backend && uv run pytest tests -q`: run the backend test suite.
 - `uv run meta-harness benchmark --candidate baseline --trials 5`: benchmark a candidate across the eval set.
 - `uv run meta-harness loop --proposer mock --mock-bench --budget 2 --fresh`: exercise the outer loop without live LLM calls.
+- `uv run meta-harness serve --port 8000`: serve the API. Use this rather than a bare `uvicorn app.main:app` — uvicorn picks Windows' ProactorEventLoop, which psycopg cannot use, and the backend would come up with checkpointing silently degraded to in-memory.
+- `bash scripts/demo_acceptance.sh`: LEVEL 1 acceptance, no API key required.
+- `bash scripts/live_smoke.sh`: LEVEL 2 acceptance, needs credentials; prints SKIPPED without them.
+- `uv run meta-harness experiment --candidate <name>`: the canonical 200-trial pass-rate experiment (real cost).
+
+## Invariants That Must Not Regress
+
+These were bugs. Each is covered by a test; if you find yourself
+weakening one of those tests, fix the root cause instead.
+
+1. **Execution artifacts are thread-scoped.** Everything a running branch
+   writes lives under `runs/<run>/threads/<thread_id>/`. Never reintroduce
+   a run-level `pending_eval.json`, `frontier_val.json` or
+   `evolution_summary.jsonl` — two branches forked from one checkpoint
+   reach the same iteration and will overwrite each other.
+   (`tests/test_branch_isolation.py`)
+2. **A branch benchmarks its own source snapshot**, not the shared
+   `agents/<label>.py` a concurrent branch may have rewritten.
+   (`tests/test_candidates.py`)
+3. **The baseline is benchmarked before the first propose**, so deltas
+   compare against a measurement rather than zero.
+   (`tests/test_outer.py`)
+4. **Unknown is not zero.** An unpriced model yields `cost_usd: None`;
+   an unmeasured candidate carries `avg_tokens: None` and cannot dominate
+   on the Pareto cost axis. (`tests/test_metrics.py`, `tests/test_frontier.py`)
+5. **Mock never mixes with measured.** Every payload carries
+   `metrics_source`, and aggregation rejects mismatched rows.
+6. **Node side effects are idempotent.** An interrupted LangGraph node is
+   re-executed on resume; writes must key on identity rather than append.
+   (`tests/test_runs_artifacts.py`)
+7. **Holdout tasks never reach the proposer.**
+   (`tests/test_holdout_isolation.py`)
+8. **The benchmark summary is derived from raw trial rows.** `summarize()`
+   takes no target or expected value, and must not gain one.
+   (`tests/test_experiment.py`)
+
+## Claims and Evidence
+
+`docs/RESUME_CLAIMS.md` maps every capability claim to the code that
+implements it and the command that proves it. If you change behaviour
+that a claim depends on, update that document in the same change. Do not
+add a quantitative claim without a committed artifact under
+`benchmarks/results/` that reproduces it.
 
 ## Coding Style & Naming Conventions
 Follow existing Python style: 4-space indentation, type hints, `Path`-based filesystem code, and concise module docstrings. Use `snake_case` for modules, functions, and package directories; use `PascalCase` for classes such as `BaselineHarness`. Keep CLI and backend imports explicit. No formatter or linter config is checked in today, so match the surrounding file style closely and avoid introducing new tooling conventions inside a single change.
