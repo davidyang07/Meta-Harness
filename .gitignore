@@ -238,3 +238,6 @@ frontend/dist/
 agents/*.py
 !agents/__init__.py
 !agents/baseline.py
+
+# Local Claude Code guidance — not committed
+CLAUDE.md
