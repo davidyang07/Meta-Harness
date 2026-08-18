@@ -9,6 +9,7 @@ import pytest
 
 from app.meta_harness.sandbox import (
     SANDBOX_PREFIX,
+    sandbox_root,
     cleanup_sandbox,
     make_sandbox_dir,
     populate_sandbox,
@@ -25,7 +26,8 @@ def test_make_sandbox_dir_creates_unique_temp_dir():
         assert b.exists() and b.is_dir()
         assert a != b
         assert a.name.startswith(SANDBOX_PREFIX)
-        assert str(a).startswith("/tmp/")
+        assert a.parent == sandbox_root()
+        assert b.parent == sandbox_root()
     finally:
         cleanup_sandbox(a)
         cleanup_sandbox(b)

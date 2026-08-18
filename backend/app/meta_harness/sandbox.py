@@ -1,7 +1,8 @@
 """Process-isolated sandbox for inner-loop tool execution.
 
 Per Appendix C §C.6.3:
-- Each task gets a fresh ``/tmp/meta-harness-task-{uuid}/`` directory.
+- Each task gets a fresh ``meta-harness-task-{uuid}/`` directory under the
+  platform temp root (``/tmp`` on Linux/macOS, ``%TEMP%`` on Windows).
 - Commands run with ``subprocess.run(..., cwd=task_dir, timeout=...)``.
 - rlimit 512MB RAM + 60s CPU on Unix via ``resource.setrlimit`` in a
   ``preexec_fn``.
@@ -21,6 +22,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -41,9 +43,20 @@ DEFAULT_RLIMIT_RAM = 512 * 1024 * 1024  # 512 MB
 DEFAULT_RLIMIT_CPU = 60  # seconds
 
 
+def sandbox_root() -> Path:
+    """Return the platform temp root sandboxes are created under.
+
+    ``tempfile.gettempdir()`` resolves ``/tmp`` on Linux/macOS and
+    ``%TEMP%`` on Windows. Hardcoding ``/tmp`` produced ``C:\tmp`` on
+    Windows, which is outside the OS-managed temp tree and is not
+    cleaned up by the platform.
+    """
+    return Path(tempfile.gettempdir())
+
+
 def make_sandbox_dir() -> Path:
-    """Create a fresh ``/tmp/meta-harness-task-{uuid}/`` and return it."""
-    sandbox = Path("/tmp") / f"{SANDBOX_PREFIX}{uuid.uuid4().hex}"
+    """Create a fresh ``<temp>/meta-harness-task-{uuid}/`` and return it."""
+    sandbox = sandbox_root() / f"{SANDBOX_PREFIX}{uuid.uuid4().hex}"
     sandbox.mkdir(parents=True, exist_ok=False)
     return sandbox
 
