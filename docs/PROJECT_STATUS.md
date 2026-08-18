@@ -1,5 +1,14 @@
 # Project Status — Meta-Harness
 
+> **Status note.** This document tracks the original build sequence and is
+> kept for that history. For what the system does today and how each
+> claim is proven, read [`RESUME_CLAIMS.md`](RESUME_CLAIMS.md); for the
+> current cross-boundary contracts read
+> [`INTERFACES.md`](INTERFACES.md) starting at §0 Amendments. To check
+> the system yourself rather than read about it:
+> `bash scripts/demo_acceptance.sh`.
+
+
 > Last updated: 2026-04-26
 
 Meta-Harness is a LangGraph-native substrate for self-improving coding agent harnesses, implementing the Stanford Meta-Harness paradigm. This document tracks what has been accomplished and what remains.

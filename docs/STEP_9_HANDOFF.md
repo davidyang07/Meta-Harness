@@ -1,5 +1,14 @@
 # Step 9 Handoff: Time-Travel Branches
 
+> **Status note.** This document tracks the original build sequence and is
+> kept for that history. For what the system does today and how each
+> claim is proven, read [`RESUME_CLAIMS.md`](RESUME_CLAIMS.md); for the
+> current cross-boundary contracts read
+> [`INTERFACES.md`](INTERFACES.md) starting at §0 Amendments. To check
+> the system yourself rather than read about it:
+> `bash scripts/demo_acceptance.sh`.
+
+
 This note captures what was implemented for Step 9 and what future developers should know before building on it. It is intentionally scoped to backend branch orchestration. It does not change the public interface contract in `docs/INTERFACES.md`.
 
 ## What changed

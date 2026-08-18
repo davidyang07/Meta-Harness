@@ -1,5 +1,14 @@
 # TEAM_HANDOFF.md — 4-Person Hackathon Coordination Plan
 
+> **Status note.** This document tracks the original build sequence and is
+> kept for that history. For what the system does today and how each
+> claim is proven, read [`RESUME_CLAIMS.md`](RESUME_CLAIMS.md); for the
+> current cross-boundary contracts read
+> [`INTERFACES.md`](INTERFACES.md) starting at §0 Amendments. To check
+> the system yourself rather than read about it:
+> `bash scripts/demo_acceptance.sh`.
+
+
 *Historical 4-person hackathon coordination plan. This file is useful for
 understanding how work was split during the build, but it is no longer the
 source of truth for current repository status. Use `README.md`,

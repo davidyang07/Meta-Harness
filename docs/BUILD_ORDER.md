@@ -1,5 +1,14 @@
 # BUILD_ORDER.md — topological execution sequence
 
+> **Status note.** This document tracks the original build sequence and is
+> kept for that history. For what the system does today and how each
+> claim is proven, read [`RESUME_CLAIMS.md`](RESUME_CLAIMS.md); for the
+> current cross-boundary contracts read
+> [`INTERFACES.md`](INTERFACES.md) starting at §0 Amendments. To check
+> the system yourself rather than read about it:
+> `bash scripts/demo_acceptance.sh`.
+
+
 *Thirteen numbered steps. Each one ships a verifiable, runnable slice.
 After each step: run the DoD command, commit
 `step N: <goal> — <what works now>`, then pause for review.*

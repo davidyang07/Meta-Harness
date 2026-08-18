@@ -1,5 +1,14 @@
 # PROJECT_LAYOUT.md — Meta-Harness Monorepo
 
+> **Status note.** This document tracks the original build sequence and is
+> kept for that history. For what the system does today and how each
+> claim is proven, read [`RESUME_CLAIMS.md`](RESUME_CLAIMS.md); for the
+> current cross-boundary contracts read
+> [`INTERFACES.md`](INTERFACES.md) starting at §0 Amendments. To check
+> the system yourself rather than read about it:
+> `bash scripts/demo_acceptance.sh`.
+
+
 The repo is a **uv workspace** with two Python packages (`sdk/`, `backend/`),
 a Next.js app (`frontend/`), and supporting directories. Every Python file
 below has a one-line purpose annotation. Every locked decision in
@@ -51,12 +60,13 @@ meta-harness/                                              # Repo root (uv works
 │   │   │   ├── memory.py                                  # PostgresStore wrapper for cross-run patterns
 │   │   │   ├── persistence.py                             # AsyncPostgresSaver + psycopg AsyncConnectionPool (max_size=20)
 │   │   │   ├── branches.py                                # branch_registry + worktree_add (Appendix A)
-│   │   │   └── runs.py                                    # Run filesystem lifecycle (runs/{run-id}/{agents,traces,proposer-sessions,...})
+│   │   │   └── runs.py                                    # Thread-scoped run artifacts (runs/{run-id}/threads/{thread-id}/...)
 │   │   └── api/                                           # HTTP transport layer
 │   │       ├── __init__.py
 │   │       ├── runs.py                                    # POST /runs, GET /runs, GET /runs/{id}
 │   │       ├── checkpoints.py                             # GET /runs/{id}/checkpoints
-│   │       ├── forks.py                                   # POST /runs/{id}/fork ; POST .../branches/{thread_id}/cancel
+│   │       ├── forks.py                                   # POST /runs/{id}/fork
+│   │       ├── branches.py                                # GET .../branches, .../trajectory; POST .../cancel
 │   │       ├── memory.py                                  # GET /memory/{namespace}
 │   │       └── events.py                                  # GET /runs/{id}/stream (SSE)
 │   └── tests/                                             # pytest suite: test_outer/inner/proposer/tools/sandbox/frontier/memory/branches
