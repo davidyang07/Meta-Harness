@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { useDashboard, useDashboardDispatch } from '@/lib/state';
 import { ScoreChart } from './ScoreChart';
@@ -8,12 +8,24 @@ import { TestOutput } from './TestOutput';
 import { MemoryPanel } from './MemoryPanel';
 import { getDiff, getTestOutput } from '@/lib/api';
 
+/** Real added/removed line counts, read off the diff itself. */
+function diffStats(diff: string): { added: number; removed: number } {
+  let added = 0;
+  let removed = 0;
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('+') && !line.startsWith('+++')) added += 1;
+    else if (line.startsWith('-') && !line.startsWith('---')) removed += 1;
+  }
+  return { added, removed };
+}
+
 export function ContextPanel() {
   const params = useParams<{ run_id: string }>();
-  const { contextTab, selectedNode, tree, mode } = useDashboard();
+  const { contextTab, selectedNode, tree, mode, run } = useDashboard();
   const dispatch = useDashboardDispatch();
   const [diffResult, setDiffResult] = useState<{ candidate: string; value: string | null } | null>(null);
   const [testResult, setTestResult] = useState<{ candidate: string; value: string | null } | null>(null);
+  const [loading, setLoading] = useState(false);
 
   const tabs = ['chart', 'diff', 'test', 'memory'] as const;
   const selected = selectedNode ?? tree.find(n => n.status === 'best')?.candidate ?? tree[0]?.candidate ?? null;
@@ -21,35 +33,46 @@ export function ContextPanel() {
   const diff = diffResult?.candidate === selected ? diffResult.value : null;
   const testOut = testResult?.candidate === selected ? testResult.value : null;
   const perTask = Object.entries(selectedTreeNode?.scores.per_task ?? {});
-  const hasMockTaskData = mode === 'mock' && perTask.length > 0;
+
+  // `mode === 'mock'` means NO BACKEND — the built-in offline demo. It is
+  // the only context in which this panel may render illustrative text,
+  // and it is labelled as such. A live run whose *metrics* are mock
+  // (metricsSource === 'mock') still shows its own real artifacts; the
+  // status bar reports the provenance.
+  const offlineDemo = mode === 'mock';
+  const hasFixtureTaskData = offlineDemo && perTask.length > 0;
 
   useEffect(() => {
     let cancelled = false;
     if (!selected || mode !== 'live') return;
-    getDiff(params.run_id, selected)
-      .then(value => {
-        if (!cancelled) setDiffResult({ candidate: selected, value });
-      })
-      .catch(() => {
-        if (!cancelled) setDiffResult({ candidate: selected, value: null });
+    setLoading(true);
+    Promise.allSettled([
+      getDiff(params.run_id, selected),
+      getTestOutput(params.run_id, selected),
+    ]).then(([d, t]) => {
+      if (cancelled) return;
+      setDiffResult({
+        candidate: selected,
+        value: d.status === 'fulfilled' ? d.value : null,
       });
-    getTestOutput(params.run_id, selected)
-      .then(value => {
-        if (!cancelled) setTestResult({ candidate: selected, value });
-      })
-      .catch(() => {
-        if (!cancelled) setTestResult({ candidate: selected, value: null });
+      setTestResult({
+        candidate: selected,
+        value: t.status === 'fulfilled' ? t.value : null,
       });
+      setLoading(false);
+    });
     return () => {
       cancelled = true;
     };
   }, [mode, params.run_id, selected]);
 
-  const mockDiffPreview = hasMockTaskData
+  const stats = useMemo(() => (diff ? diffStats(diff) : null), [diff]);
+
+  const fixtureDiffPreview = hasFixtureTaskData
     ? perTask
       .slice(0, 4)
-      .map(([taskName, stats]) => {
-        const passPct = Math.round(stats.pass_rate * 100);
+      .map(([taskName, taskStats]) => {
+        const passPct = Math.round(taskStats.pass_rate * 100);
         return `@@ task:${taskName}
 -${taskName}: unstable retries (${passPct - 10}% pass)
 +${taskName}: stricter guard + typed fallback (${passPct}% pass)`;
@@ -57,19 +80,33 @@ export function ContextPanel() {
       .join('\n\n')
     : null;
 
-  const mockTestOutput = hasMockTaskData
+  const fixtureTestOutput = hasFixtureTaskData
     ? [
-      `mock suite for ${selected ?? 'candidate'}`,
-      ...perTask.map(([taskName, stats]) => {
-        const passCount = stats.trials.filter(Boolean).length;
-        const total = stats.trials.length;
+      `illustrative suite for ${selected ?? 'candidate'}`,
+      ...perTask.map(([taskName, taskStats]) => {
+        const passCount = taskStats.trials.filter(Boolean).length;
+        const total = taskStats.trials.length;
         const status = passCount === total ? 'PASS' : passCount === 0 ? 'FAIL' : 'FLAKY';
-        return `${status}  ${taskName}  (${passCount}/${total}, ${Math.round(stats.pass_rate * 100)}%)`;
+        return `${status}  ${taskName}  (${passCount}/${total}, ${Math.round(taskStats.pass_rate * 100)}%)`;
       }),
       '',
-      `summary: ${perTask.reduce((acc, [, stats]) => acc + stats.trials.filter(Boolean).length, 0)}/${perTask.reduce((acc, [, stats]) => acc + stats.trials.length, 0)} checks passed`,
+      `summary: ${perTask.reduce((acc, [, s]) => acc + s.trials.filter(Boolean).length, 0)}/${perTask.reduce((acc, [, s]) => acc + s.trials.length, 0)} checks passed`,
     ].join('\n')
     : null;
+
+  const emptyState = (what: string) =>
+    selected
+      ? `No ${what} recorded for ${selected}.`
+      : 'No candidate selected yet.';
+
+  const fixtureBadge = (
+    <div
+      data-testid="fixture-banner"
+      className="mb-3 inline-block rounded border border-amber/40 bg-amber/10 px-2 py-1 text-[9px] uppercase tracking-wide text-amber"
+    >
+      Offline demo — illustrative, not from a run
+    </div>
+  );
 
   return (
     <div className="flex-1 flex flex-col bg-panel rounded overflow-hidden min-h-0">
@@ -91,33 +128,42 @@ export function ContextPanel() {
       <div className="flex-1 flex flex-col overflow-y-auto px-6 py-5 min-h-0">
         {contextTab === 'chart' && <div className="flex-1"><ScoreChart /></div>}
 
-        {contextTab === 'diff' && diff && (
+        {contextTab === 'diff' && diff && stats && (
           <div>
             <div className="flex items-center gap-2 mb-4 text-xs">
               <span className="text-text-hi font-semibold">agents/{selected ?? 'candidate'}.py</span>
-              <span className="text-green">+18</span>
-              <span className="text-red">-3</span>
+              {/* Counted from the diff, not a placeholder. */}
+              <span className="text-green">+{stats.added}</span>
+              <span className="text-red">-{stats.removed}</span>
+              {run?.metricsSource === 'mock' && (
+                <span className="text-amber">mock run</span>
+              )}
             </div>
             <DiffViewer diff={diff} />
           </div>
         )}
-        {contextTab === 'diff' && !diff && mockDiffPreview && (
+        {contextTab === 'diff' && !diff && fixtureDiffPreview && (
           <div className="space-y-3">
-            <div className="text-[10px] uppercase tracking-wide text-cyan">Mock task patch preview</div>
-            <pre className="text-xs leading-5 text-text-hi whitespace-pre-wrap">{mockDiffPreview}</pre>
+            {fixtureBadge}
+            <pre className="text-xs leading-5 text-text-hi whitespace-pre-wrap">{fixtureDiffPreview}</pre>
           </div>
         )}
-        {contextTab === 'diff' && !diff && !mockDiffPreview && (
-          <div className="text-text-mid text-xs">
-            {selected ? `No diff available for ${selected}` : 'No candidate selected yet.'}
+        {contextTab === 'diff' && !diff && !fixtureDiffPreview && (
+          <div className="text-text-mid text-xs" data-testid="diff-empty">
+            {loading ? 'Loading diff…' : emptyState('diff')}
           </div>
         )}
 
         {contextTab === 'test' && testOut && <TestOutput output={testOut} />}
-        {contextTab === 'test' && !testOut && mockTestOutput && <TestOutput output={mockTestOutput} />}
-        {contextTab === 'test' && !testOut && !mockTestOutput && (
-          <div className="text-text-mid text-xs">
-            {selected ? `No test output available for ${selected}` : 'No candidate selected yet.'}
+        {contextTab === 'test' && !testOut && fixtureTestOutput && (
+          <div className="space-y-3">
+            {fixtureBadge}
+            <TestOutput output={fixtureTestOutput} />
+          </div>
+        )}
+        {contextTab === 'test' && !testOut && !fixtureTestOutput && (
+          <div className="text-text-mid text-xs" data-testid="test-empty">
+            {loading ? 'Loading test output…' : emptyState('test output')}
           </div>
         )}
 

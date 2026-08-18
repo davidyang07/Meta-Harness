@@ -47,8 +47,10 @@ test.describe('Dashboard (mock mode, no backend)', () => {
     const diffTab = page.getByRole('button', { name: /diff/i });
     await diffTab.click();
 
+    // Offline fixture content must be labelled as such, never rendered
+    // as if it came from a run.
     await expect(
-      page.getByText(/Mock task patch preview|No diff available for/),
+      page.getByTestId('fixture-banner').first().or(page.getByTestId('diff-empty')),
     ).toBeVisible({ timeout: 10_000 });
   });
 

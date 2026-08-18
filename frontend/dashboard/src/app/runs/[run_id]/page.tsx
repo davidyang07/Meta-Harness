@@ -37,7 +37,7 @@ function DashboardShell() {
     const nodes = toTreeNodesFromRunDetail(detail).sort((a, b) => a.iteration - b.iteration);
 
     dispatch({ type: 'RESET' });
-    dispatch({ type: 'SET_MODE', payload: runInfo.isMock ? 'mock' : 'live' });
+    dispatch({ type: 'SET_MODE', payload: 'live' });
     dispatch({ type: 'SET_RUN', payload: { ...runInfo, iteration: 0 } });
     dispatch({ type: 'SET_SSE_CONNECTED', payload: true });
 
@@ -85,8 +85,12 @@ function DashboardShell() {
         const detail = await getRunDetail(runId);
         latestDetailRef.current = detail;
         const runInfo = toRunInfo(detail);
+        // `mode` is transport ("is a backend answering"), NOT provenance.
+        // Conflating them made a live mock-bench run fall back to the
+        // offline fixtures and render fabricated diff/test text as if it
+        // were the run's own. Provenance lives on run.metricsSource and
+        // is surfaced by the status bar.
         dispatch({ type: 'SET_RUN', payload: runInfo });
-        if (runInfo.isMock) dispatch({ type: 'SET_MODE', payload: 'mock' });
         for (const node of toTreeNodesFromRunDetail(detail)) {
           dispatch({ type: 'ADD_TREE_NODE', payload: node });
         }
