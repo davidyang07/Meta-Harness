@@ -683,7 +683,7 @@ def experiment(
         help="Evolved candidate harness under agents/ to compare against baseline.",
     ),
     config: str = typer.Option(
-        "benchmarks/resume-claim/config.json",
+        "benchmarks/pass-rate/config.json",
         "--config",
         help="Canonical protocol file.",
     ),
@@ -704,7 +704,7 @@ def experiment(
         help="Result directory. Defaults to benchmark-results/<experiment-id>/.",
     ),
 ) -> None:
-    """Run the canonical two-arm pass-rate experiment behind the resume claim.
+    """Run the canonical two-arm pass-rate experiment.
 
     Both arms run the identical protocol — same tasks, same trial count,
     same worker pool, same model — so the measured difference is

@@ -1,8 +1,8 @@
-# Resume-claim benchmark — canonical 200-trial protocol
+# Pass-rate benchmark — canonical 200-trial protocol
 
 This directory holds the committed, immutable protocol for the one
-quantitative claim this project makes about agent pass rate. Published
-results live in `benchmarks/results/<experiment-id>/`.
+quantitative result this project reports about agent pass rate.
+Published results live in `benchmarks/results/<experiment-id>/`.
 
 ## The protocol
 

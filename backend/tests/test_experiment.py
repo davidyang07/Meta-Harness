@@ -1,4 +1,4 @@
-"""The resume-claim experiment: summary derivation, provenance, IO.
+"""The pass-rate experiment: summary derivation, provenance, IO.
 
 The single most important property here is that the headline number
 cannot be authored. ``summarize`` takes raw trial rows and nothing else,
@@ -125,7 +125,7 @@ def test_empty_experiment_reports_no_result_rather_than_zero():
     )
     assert summary["baseline_accuracy"] is None
     assert summary["absolute_percentage_point_delta"] is None
-    assert "No measured result" in exp.resume_claim_sentence(summary)
+    assert "No measured result" in exp.reported_metric_sentence(summary)
 
 
 # ── statistics ────────────────────────────────────────────────────────
@@ -151,7 +151,7 @@ def test_wald_interval_handles_zero_trials():
     assert ci["lower"] is None and ci["upper"] is None
 
 
-def test_resume_claim_sentence_quotes_only_measured_values():
+def test_reported_metric_sentence_quotes_only_measured_values():
     summary = exp.summarize(
         baseline_rows=_rows("baseline", {"t": [True, False, False, False]}),
         candidate_rows=_rows("candidate", {"t": [True, True, True, False]}),
@@ -159,7 +159,7 @@ def test_resume_claim_sentence_quotes_only_measured_values():
         baseline_label="baseline",
         candidate_label="evolved",
     )
-    sentence = exp.resume_claim_sentence(summary)
+    sentence = exp.reported_metric_sentence(summary)
     assert "+50.0 percentage points" in sentence
     assert "across 8 task trials" in sentence
     assert "1/4 baseline vs 3/4 evolved" in sentence
@@ -259,7 +259,7 @@ def test_summary_recomputes_identically_from_the_written_files(tmp_path: Path):
 
 
 def test_committed_config_matches_the_documented_200_trial_protocol():
-    config = exp.load_config(REPO_ROOT / "benchmarks" / "resume-claim" / "config.json")
+    config = exp.load_config(REPO_ROOT / "benchmarks" / "pass-rate" / "config.json")
     assert config["task_set"] == "eval/tasks"
     assert config["trials_per_task"] == 20
     assert len(config["tasks"]) == 5
@@ -271,7 +271,7 @@ def test_committed_config_matches_the_documented_200_trial_protocol():
 
 
 def test_committed_config_task_ids_exist_on_disk():
-    config = exp.load_config(REPO_ROOT / "benchmarks" / "resume-claim" / "config.json")
+    config = exp.load_config(REPO_ROOT / "benchmarks" / "pass-rate" / "config.json")
     for task_id in config["tasks"]:
         assert (REPO_ROOT / config["task_set"] / task_id / "task.json").is_file()
 

@@ -57,7 +57,7 @@ check it before demoing.
 > No benchmark has been executed in this repository, so no accuracy,
 > token or cost figure here is a measurement. See
 > [`docs/RESUME_CLAIMS.md`](RESUME_CLAIMS.md) for what is actually
-> verified and [`benchmarks/resume-claim/README.md`](../benchmarks/resume-claim/README.md)
+> verified and [`benchmarks/pass-rate/README.md`](../benchmarks/pass-rate/README.md)
 > for the protocol that would produce real numbers.
 
 ### Linear branch — illustrative shape

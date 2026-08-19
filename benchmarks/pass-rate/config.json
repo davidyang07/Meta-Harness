@@ -1,5 +1,5 @@
 {
-  "experiment": "resume-claim",
+  "experiment": "pass-rate",
   "description": "Two-arm pass-rate experiment: the immutable baseline harness vs an evolved candidate, over the five frozen search tasks. Both arms run the identical protocol so the difference is attributable to the harness.",
   "task_set": "eval/tasks",
   "tasks": [

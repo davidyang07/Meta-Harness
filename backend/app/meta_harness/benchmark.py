@@ -1,7 +1,7 @@
 """Shared measured-benchmark core: (tasks × trials) → raw rows + aggregate.
 
 One implementation, three callers — the outer loop's ``benchmark`` node,
-``meta-harness benchmark``, and the resume-claim experiment runner. They
+``meta-harness benchmark``, and the pass-rate experiment runner. They
 previously had three copies of the trial loop, and two of them wrote
 placeholder ``{"input_tokens": 0, "cost_usd": 0.0}`` blocks that looked
 like measurements.

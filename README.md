@@ -178,7 +178,7 @@ The canonical 200-trial protocol behind the one quantitative claim.
 uv run meta-harness experiment --candidate <evolved-candidate-name>
 ```
 
-See [`benchmarks/resume-claim/README.md`](benchmarks/resume-claim/README.md).
+See [`benchmarks/pass-rate/README.md`](benchmarks/pass-rate/README.md).
 
 ---
 
@@ -192,7 +192,7 @@ tested — but the benchmark has not been executed, so there is no
 measured pass-rate number in this repository and none is claimed
 anywhere in it.
 
-- Protocol: [`benchmarks/resume-claim/README.md`](benchmarks/resume-claim/README.md)
+- Protocol: [`benchmarks/pass-rate/README.md`](benchmarks/pass-rate/README.md)
 - Published results (currently empty): [`benchmarks/results/`](benchmarks/results/)
 - Claim-by-claim status: [`docs/RESUME_CLAIMS.md`](docs/RESUME_CLAIMS.md)
 
@@ -388,7 +388,7 @@ and end up oriented:
 | [`relay_v7_appendix_b_metaharness_internals.md`](relay_v7_appendix_b_metaharness_internals.md) | For step 6+ — Stanford repo deep-dive |
 | [`relay_v7_appendix_c_inner_loop.md`](relay_v7_appendix_c_inner_loop.md) | For inner-loop work — 5-phase agent design |
 | [`docs/RESUME_CLAIMS.md`](docs/RESUME_CLAIMS.md) | **Before quoting any capability** — claim → code → the command that proves it |
-| [`benchmarks/resume-claim/README.md`](benchmarks/resume-claim/README.md) | Before running or citing a benchmark |
+| [`benchmarks/pass-rate/README.md`](benchmarks/pass-rate/README.md) | Before running or citing a benchmark |
 | [`skills/meta-harness-coding-agent/SKILL.md`](skills/meta-harness-coding-agent/SKILL.md) | When debugging the proposer — what it actually reads |
 
 The single most important rule: **`docs/INTERFACES.md` is the contract.**

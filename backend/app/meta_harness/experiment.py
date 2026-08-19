@@ -1,6 +1,6 @@
-"""The canonical two-arm pass-rate experiment behind the resume claim.
+"""The canonical two-arm pass-rate experiment.
 
-Protocol (``benchmarks/resume-claim/config.json``):
+Protocol (``benchmarks/pass-rate/config.json``):
 
     5 frozen search tasks x 20 independent trials  = 100 baseline trials
     the same 5 tasks     x 20 independent trials  = 100 evolved trials
@@ -268,7 +268,7 @@ def summarize(
     }
 
 
-def resume_claim_sentence(summary: dict[str, Any]) -> str:
+def reported_metric_sentence(summary: dict[str, Any]) -> str:
     """The one sentence a reader may quote, built only from the summary."""
     delta = summary.get("absolute_percentage_point_delta")
     if delta is None:
@@ -313,8 +313,8 @@ def render_report(summary: dict[str, Any]) -> str:
             else f"  {task_id}: incomplete"
         )
     lines.append("")
-    lines.append("Resume-safe claim:")
-    lines.append(f'  "{resume_claim_sentence(summary)}"')
+    lines.append("Reported metric:")
+    lines.append(f'  "{reported_metric_sentence(summary)}"')
     return "\n".join(lines)
 
 
@@ -452,7 +452,7 @@ from `baseline-results.jsonl` and `candidate-results.jsonl` by
 ## Reproducing
 
 ```bash
-uv run meta-harness experiment --config benchmarks/resume-claim/config.json \\
+uv run meta-harness experiment --config benchmarks/pass-rate/config.json \\
     --candidate <candidate-name>
 ```
 

@@ -40,6 +40,6 @@ are not needed to verify the summary.
 ## Status
 
 No canonical 200-trial experiment has been published yet. See
-[`../resume-claim/README.md`](../resume-claim/README.md) for the exact
+[`../pass-rate/README.md`](../pass-rate/README.md) for the exact
 command that produces one, and `docs/RESUME_CLAIMS.md` for which claims
 are measured and which are still pending.

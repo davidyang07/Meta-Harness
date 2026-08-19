@@ -76,7 +76,7 @@ measured one.
 The JSON examples throughout this document show *shape*, not results.
 No accuracy, token or cost figure in this file is a measurement. See
 [`docs/RESUME_CLAIMS.md`](RESUME_CLAIMS.md) and
-[`benchmarks/resume-claim/README.md`](../benchmarks/resume-claim/README.md).
+[`benchmarks/pass-rate/README.md`](../benchmarks/pass-rate/README.md).
 
 ---
 

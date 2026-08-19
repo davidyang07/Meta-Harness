@@ -245,11 +245,11 @@ Total trials: 200
 ```
 
 **Then, and only then**, the resume sentence is the one the runner
-prints — `experiment.resume_claim_sentence(summary)` — with whatever
+prints — `experiment.reported_metric_sentence(summary)` — with whatever
 delta the trials produced. `+7`, `+9` and `+15` are all acceptable
 answers. The protocol is never tuned to reach a particular number.
 
-**Protocol**: [`benchmarks/resume-claim/README.md`](../benchmarks/resume-claim/README.md)
+**Protocol**: [`benchmarks/pass-rate/README.md`](../benchmarks/pass-rate/README.md)
 **Published results**: `benchmarks/results/` (currently empty)
 
 **Evidence that the number cannot be fabricated**
@@ -344,4 +344,4 @@ cd backend && uv run pytest tests/test_sandbox.py tests/test_tools.py -q
 | How do you know the branches are really isolated? | `test_same_iteration_branches_keep_separate_artifacts` forks two branches from one checkpoint, runs both to the same iteration concurrently against a shared `AsyncPostgresSaver`, and asserts nothing is shared. |
 | Why is the baseline benchmarked? | Otherwise iteration 1's delta is measured against zero and every first candidate looks like a huge win. The baseline runs the identical task/trial protocol and becomes the search-tree root. |
 | Can you replay a run? | I can restore any checkpoint's exact state and prove it with a SHA-256, and replay the recorded transitions without calling a model. I can't reproduce stochastic model output, and I don't claim to. |
-| What's the measured improvement? | The experiment runner is built and tested; I haven't published a number yet because I ran the work without API credentials. The exact command is in `benchmarks/resume-claim/README.md`, and the summary is derived from raw trial rows so it can't be fudged. |
+| What's the measured improvement? | The experiment runner is built and tested; I haven't published a number yet because I ran the work without API credentials. The exact command is in `benchmarks/pass-rate/README.md`, and the summary is derived from raw trial rows so it can't be fudged. |

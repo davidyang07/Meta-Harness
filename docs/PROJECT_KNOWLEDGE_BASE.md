@@ -2537,7 +2537,7 @@ has no configured price.
 > No benchmark has been executed in this repository, so there is no
 > measured accuracy, token or cost figure to quote. See
 > [`RESUME_CLAIMS.md`](RESUME_CLAIMS.md) for what is actually verified
-> and [`../benchmarks/resume-claim/README.md`](../benchmarks/resume-claim/README.md)
+> and [`../benchmarks/pass-rate/README.md`](../benchmarks/pass-rate/README.md)
 > for the protocol that would produce real numbers.
 
 ### 18.1 Holdout
