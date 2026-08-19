@@ -1,23 +1,24 @@
-# Resume claims → implementation → evidence
+# Capability reference
 
-Every claim this project makes about itself, the code that implements it,
-and the command that proves it. If a claim is not measured yet, it says
-so here rather than being softened elsewhere.
+What this system does, the code that implements it, and the command that
+validates it. Where a capability is implemented but not yet measured,
+this document says so rather than the wording being softened elsewhere.
 
-Verdicts used below:
+Status values used below:
 
-- **VERIFIED** — implemented and covered by an automated test.
-- **VERIFIED WITH PRECISE WORDING** — implemented, but the obvious short
-  phrasing would overclaim; the exact defensible sentence is given.
-- **NOT YET VERIFIED** — the machinery exists, the measurement does not.
+- **Implemented and tested** — shipped and covered by an automated test.
+- **Implemented — precise wording required** — shipped, but the obvious
+  short description would overclaim; the accurate wording is given.
+- **Implemented — not yet measured** — the machinery exists, the
+  measurement does not.
 
 ---
 
-## 1. A self-improving coding agent that rewrites its own harness from execution traces
+## 1. Self-improving harness
 
-**Verdict: VERIFIED**
+**Status: implemented and tested**
 
-**Implementation**
+### Implementation
 
 | Piece | File |
 |---|---|
@@ -32,7 +33,7 @@ The proposer reads the branch's own `evolution_summary.jsonl`,
 `agents/<name>.py` subclassing `CodingAgentHarness`. The 6 inner-loop
 tools are a fixed contract it may not change.
 
-**Evidence**
+### Validation
 
 ```bash
 # offline: the loop runs, snapshots candidate source, evolves state
@@ -46,11 +47,19 @@ Key tests: `test_candidate_source_is_snapshotted_per_branch`,
 `test_mock_outer_loop_produces_all_files`,
 `test_claude_propose_fails_loudly_when_the_branch_handoff_is_missing`.
 
+### Limitations
+
+The search space is bounded to the 11 override points; a candidate
+cannot change the tool contract, and validate-time enforcement rejects
+one that tries.
+
 ---
 
-## 2. Dual LangGraph state machines
+## 2. Dual LangGraph execution
 
-**Verdict: VERIFIED**
+**Status: implemented and tested**
+
+### Implementation
 
 **Outer** — `backend/app/meta_harness/outer.py`, `OuterLoopRunner.build()`
 
@@ -72,7 +81,7 @@ START → orient → plan → act → verify ─┬→ submit → END
 Both compile with a checkpointer; the outer loop passes its
 `AsyncPostgresSaver` down into every inner trial.
 
-**Evidence**
+### Validation
 
 ```bash
 cd backend && uv run pytest tests/test_inner.py tests/test_outer.py \
@@ -83,11 +92,19 @@ cd backend && uv run pytest tests/test_inner.py tests/test_outer.py \
 `test_benchmark_core_threads_the_checkpointer_into_every_trial` cover
 the two-machine structure directly.
 
+### Limitations
+
+Both graphs compile without a checkpointer as well, for tests and
+offline runs; in that mode nothing is persisted and neither branching
+nor recovery is available.
+
 ---
 
 ## 3. Harness evolution across iterations
 
-**Verdict: VERIFIED**
+**Status: implemented and tested**
+
+### Implementation
 
 Each iteration appends one row to the branch's
 `evolution_summary.jsonl` with the candidate, its parent, its measured
@@ -95,7 +112,7 @@ scores, and its delta against the measured prior best. Iteration 0 is
 the benchmarked baseline, so the first candidate's delta is a real
 comparison rather than a comparison against zero.
 
-**Evidence**
+### Validation
 
 ```bash
 cd backend && uv run pytest tests/test_outer.py -q
@@ -107,23 +124,30 @@ cat runs/demo/threads/demo/evolution_summary.jsonl
 candidate's delta equals `candidate_accuracy - baseline_accuracy` and
 that `status.json` records what it was compared against.
 
+### Limitations
+
+Deltas produced under `--mock-bench` are synthesized, not measured.
+Every row carries `metrics_source`, and mock rows never aggregate with
+measured ones.
+
 ---
 
-## 4. PostgreSQL-backed checkpoint and version history
+## 4. PostgreSQL checkpoint history
 
-**Verdict: VERIFIED**
+**Status: implemented and tested**
 
-**Implementation**: `backend/app/meta_harness/persistence.py`
-(`AsyncPostgresSaver` on a sized pool), `branches.py`
-(`get_state_history`, `get_checkpoint_state`),
-`backend/app/event_loop.py` (keeps the server on a psycopg-compatible
-event loop).
+### Implementation
+
+`backend/app/meta_harness/persistence.py` (`AsyncPostgresSaver` on a
+sized pool), `branches.py` (`get_state_history`,
+`get_checkpoint_state`), `backend/app/event_loop.py` (keeps the server
+on a psycopg-compatible event loop).
 
 Both graphs are checkpointed. Inner-loop threads are namespaced
 `inner::{run}::{branch}::{candidate}::{task}::trial-{n}`, so any inner
 checkpoint is attributable to the exact trial that produced it.
 
-**Evidence**
+### Validation
 
 ```bash
 docker compose -f infra/docker-compose.yml up -d postgres
@@ -135,15 +159,24 @@ uv run meta-harness checkpoints <run-name>
 `test_inner_graph_transitions_persist_in_postgres`,
 `test_two_branches_do_not_share_inner_checkpoint_threads`.
 
+### Limitations
+
+Postgres must be reachable. `GET /health` reports `persistence` and
+`persistence_error`; a server started without a usable connection
+degrades to in-memory checkpointing, and branching and recovery stop
+working with it.
+
 ---
 
-## 5. Branching from historical checkpoints, with concurrent branches
+## 5. Historical branching
 
-**Verdict: VERIFIED**
+**Status: implemented and tested**
 
-**Implementation**: `backend/app/meta_harness/branches.py`
-(`worktree_add` → `aupdate_state` → `ainvoke(None, fork_config)` in an
-`asyncio.Task`), `backend/app/api/forks.py`, thread-scoped artifacts in
+### Implementation
+
+`backend/app/meta_harness/branches.py` (`worktree_add` →
+`aupdate_state` → `ainvoke(None, fork_config)` in an `asyncio.Task`),
+`backend/app/api/forks.py`, thread-scoped artifacts in
 `backend/app/meta_harness/runs.py`.
 
 The part that makes this a real search tree rather than a demo: every
@@ -152,7 +185,7 @@ forked from the same checkpoint reach the same iteration number and
 still keep separate pending-eval handoffs, frontiers, evolution logs,
 proposer sessions, candidate directories and candidate source snapshots.
 
-**Evidence**
+### Validation
 
 ```bash
 cd backend && uv run pytest tests/test_branch_isolation.py \
@@ -166,24 +199,32 @@ exact race that used to corrupt a run and asserts it cannot happen.
 `test_trajectory_survives_registry_reset` proves the branch tree is
 reconstructable after a backend restart.
 
+### Limitations
+
+A running branch's asyncio task does not survive a backend restart. The
+branch tree is reconstructed from durable metadata, and an interrupted
+branch reports as `interrupted` rather than silently resuming.
+
 ---
 
-## 6. Replay
+## 6. Checkpoint recovery and recorded-execution replay
 
-**Verdict: VERIFIED WITH PRECISE WORDING**
+**Status: implemented — precise wording required**
 
-**Say this:**
+### Accurate wording
 
 > Checkpoint recovery and branching from historical states, with
 > deterministic replay of recorded execution.
 
-**Do not say** "exact replay" or "deterministic replay" without
-qualification. Those phrases suggest that re-running the agent from a
-restored checkpoint reproduces the same output. It does not: LLM
+Do **not** describe this as "exact replay" or "deterministic replay"
+without qualification. Those phrases suggest that re-running the agent
+from a restored checkpoint reproduces the same output. It does not: LLM
 inference is stochastic, and the provider's model behind a given id can
 change.
 
-**What is guaranteed** (`backend/app/meta_harness/replay.py`):
+### Implementation
+
+`backend/app/meta_harness/replay.py`. What is guaranteed:
 
 1. Restoring a stored checkpoint returns byte-identical state, provable
    via SHA-256 over a canonical JSON encoding.
@@ -191,10 +232,7 @@ change.
    no model calls.
 3. Forking from a restored checkpoint starts from exactly that state.
 
-**What is not guaranteed:** byte-identical regeneration of model output
-when the graph is re-executed.
-
-**Evidence**
+### Validation
 
 ```bash
 cd backend && uv run pytest tests/test_replay.py -q
@@ -205,23 +243,30 @@ uv run meta-harness replay <run-name> --checkpoint <checkpoint-id>
 `hash(saved) == hash(restored)`; `test_replay_does_not_advance_the_thread`
 asserts replay is read-only.
 
+### Limitations
+
+Byte-identical regeneration of model output is not guaranteed when the
+graph is re-executed from a restored checkpoint.
+
 ---
 
-## 7. Measured improvement in agent pass rate
+## 7. Pass-rate benchmarking
 
-**Verdict: NOT YET VERIFIED — PENDING MEASURED BENCHMARK**
+**Status: implemented — not yet measured**
 
-**Status:** the experiment runner, the committed protocol, the raw-row
+### Implementation
+
+The experiment runner (`backend/app/meta_harness/experiment.py`), the
+committed protocol (`benchmarks/pass-rate/config.json`), the raw-row
 schema, the provenance capture and the summary derivation are all
-implemented and tested. **No canonical 200-trial experiment has been
-executed**, because this environment has no `ANTHROPIC_API_KEY` — the
-inner loop cannot issue a single model call, so there is nothing to
-measure.
+implemented and tested.
 
-**Do not put a number on a resume until this has been run.** There is no
-placeholder value anywhere in this repository to copy.
+**No canonical 200-trial experiment has been executed**, because this
+environment has no `ANTHROPIC_API_KEY` — the inner loop cannot issue a
+single model call, so there is nothing to measure. There is no
+placeholder pass-rate value anywhere in this repository.
 
-**To produce the number:**
+To produce the measurement:
 
 ```bash
 # 1. credentials
@@ -244,15 +289,15 @@ Absolute improvement: <delta> percentage points
 Total trials: 200
 ```
 
-**Then, and only then**, the resume sentence is the one the runner
-prints — `experiment.reported_metric_sentence(summary)` — with whatever
-delta the trials produced. `+7`, `+9` and `+15` are all acceptable
-answers. The protocol is never tuned to reach a particular number.
+The reported metric is the sentence the runner prints —
+`experiment.reported_metric_sentence(summary)` — with whatever delta the
+trials produced. Any delta is an acceptable outcome; the protocol is
+never tuned to reach a particular number.
 
 **Protocol**: [`benchmarks/pass-rate/README.md`](../benchmarks/pass-rate/README.md)
 **Published results**: `benchmarks/results/` (currently empty)
 
-**Evidence that the number cannot be fabricated**
+### Validation
 
 ```bash
 cd backend && uv run pytest tests/test_experiment.py -q
@@ -265,16 +310,20 @@ no target, no expected value, no override.
 reader can re-derive the published number from the committed raw rows,
 and CI re-derives every published summary on each push.
 
-**Stated limitations**: trials are clustered within tasks, so the Wald
-interval understates uncertainty; the protocol measures the five search
-tasks the proposer optimised against, and generalisation is a separate
-holdout measurement (`meta-harness benchmark --candidate <name> --holdout`).
+### Limitations
+
+Trials are clustered within tasks, so the Wald interval understates
+uncertainty. The protocol measures the five search tasks the proposer
+optimised against; generalisation is a separate holdout measurement
+(`meta-harness benchmark --candidate <name> --holdout`).
 
 ---
 
-## 8. Real token / cost accounting
+## 8. Token and cost accounting
 
-**Verdict: VERIFIED (mechanism) — no published totals**
+**Status: implemented and tested — no published totals**
+
+### Implementation
 
 `backend/app/meta_harness/metrics.py` records the Anthropic `usage`
 block for every inner-loop call and aggregates to trial, candidate and
@@ -284,64 +333,80 @@ model with no configured price yields `cost_usd: null` and
 never mix: `aggregate_trials` refuses to fold rows whose
 `metrics_source` disagrees.
 
-No aggregate token or dollar total is published anywhere in this
-repository, because none has been measured.
-
-**Evidence**
+### Validation
 
 ```bash
 cd backend && uv run pytest tests/test_metrics.py -q
 ```
 
+### Limitations
+
+No aggregate token or dollar total is published anywhere in this
+repository, because none has been measured.
+
 ---
 
 ## 9. Cross-run memory
 
-**Verdict: VERIFIED**
+**Status: implemented and tested**
+
+### Implementation
 
 `backend/app/meta_harness/memory.py` (`AsyncPostgresStore`) stores
 accepted-candidate patterns and injects them into a later run's proposer
 prior.
 
-**Evidence**
+### Validation
 
 ```bash
 cd backend && uv run pytest tests/test_memory.py tests/test_memory_e2e.py -q
 uv run meta-harness memory list
 ```
 
+### Limitations
+
+Memory lives in Postgres alongside the checkpoints; without a database
+connection a run starts with an empty prior.
+
 ---
 
-## 10. Sandbox isolation
+## 10. Trial isolation
 
-**Verdict: VERIFIED WITH PRECISE WORDING**
+**Status: implemented — precise wording required**
 
-**Say this:**
+### Accurate wording
 
 > Each trial runs in a fresh temp-directory workspace with wall-clock
 > timeouts and, on Unix, CPU/address-space rlimits.
 
-**Do not say** "sandboxed", "container-isolated" or "network-isolated".
-`backend/app/meta_harness/sandbox.py` provides process isolation only:
-no container, no network restriction, no binary allowlist. Task
-`test_command`s run with `shell=True` and are trusted repository content
-(`eval/tasks/*/task.json`), not user input.
+Do **not** describe this as "sandboxed", "container-isolated" or
+"network-isolated".
 
-**Evidence**
+### Implementation
+
+`backend/app/meta_harness/sandbox.py` provides process isolation only.
+
+### Validation
 
 ```bash
 cd backend && uv run pytest tests/test_sandbox.py tests/test_tools.py -q
 ```
 
+### Limitations
+
+No container, no network restriction, no binary allowlist. Task
+`test_command`s run with `shell=True` and are trusted repository content
+(`eval/tasks/*/task.json`), not user input.
+
 ---
 
-## Interview crib
+## Design FAQ
 
-| Question | One-sentence answer |
+| Question | Answer |
 |---|---|
 | What is the contribution? | The substrate: the Stanford meta-harness loop mapped onto two LangGraph state machines, which makes checkpointing, forking and concurrent search fall out of the framework rather than being bolted on. |
-| Hardest bug you fixed? | Concurrent branches shared run-level artifacts, so a fork's proposer overwrote the root's `pending_eval.json` and the root then benchmarked a candidate it never proposed. Fixed by scoping every execution artifact to its LangGraph thread and snapshotting candidate source per branch. |
-| How do you know the branches are really isolated? | `test_same_iteration_branches_keep_separate_artifacts` forks two branches from one checkpoint, runs both to the same iteration concurrently against a shared `AsyncPostgresSaver`, and asserts nothing is shared. |
+| What was the hardest bug? | Concurrent branches shared run-level artifacts, so a fork's proposer overwrote the root's `pending_eval.json` and the root then benchmarked a candidate it never proposed. Fixed by scoping every execution artifact to its LangGraph thread and snapshotting candidate source per branch. |
+| How is branch isolation established? | `test_same_iteration_branches_keep_separate_artifacts` forks two branches from one checkpoint, runs both to the same iteration concurrently against a shared `AsyncPostgresSaver`, and asserts nothing is shared. |
 | Why is the baseline benchmarked? | Otherwise iteration 1's delta is measured against zero and every first candidate looks like a huge win. The baseline runs the identical task/trial protocol and becomes the search-tree root. |
-| Can you replay a run? | I can restore any checkpoint's exact state and prove it with a SHA-256, and replay the recorded transitions without calling a model. I can't reproduce stochastic model output, and I don't claim to. |
-| What's the measured improvement? | The experiment runner is built and tested; I haven't published a number yet because I ran the work without API credentials. The exact command is in `benchmarks/pass-rate/README.md`, and the summary is derived from raw trial rows so it can't be fudged. |
+| Can a run be replayed? | Any checkpoint's exact state can be restored and proven with a SHA-256, and recorded transitions replay without calling a model. Stochastic model output is not reproducible, and is not claimed to be. |
+| What is the measured improvement? | The experiment runner is built and tested; no number is published, because the work was done without API credentials. The command is in `benchmarks/pass-rate/README.md`, and the summary is derived from raw trial rows so it cannot be hand-entered. |

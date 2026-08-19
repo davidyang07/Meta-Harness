@@ -48,12 +48,12 @@ weakening one of those tests, fix the root cause instead.
    takes no target or expected value, and must not gain one.
    (`tests/test_experiment.py`)
 
-## Claims and Evidence
+## Capabilities and evidence
 
-`docs/RESUME_CLAIMS.md` maps every capability claim to the code that
-implements it and the command that proves it. If you change behaviour
-that a claim depends on, update that document in the same change. Do not
-add a quantitative claim without a committed artifact under
+`docs/CAPABILITIES.md` maps every capability to the code that implements
+it and the command that validates it. If you change behaviour a
+capability entry depends on, update that document in the same change. Do
+not report a quantitative result without a committed artifact under
 `benchmarks/results/` that reproduces it.
 
 ## Coding Style & Naming Conventions

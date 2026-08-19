@@ -33,8 +33,8 @@ fall out **by construction**:
 | **Recoverable** | Every state transition is checkpointed via `AsyncPostgresSaver`; any checkpoint restores to byte-identical state, provable by SHA-256 | Not that re-running from a checkpoint reproduces the same model output — LLM inference is stochastic |
 | **Reversible** | Time-travel via `get_state_history` + `update_state` + `ainvoke(None, ckpt_id)`, with branch history persisted to disk so it survives a restart | Not that a running branch's asyncio task survives a restart — it doesn't, and it reports as `interrupted` |
 
-The substrate IS the contribution. Every claim above maps to a test in
-[`docs/RESUME_CLAIMS.md`](docs/RESUME_CLAIMS.md).
+The substrate IS the contribution. Every property above maps to a test in
+[`docs/CAPABILITIES.md`](docs/CAPABILITIES.md).
 
 ---
 
@@ -172,7 +172,8 @@ bash scripts/live_smoke.sh        # prints SKIPPED without credentials
 
 ### 3. Published benchmark experiment — needs credentials, real cost
 
-The canonical 200-trial protocol behind the one quantitative claim.
+The canonical 200-trial protocol behind the one quantitative result
+this project reports.
 
 ```bash
 uv run meta-harness experiment --candidate <evolved-candidate-name>
@@ -194,7 +195,7 @@ anywhere in it.
 
 - Protocol: [`benchmarks/pass-rate/README.md`](benchmarks/pass-rate/README.md)
 - Published results (currently empty): [`benchmarks/results/`](benchmarks/results/)
-- Claim-by-claim status: [`docs/RESUME_CLAIMS.md`](docs/RESUME_CLAIMS.md)
+- Capability status: [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md)
 
 The summary is derived mechanically from raw per-trial rows —
 `summarize()` accepts no target or expected value — and CI re-derives
@@ -331,7 +332,7 @@ meta-harness/
 ├── frontend/dashboard/                        # Next.js 16 dashboard
 │   └── e2e/                                   # playwright: mock + live-backend projects
 ├── benchmarks/
-│   ├── resume-claim/                          # committed 200-trial protocol
+│   ├── pass-rate/                             # committed 200-trial protocol
 │   └── results/                               # published, immutable evidence
 ├── scripts/
 │   ├── demo_acceptance.sh                     # LEVEL 1 acceptance (no API key)
@@ -347,7 +348,7 @@ meta-harness/
 │   ├── baseline.py                            # immutable starting harness
 │   └── (...)                                  # proposer-generated candidates (gitignored)
 ├── infra/docker-compose.yml                   # postgres:16 service
-└── docs/                                      # contracts + claim evidence
+└── docs/                                      # contracts + capability evidence
 ```
 
 ### Run artifact layout
@@ -387,7 +388,7 @@ and end up oriented:
 | [`relay_v7_appendix_a_worktrees.md`](relay_v7_appendix_a_worktrees.md) | For step 9 — concurrent branches via asyncio |
 | [`relay_v7_appendix_b_metaharness_internals.md`](relay_v7_appendix_b_metaharness_internals.md) | For step 6+ — Stanford repo deep-dive |
 | [`relay_v7_appendix_c_inner_loop.md`](relay_v7_appendix_c_inner_loop.md) | For inner-loop work — 5-phase agent design |
-| [`docs/RESUME_CLAIMS.md`](docs/RESUME_CLAIMS.md) | **Before quoting any capability** — claim → code → the command that proves it |
+| [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) | **Before quoting any capability** — capability → code → the command that validates it |
 | [`benchmarks/pass-rate/README.md`](benchmarks/pass-rate/README.md) | Before running or citing a benchmark |
 | [`skills/meta-harness-coding-agent/SKILL.md`](skills/meta-harness-coding-agent/SKILL.md) | When debugging the proposer — what it actually reads |
 

@@ -56,7 +56,7 @@ check it before demoing.
 > *shape* a run should take so a reader knows what "working" looks like.
 > No benchmark has been executed in this repository, so no accuracy,
 > token or cost figure here is a measurement. See
-> [`docs/RESUME_CLAIMS.md`](RESUME_CLAIMS.md) for what is actually
+> [`docs/CAPABILITIES.md`](CAPABILITIES.md) for what is actually
 > verified and [`benchmarks/pass-rate/README.md`](../benchmarks/pass-rate/README.md)
 > for the protocol that would produce real numbers.
 

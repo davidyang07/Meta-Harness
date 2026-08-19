@@ -75,8 +75,18 @@ measured one.
 
 The JSON examples throughout this document show *shape*, not results.
 No accuracy, token or cost figure in this file is a measurement. See
-[`docs/RESUME_CLAIMS.md`](RESUME_CLAIMS.md) and
+[`docs/CAPABILITIES.md`](CAPABILITIES.md) and
 [`benchmarks/pass-rate/README.md`](../benchmarks/pass-rate/README.md).
+
+### 0.5 Benchmark protocol and capability-reference paths
+
+The committed pass-rate protocol lives at `benchmarks/pass-rate/`, and
+its `experiment` id — which prefixes every generated experiment
+directory — is `pass-rate`. The capability reference is
+`docs/CAPABILITIES.md`. `experiment.reported_metric_sentence(summary)`
+is the accessor for the one-sentence headline built from a summary.
+These names changed after §1-§9 below were written; nothing under
+`benchmarks/results/` is affected, because no result has been published.
 
 ---
 

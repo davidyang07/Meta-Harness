@@ -5,8 +5,8 @@
 > behind the architecture. It is **not** a description of current
 > behaviour and its aspirational wording — including phrasing like
 > "reversible by construction" — is not a claim about the shipped system.
-> For what is actually implemented and how it is proven, read
-> [`docs/RESUME_CLAIMS.md`](docs/RESUME_CLAIMS.md) and
+> For what is actually implemented and how it is validated, read
+> [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) and
 > [`docs/INTERFACES.md`](docs/INTERFACES.md) (§0 Amendments).
 
 *A standard, genuinely good coding-agent loop — designed from 2026 state-of-the-art patterns, scoped for our hackathon, and explicitly built to be evolved by the outer meta-harness loop.*

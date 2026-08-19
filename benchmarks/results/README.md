@@ -1,6 +1,6 @@
 # Published benchmark results
 
-Immutable evidence for this project's quantitative claims. One directory
+Immutable evidence for this project's quantitative results. One directory
 per experiment id, committed deliberately (unlike `benchmark-results/`,
 which is runner scratch and is gitignored).
 
@@ -41,5 +41,5 @@ are not needed to verify the summary.
 
 No canonical 200-trial experiment has been published yet. See
 [`../pass-rate/README.md`](../pass-rate/README.md) for the exact
-command that produces one, and `docs/RESUME_CLAIMS.md` for which claims
-are measured and which are still pending.
+command that produces one, and `docs/CAPABILITIES.md` for which
+capabilities are measured and which are still pending.

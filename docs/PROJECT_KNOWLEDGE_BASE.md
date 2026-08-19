@@ -2536,7 +2536,7 @@ has no configured price.
 > the shape of a run — a rejection, a fork, two Pareto-optimal branches.
 > No benchmark has been executed in this repository, so there is no
 > measured accuracy, token or cost figure to quote. See
-> [`RESUME_CLAIMS.md`](RESUME_CLAIMS.md) for what is actually verified
+> [`CAPABILITIES.md`](CAPABILITIES.md) for what is actually verified
 > and [`../benchmarks/pass-rate/README.md`](../benchmarks/pass-rate/README.md)
 > for the protocol that would produce real numbers.
 
