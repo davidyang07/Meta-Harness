@@ -266,6 +266,28 @@ jobs:
           raise SystemExit(1 if failed else 0)
           PY
 
+  docker:
+    name: backend image builds and actually serves
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build, then prove the container is a working backend
+        # `docker build` going green proves only that the layers ran. The
+        # smoke script additionally checks the process is non-root, that
+        # no credential is baked into a layer, that the container reaches
+        # Postgres and reports persistence "postgres" rather than the
+        # in-memory fallback, and that the healthcheck refuses to call a
+        # Postgres-less backend healthy.
+        #
+        # The image is built with `uv sync --frozen`, so a lockfile that
+        # has drifted from the manifests fails here rather than shipping
+        # an image whose dependencies differ from the tested ones.
+        run: bash scripts/docker_smoke.sh
+
   hygiene:
     name: repository hygiene
     runs-on: ubuntu-latest
@@ -313,6 +335,34 @@ jobs:
 
       - name: No tool caches or OS junk
         run: |
-          if git ls-files | grep -qE '(^|/)(\.DS_Store|__pycache__|graphify-out)(/|$)'; then
+          if git ls-files | grep -qE '(^|/)(\.DS_Store|Thumbs\.db|__pycache__|graphify-out|\.pytest_cache|\.pytest-tmp|node_modules|\.next)(/|$)'; then
             echo "::error::generated caches are tracked"; exit 1
           fi
+
+      - name: The evidence layer is tracked, not local-only
+        # These four paths were once listed in a developer's
+        # .git/info/exclude as "local-only artifacts". They are not: the
+        # evidence document is a generated contract artifact that the
+        # resume-evidence job regenerates and diffs, and three jobs in
+        # this workflow import or run them. Untracking them again turns
+        # this workflow red in ways that look unrelated to the cause.
+        run: |
+          missing=0
+          for path in \
+            backend/app/meta_harness/evidence.py \
+            backend/tests/test_resume_evidence.py \
+            docs/RESUME_EVIDENCE.md \
+            docs/evidence/README.md
+          do
+            if ! git ls-files --error-unmatch "$path" >/dev/null 2>&1; then
+              echo "::error::$path is not tracked"; missing=1
+            fi
+          done
+          exit $missing
+
+      - name: Containerisation files are present
+        run: |
+          for path in infra/Dockerfile infra/healthcheck.py .dockerignore \
+                      scripts/docker_smoke.sh; do
+            [ -f "$path" ] || { echo "::error::missing $path"; exit 1; }
+          done
