@@ -263,3 +263,15 @@ CLAUDE.md
 /frontend/dashboard/playwright-report/
 /frontend/dashboard/blob-report/
 /frontend/dashboard/.playwright/
+
+# pytest temp root. backend/conftest.py points --basetemp here so the
+# suite never depends on the machine's system temp directory; pytest
+# wipes and recreates it at session start.
+/backend/.pytest-tmp/
+
+# Playwright/Next.js generated files that kept reappearing at the repo
+# root of a checkout (the frontend lives under frontend/dashboard/).
+/frontend/dashboard/node_modules/
+/frontend/dashboard/.next/
+/frontend/dashboard/next-env.d.ts
+/frontend/dashboard/tsconfig.tsbuildinfo

@@ -367,7 +367,7 @@ def test_the_patch_file_handed_to_git_is_not_newline_translated(tmp_path: Path):
 
 
 def test_an_lf_patch_applies_to_a_crlf_file_and_keeps_its_line_endings(
-    tmp_path: Path,
+    workspace_outside_git: Path,
 ):
     """A model writes LF diffs; a Windows checkout may hold CRLF files.
 
@@ -375,16 +375,25 @@ def test_an_lf_patch_applies_to_a_crlf_file_and_keeps_its_line_endings(
     endings, so the tool must not get in its way. This is exactly the
     case the old text-mode temp write broke — and it is the normal case
     on Windows, failing silently rather than loudly.
+
+    This one needs ``workspace_outside_git`` rather than ``tmp_path``:
+    "preserve the file's own endings" is git's behaviour only when no
+    repository sits above the workspace. Inside a working tree git
+    converts on write and the attributes merely pick the ending, so the
+    property under test would be unobservable. Real task workspaces live
+    under ``sandbox.sandbox_root()``, outside this checkout, which is
+    exactly what the fixture reproduces.
     """
+    workspace = workspace_outside_git
     before = "def add(a, b):\n    return a - b\n\n\ndef sub(a, b):\n    return a - b\n"
     after = before.replace("    return a - b\n\n", "    return a + b\n\n", 1)
-    (tmp_path / "calculator.py").write_bytes(before.replace("\n", "\r\n").encode())
+    (workspace / "calculator.py").write_bytes(before.replace("\n", "\r\n").encode())
 
     result = apply_patch(
-        tmp_path, "calculator.py", _unified_diff(before, after, "calculator.py")
+        workspace, "calculator.py", _unified_diff(before, after, "calculator.py")
     )
 
     assert result["status"] == "ok", result
-    raw = (tmp_path / "calculator.py").read_bytes()
+    raw = (workspace / "calculator.py").read_bytes()
     assert b"\r\n" in raw, "the file's own line endings must survive the patch"
     assert b"return a + b" in raw

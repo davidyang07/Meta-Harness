@@ -19,10 +19,13 @@ so no test can delete committed source.
 
 from __future__ import annotations
 
+import shutil
 import uuid
 from pathlib import Path
 
 import pytest
+
+from app.meta_harness import sandbox
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 AGENTS_DIR = REPO_ROOT / "agents"
@@ -60,3 +63,28 @@ def unique_name(prefix: str) -> str:
     against the same database.
     """
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
+
+
+@pytest.fixture
+def workspace_outside_git():
+    """A workspace directory that sits outside every git working tree.
+
+    ``tmp_path`` is repository-local (see ``backend/conftest.py``), which
+    is right for almost everything but wrong for the handful of tests
+    that assert on ``git apply``'s *unconfigured* behaviour. Inside a
+    working tree git always converts line endings on write — the
+    attributes only choose which ending — so "leave the file's own
+    endings alone" is reachable only with no repository above the
+    workspace at all.
+
+    That is also the real execution environment: ``sandbox.make_sandbox_dir``
+    puts every task workspace under ``sandbox_root()``, which is the
+    platform temp root and outside this checkout. Building the fixture on
+    the same root keeps the test measuring what production does.
+    """
+    workspace = sandbox.sandbox_root() / f"meta-harness-test-{uuid.uuid4().hex}"
+    workspace.mkdir(parents=True, exist_ok=False)
+    try:
+        yield workspace
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
