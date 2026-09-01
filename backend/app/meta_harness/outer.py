@@ -41,6 +41,7 @@ from app.meta_harness import memory as mem
 from app.meta_harness import metrics as met
 from app.meta_harness import proposer as prp
 from app.meta_harness import runs as runs_mod
+from app.meta_harness import tracking as trk
 from app.meta_harness.state import BASELINE_CANDIDATE_NAME, MetaHarnessState
 from app.streaming import emit_run_event
 
@@ -111,6 +112,11 @@ class OuterLoopRunner:
     - ``checkpointer``: ``AsyncPostgresSaver`` (step 7) or ``None`` for
       in-memory. When set, it is threaded into every inner-loop trial so
       inner graph transitions are checkpointed too.
+    - ``tracker``: experiment-tracking sink (``tracking.Tracker``).
+      Defaults to the no-op tracker, so the loop behaves identically
+      with or without a metrics backend configured.
+    - ``recording_root``: when set, every inner-loop trial is taped for
+      exact replay under ``<root>/<candidate>/<task>-trial-<n>/``.
     """
 
     def __init__(
@@ -127,6 +133,8 @@ class OuterLoopRunner:
         checkpointer: Any = None,
         memory_store: Any = None,
         checkpoint_inner: bool = True,
+        tracker: trk.Tracker | None = None,
+        recording_root: Path | None = None,
     ) -> None:
         self.run_dir = run_dir
         self.repo_root = repo_root
@@ -139,6 +147,8 @@ class OuterLoopRunner:
         self.checkpointer = checkpointer
         self.memory_store = memory_store
         self.checkpoint_inner = checkpoint_inner
+        self.tracker = tracker or trk.NullTracker()
+        self.recording_root = recording_root
 
     # ── propose ───────────────────────────────────────────────────────
 
@@ -409,6 +419,12 @@ class OuterLoopRunner:
             runs_mod.candidate_dir(self.run_dir, thread_id, candidate["name"]) / "traces"
         )
 
+        recordings_root = (
+            self.recording_root / candidate["name"]
+            if self.recording_root is not None
+            else None
+        )
+
         rows = await bench.run_trials(
             harness_factory=harness_class,
             task_dirs=task_dirs,
@@ -424,6 +440,12 @@ class OuterLoopRunner:
                 trial=trial,
             ),
             checkpointer=self.checkpointer if self.checkpoint_inner else None,
+            on_trial=lambda row: trk.log_trial(self.tracker, row, arm=candidate["name"]),
+            recording_dir_for=(
+                (lambda task_id, trial: recordings_root / f"{task_id}-trial-{trial}")
+                if recordings_root is not None
+                else None
+            ),
         )
         return bench.summarize(
             rows,
@@ -591,6 +613,24 @@ class OuterLoopRunner:
             thread_id,
             _evolution_row(candidate, iteration=state["iteration"]),
         )
+
+        scores = candidate["scores"] or {}
+        trk.log_iteration(
+            self.tracker,
+            iteration=state["iteration"],
+            candidate=candidate["name"],
+            accuracy=scores.get("accuracy"),
+            delta=candidate["delta"],
+            accepted=accepted,
+            axis=candidate.get("axis"),
+            metrics_source=scores.get("metrics_source"),
+            mean_tokens=scores.get("mean_total_tokens_per_trial"),
+            cost_usd=scores.get("total_cost_usd"),
+            thread_id=thread_id,
+            branch_id=thread_id.rpartition(".fork.")[2] or None,
+            per_task=scores.get("per_task"),
+        )
+        trk.log_frontier(self.tracker, frontier, thread_id=thread_id)
 
         new_best = candidate["name"] if accepted else prev_best
         new_frontier_names = frontier.get("_pareto_names", [])
@@ -778,6 +818,8 @@ async def run_outer_loop(
     checkpointer: Any = None,
     memory_store: Any = None,
     evaluate_baseline: bool = True,
+    tracker: Any = None,
+    recording_root: Path | None = None,
 ) -> MetaHarnessState:
     """Run the outer loop end-to-end (async). Returns the final state."""
     runner = OuterLoopRunner(
@@ -791,6 +833,8 @@ async def run_outer_loop(
         skill_path=skill_path,
         checkpointer=checkpointer,
         memory_store=memory_store,
+        tracker=tracker,
+        recording_root=recording_root,
     )
     runs_mod.write_manifest(
         run_dir,

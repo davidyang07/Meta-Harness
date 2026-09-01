@@ -268,6 +268,160 @@ def summarize(
     }
 
 
+# ── completeness, protocol equality, leakage ──────────────────────────
+
+#: Fields every raw trial row must carry to be counted. A row missing one
+#: is not a zero — it is a trial whose outcome is unknown, and averaging
+#: over it would quietly bias the result.
+REQUIRED_ROW_FIELDS = (
+    "task_id",
+    "trial",
+    "passed",
+    "score",
+    "metrics_source",
+    "total_tokens",
+    "wall_time_s",
+)
+
+
+def trial_completeness(
+    rows: list[dict[str, Any]],
+    *,
+    task_ids: list[str],
+    trials_per_task: int,
+    arm: str,
+) -> dict[str, Any]:
+    """Check an arm's rows against the protocol it claims to have run.
+
+    Reports missing trials, duplicated (task, trial) pairs, and rows
+    missing required fields. A result computed over an incomplete arm is
+    not the result the protocol describes, so this is checked and
+    published rather than assumed.
+    """
+    expected = {(task_id, t) for task_id in task_ids for t in range(1, trials_per_task + 1)}
+    seen: dict[tuple[str, int], int] = {}
+    malformed: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        missing = [f for f in REQUIRED_ROW_FIELDS if row.get(f) is None]
+        if missing:
+            malformed.append({"row_index": index, "missing_fields": missing})
+            continue
+        key = (str(row["task_id"]), int(row["trial"]))
+        seen[key] = seen.get(key, 0) + 1
+
+    duplicates = sorted(f"{t}/trial-{n}" for (t, n), count in seen.items() if count > 1)
+    missing_trials = sorted(f"{t}/trial-{n}" for (t, n) in expected - set(seen))
+    unexpected = sorted(f"{t}/trial-{n}" for (t, n) in set(seen) - expected)
+
+    return {
+        "arm": arm,
+        "expected_trials": len(expected),
+        "observed_trials": len(rows),
+        "distinct_trials": len(seen),
+        "missing_trials": missing_trials,
+        "duplicate_trials": duplicates,
+        "unexpected_trials": unexpected,
+        "malformed_rows": malformed,
+        "complete": (
+            not missing_trials
+            and not duplicates
+            and not unexpected
+            and not malformed
+            and len(rows) == len(expected)
+        ),
+    }
+
+
+def check_protocol_equality(
+    *,
+    baseline_rows: list[dict[str, Any]],
+    candidate_rows: list[dict[str, Any]],
+    task_ids: list[str],
+    trials_per_task: int,
+    baseline_model: str | None = None,
+    candidate_model: str | None = None,
+) -> dict[str, Any]:
+    """Confirm both arms ran the same protocol under the same conditions.
+
+    A pass-rate delta is only attributable to the harness if everything
+    else was held constant. This checks the parts that are checkable from
+    the artifacts: identical task set, identical per-task trial counts,
+    identical model, and one single ``metrics_source`` across both arms
+    (so a mock trial can never be folded into a measured comparison).
+    """
+    baseline_complete = trial_completeness(
+        baseline_rows, task_ids=task_ids, trials_per_task=trials_per_task, arm="baseline"
+    )
+    candidate_complete = trial_completeness(
+        candidate_rows,
+        task_ids=task_ids,
+        trials_per_task=trials_per_task,
+        arm="candidate",
+    )
+
+    def _per_task_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for row in rows:
+            counts[str(row.get("task_id"))] = counts.get(str(row.get("task_id")), 0) + 1
+        return counts
+
+    baseline_counts = _per_task_counts(baseline_rows)
+    candidate_counts = _per_task_counts(candidate_rows)
+    sources = {
+        str(r.get("metrics_source")) for r in (*baseline_rows, *candidate_rows)
+    }
+
+    checks = {
+        "same_task_set": sorted(baseline_counts) == sorted(candidate_counts),
+        "same_trials_per_task": baseline_counts == candidate_counts,
+        "same_model": baseline_model == candidate_model,
+        "single_metrics_source": len(sources) == 1,
+        "measured_only": sources == {met.MEASURED},
+        "baseline_complete": baseline_complete["complete"],
+        "candidate_complete": candidate_complete["complete"],
+    }
+    return {
+        "checks": checks,
+        "identical_protocol": all(checks.values()),
+        "metrics_sources": sorted(sources),
+        "model": baseline_model,
+        "baseline_completeness": baseline_complete,
+        "candidate_completeness": candidate_complete,
+        "baseline_trials_per_task": baseline_counts,
+        "candidate_trials_per_task": candidate_counts,
+    }
+
+
+class LeakageError(RuntimeError):
+    """A holdout task appeared where only search tasks may appear."""
+
+
+def check_task_set_isolation(
+    *, search_dir: Path, holdout_dir: Path
+) -> dict[str, Any]:
+    """Confirm the search set and the holdout set share no task.
+
+    A holdout number means "generalisation" only while the proposer never
+    optimised against those tasks. Overlap makes the holdout arm a second
+    search-set measurement wearing a different name.
+    """
+    search = {d.name for d in _task_dirs(search_dir)}
+    holdout = {d.name for d in _task_dirs(holdout_dir)}
+    overlap = sorted(search & holdout)
+    return {
+        "search_tasks": sorted(search),
+        "holdout_tasks": sorted(holdout),
+        "overlapping_tasks": overlap,
+        "disjoint": not overlap,
+    }
+
+
+def _task_dirs(path: Path) -> list[Path]:
+    if not path.is_dir():
+        return []
+    return sorted(d for d in path.iterdir() if d.is_dir() and (d / "task.json").exists())
+
+
 def reported_metric_sentence(summary: dict[str, Any]) -> str:
     """The one sentence a reader may quote, built only from the summary."""
     delta = summary.get("absolute_percentage_point_delta")
@@ -361,6 +515,7 @@ async def run_arm(
     experiment_id: str,
     checkpointer: Any = None,
     on_trial: Callable[[str, dict[str, Any]], None] | None = None,
+    recording_dir_for: Callable[[str, int], Path | None] | None = None,
 ) -> list[dict[str, Any]]:
     """Run one arm of the experiment and return its raw trial rows."""
     task_dirs = bench.discover_tasks(tasks_dir)
@@ -382,10 +537,149 @@ async def run_arm(
         ),
         checkpointer=checkpointer,
         on_trial=(lambda row: on_trial(arm, row)) if on_trial else None,
+        recording_dir_for=recording_dir_for,
     )
     for row in rows:
         row["arm"] = arm
     return rows
+
+
+async def run_two_arm_experiment(
+    *,
+    repo_root: Path,
+    config: dict[str, Any],
+    experiment_id: str,
+    tasks_dir: Path,
+    baseline_label: str,
+    candidate_label: str,
+    baseline_factory: Callable[[], Any],
+    candidate_factory: Callable[[], Any],
+    arm_sources: dict[str, Path | None],
+    model: str,
+    trials: int,
+    workers: int,
+    output_dir: Path,
+    checkpointer: Any = None,
+    tracker: Any = None,
+    on_trial: Callable[[str, dict[str, Any]], None] | None = None,
+    record_trials_per_task: int = 0,
+) -> dict[str, Any]:
+    """Run both arms, derive the summary, check the methodology, persist.
+
+    The single place a two-arm result is produced, so ``experiment`` and
+    ``resume-experiment`` cannot drift into measuring different things.
+
+    ``record_trials_per_task`` tapes the first N trials of each task in
+    each arm for exact replay. Recording is bounded because a tape holds
+    every model response verbatim; a handful is enough to demonstrate
+    replay, and 200 of them is a large artifact for no extra evidence.
+    """
+    from app.meta_harness import tracking as trk  # noqa: PLC0415 — optional sink
+
+    task_dirs = bench.discover_tasks(tasks_dir)
+    if not task_dirs:
+        raise ValueError(f"no tasks found in {tasks_dir}")
+    task_ids = [d.name for d in task_dirs]
+
+    def _recording_dir_for(arm: str) -> Callable[[str, int], Path | None] | None:
+        if record_trials_per_task <= 0 or checkpointer is None:
+            return None
+
+        def _dir(task_id: str, trial: int) -> Path | None:
+            if trial > record_trials_per_task:
+                return None
+            return output_dir / "recordings" / arm / f"{task_id}-trial-{trial}"
+
+        return _dir
+
+    baseline_rows = await run_arm(
+        arm="baseline",
+        harness_factory=baseline_factory,
+        tasks_dir=tasks_dir,
+        trials=trials,
+        workers=workers,
+        output_dir=output_dir,
+        experiment_id=experiment_id,
+        checkpointer=checkpointer,
+        on_trial=on_trial,
+        recording_dir_for=_recording_dir_for("baseline"),
+    )
+    candidate_rows = await run_arm(
+        arm="candidate",
+        harness_factory=candidate_factory,
+        tasks_dir=tasks_dir,
+        trials=trials,
+        workers=workers,
+        output_dir=output_dir,
+        experiment_id=experiment_id,
+        checkpointer=checkpointer,
+        on_trial=on_trial,
+        recording_dir_for=_recording_dir_for("candidate"),
+    )
+
+    resolved_config = {
+        **config,
+        "experiment_id": experiment_id,
+        "arms": {"baseline": baseline_label, "candidate": candidate_label},
+        "trials_per_task": trials,
+        "workers": workers,
+        "task_set": str(tasks_dir.relative_to(repo_root))
+        if tasks_dir.is_relative_to(repo_root)
+        else str(tasks_dir),
+        "tasks": task_ids,
+        "total_trials": len(baseline_rows) + len(candidate_rows),
+        "recorded_trials_per_task": record_trials_per_task,
+    }
+    environment = capture_environment(
+        repo_root=repo_root, model=model, tasks=task_dirs, arm_sources=arm_sources
+    )
+    summary = summarize(
+        baseline_rows=baseline_rows,
+        candidate_rows=candidate_rows,
+        task_ids=task_ids,
+        baseline_label=baseline_label,
+        candidate_label=candidate_label,
+    )
+    validation = check_protocol_equality(
+        baseline_rows=baseline_rows,
+        candidate_rows=candidate_rows,
+        task_ids=task_ids,
+        trials_per_task=trials,
+        baseline_model=model,
+        candidate_model=model,
+    )
+    paths = write_results(
+        output_dir=output_dir,
+        config=resolved_config,
+        environment=environment,
+        baseline_rows=baseline_rows,
+        candidate_rows=candidate_rows,
+        summary=summary,
+        validation=validation,
+    )
+    if tracker is not None:
+        trk.log_experiment(
+            tracker,
+            summary=summary,
+            environment=environment,
+            artifacts={
+                f"{experiment_id}-summary": paths["summary"],
+                f"{experiment_id}-baseline-rows": paths["baseline_results"],
+                f"{experiment_id}-candidate-rows": paths["candidate_results"],
+            },
+        )
+
+    return {
+        "experiment_id": experiment_id,
+        "config": resolved_config,
+        "environment": environment,
+        "summary": summary,
+        "validation": validation,
+        "paths": {k: str(v) for k, v in paths.items()},
+        "output_dir": str(output_dir),
+        "baseline_rows": baseline_rows,
+        "candidate_rows": candidate_rows,
+    }
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -407,8 +701,10 @@ def write_results(
     baseline_rows: list[dict[str, Any]],
     candidate_rows: list[dict[str, Any]],
     summary: dict[str, Any],
+    validation: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
-    """Persist config, provenance, raw rows and the derived summary."""
+    """Persist config, provenance, raw rows, the derived summary, and the
+    methodology checks that say whether the summary means what it claims."""
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = {
         "config": output_dir / "config.json",
@@ -423,14 +719,41 @@ def write_results(
     write_rows(paths["baseline_results"], baseline_rows)
     write_rows(paths["candidate_results"], candidate_rows)
     runs_mod.write_json_atomic(paths["summary"], summary)
+    if validation is not None:
+        paths["validation"] = output_dir / "validation.json"
+        runs_mod.write_json_atomic(paths["validation"], validation)
     paths["report"].write_text(
-        _report_markdown(config, environment, summary), encoding="utf-8"
+        _report_markdown(config, environment, summary, validation), encoding="utf-8"
     )
     return paths
 
 
+def _validation_markdown(validation: dict[str, Any] | None) -> str:
+    if not validation:
+        return "_No methodology checks were recorded for this run._"
+    lines = [
+        "| Check | Result |",
+        "|---|---|",
+        *(
+            f"| `{name}` | {'PASS' if ok else 'FAIL'} |"
+            for name, ok in (validation.get("checks") or {}).items()
+        ),
+    ]
+    if not validation.get("identical_protocol", False):
+        lines.append("")
+        lines.append(
+            "**The two arms did not run an identical protocol.** The delta "
+            "above is not attributable to the harness alone; see "
+            "`validation.json`."
+        )
+    return "\n".join(lines)
+
+
 def _report_markdown(
-    config: dict[str, Any], environment: dict[str, Any], summary: dict[str, Any]
+    config: dict[str, Any],
+    environment: dict[str, Any],
+    summary: dict[str, Any],
+    validation: dict[str, Any] | None = None,
 ) -> str:
     git = environment.get("git", {})
     return f"""# {config.get('experiment', 'experiment')} — measured result
@@ -448,6 +771,13 @@ from `baseline-results.jsonl` and `candidate-results.jsonl` by
 ```
 {render_report(summary)}
 ```
+
+## Methodology checks
+
+Both arms must have run the identical protocol for the delta to be
+attributable to the harness. These are derived from the raw rows:
+
+{_validation_markdown(validation)}
 
 ## Reproducing
 

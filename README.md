@@ -30,8 +30,9 @@ fall out **by construction**:
 | Property | Mechanism | What that does *not* mean |
 |---|---|---|
 | **Isolated** | Each candidate runs in a fresh temp workspace, and every artifact a branch writes is scoped to its LangGraph thread — two branches cannot overwrite each other | Not container or network isolation; see [Security posture](#security-posture) |
-| **Recoverable** | Every state transition is checkpointed via `AsyncPostgresSaver`; any checkpoint restores to byte-identical state, provable by SHA-256 | Not that re-running from a checkpoint reproduces the same model output — LLM inference is stochastic |
+| **Recoverable** | Every state transition is checkpointed via `AsyncPostgresSaver`; any checkpoint restores to byte-identical state, provable by SHA-256 | Not that *re-running* from a checkpoint reproduces the same model output — that is `resume`, and it is a fresh stochastic execution |
 | **Reversible** | Time-travel via `get_state_history` + `update_state` + `ainvoke(None, ckpt_id)`, with branch history persisted to disk so it survives a restart | Not that a running branch's asyncio task survives a restart — it doesn't, and it reports as `interrupted` |
+| **Replayable** | A **recorded** run re-executes from any of its stored checkpoints against its tape: same transitions, same final state byte-for-byte, zero model calls | Not that an *unrecorded* run can be replayed exactly — recording is opt-in (`--record`) |
 
 The substrate IS the contribution. Every property above maps to a test in
 [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md).
@@ -172,14 +173,18 @@ bash scripts/live_smoke.sh        # prints SKIPPED without credentials
 
 ### 3. Published benchmark experiment — needs credentials, real cost
 
-The canonical 200-trial protocol behind the one quantitative result
-this project reports.
+One command runs the whole measurement pipeline: evolve candidates,
+select one on validation results only, run the canonical 200-trial
+experiment, run the 80-trial holdout experiment, verify that a recorded
+trial replays exactly, and regenerate the evidence document.
 
 ```bash
-uv run meta-harness experiment --candidate <evolved-candidate-name>
+uv run meta-harness resume-experiment --dry-run   # plan + cost estimate, spends nothing
+uv run meta-harness resume-experiment             # THIS COSTS MONEY
 ```
 
-See [`benchmarks/pass-rate/README.md`](benchmarks/pass-rate/README.md).
+See [`benchmarks/pass-rate/README.md`](benchmarks/pass-rate/README.md) and
+[`benchmarks/holdout/README.md`](benchmarks/holdout/README.md).
 
 ---
 
@@ -187,21 +192,40 @@ See [`benchmarks/pass-rate/README.md`](benchmarks/pass-rate/README.md).
 
 **Status: no benchmark has been published yet.**
 
-The experiment runner, the committed 200-trial protocol, the raw-trial
-schema, provenance capture and the summary derivation are implemented and
-tested — but the benchmark has not been executed, so there is no
-measured pass-rate number in this repository and none is claimed
+The measurement pipeline — runner, both committed protocols, raw-trial
+schema, provenance capture, methodology checks, summary derivation and
+evidence generation — is implemented and tested. The benchmark itself has
+not been executed, because this environment has no API credentials. There
+is no measured pass-rate number in this repository and none is claimed
 anywhere in it.
 
+[`docs/RESUME_EVIDENCE.md`](docs/RESUME_EVIDENCE.md) is generated from
+committed artifacts and reports every claim as `PASS`, `FAIL` or
+`UNSUPPORTED`. The pass-rate rows are currently `UNSUPPORTED`. That is the
+correct state, not a placeholder: a claim with no supporting artifact is
+reported as unsupported rather than softened.
+
 - Protocol: [`benchmarks/pass-rate/README.md`](benchmarks/pass-rate/README.md)
+- Generalisation protocol: [`benchmarks/holdout/README.md`](benchmarks/holdout/README.md)
 - Published results (currently empty): [`benchmarks/results/`](benchmarks/results/)
 - Capability status: [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md)
 
-The summary is derived mechanically from raw per-trial rows —
-`summarize()` accepts no target or expected value — and CI re-derives
-every published summary from its committed rows on each push. Any number
-that appears here in future will be reproducible from
-`benchmarks/results/<experiment-id>/`.
+### What keeps a future number honest
+
+- **Selection cannot see the test.** The candidate is chosen from the
+  validation accuracy measured *during* evolution; the canonical
+  experiment runs afterwards with fresh independent trials. Choosing on
+  the final trials would make the delta a selection artifact.
+- **Both arms run one protocol.** Identical tasks, trial counts, worker
+  pool and model, checked mechanically and published as `validation.json`.
+- **The summary cannot be authored.** `summarize()` accepts raw rows and
+  labels — no target, no expected value — and a test asserts that by
+  signature inspection.
+- **Incomplete arms are detected.** Missing, duplicated and malformed
+  trials are named. A row with no outcome is unknown, not a failure.
+- **CI re-derives everything.** Every published summary is recomputed
+  from its committed rows, and `docs/RESUME_EVIDENCE.md` is regenerated
+  and diffed, on every push.
 
 Numbers you will **not** find presented as measurements: average context
 tokens, total run cost, or a pass-rate delta. Those require a run that
@@ -213,11 +237,18 @@ has not happened.
 
 ```bash
 # resume an interrupted run from its last Postgres checkpoint
+# NOTE: this issues FRESH model calls. It is not a replay.
 uv run meta-harness resume <run-name>
 
 # inspect checkpoint history, restore one checkpoint's exact state
 uv run meta-harness checkpoints <run-name>
 uv run meta-harness replay <run-name> --checkpoint <checkpoint-id>
+
+# EXACT REPLAY of a recorded execution: re-runs the graph against the
+# recorded tape and fails loudly unless it reproduces it exactly
+uv run meta-harness inner --task task-001-fix-typo --candidate baseline --record
+uv run meta-harness replay <run-name> --checkpoint <id> --verify
+uv run meta-harness verify-replay runs/<run-name>
 
 # fork a run from a checkpoint into a concurrent branch
 uv run meta-harness fork <run-name> --checkpoint <id> --mod proposer_prior="try X"
@@ -225,9 +256,31 @@ uv run meta-harness fork <run-name> --checkpoint <id> --mod proposer_prior="try 
 # post-evaluate on the unseen holdout tasks
 uv run meta-harness benchmark --candidate <name> --holdout
 
+# evidence reports, all derived from committed artifacts
+uv run meta-harness report resume-evidence
+uv run meta-harness report version-graph <run-name>
+uv run meta-harness report cost-estimate
+uv run meta-harness report wandb-check
+
+# optional experiment tracking (off by default, works offline)
+uv sync --extra wandb
+WANDB_MODE=offline uv run meta-harness loop --wandb --proposer mock --mock-bench --budget 2
+
 # cross-run memory
 uv run meta-harness memory list
 ```
+
+### Three things called "replay"
+
+| Command | Executes? | Model calls | Guarantee |
+|---|---|---|---|
+| `replay <run>` | no | none | the recorded transitions, in order |
+| `replay <run> --checkpoint <id>` | no | none | that checkpoint's exact state, provable by SHA-256 |
+| `replay <run> --checkpoint <id> --verify` | **yes** | **none** | same nodes, same per-step state hashes, same final state hash, tape consumed exactly |
+| `resume <run>` | yes | **fresh** | a new stochastic execution from an old state |
+
+Only the third row supports the unqualified phrase *exact replay*, and it
+applies only to a run that was recorded.
 
 ---
 
@@ -320,7 +373,13 @@ meta-harness/
 │   │       ├── benchmark.py                   # shared (tasks × trials) measured core
 │   │       ├── metrics.py                     # per-call/trial/candidate token + cost
 │   │       ├── experiment.py                  # canonical 200-trial pass-rate experiment
-│   │       ├── replay.py                      # checkpoint restore + state hashing
+│   │       ├── replay.py                      # checkpoint restore, event replay, exact replay
+│   │       ├── recording.py                   # the execution tape + integrity
+│   │       ├── effects.py                     # live / recording / replaying boundary
+│   │       ├── versioning.py                  # the checkpoint DAG as a version graph
+│   │       ├── tracking.py                    # optional W&B adapter (the only wandb import)
+│   │       ├── pipeline.py                    # evolve → select → measure → verify → report
+│   │       ├── evidence.py                    # derives docs/RESUME_EVIDENCE.md
 │   │       ├── tools.py                       # 6 fixed inner-loop tools
 │   │       ├── sandbox.py                     # <temp>/meta-harness-task-{uuid}/
 │   │       ├── frontier.py                    # Pareto on (accuracy × measured tokens)
@@ -333,6 +392,7 @@ meta-harness/
 │   └── e2e/                                   # playwright: mock + live-backend projects
 ├── benchmarks/
 │   ├── pass-rate/                             # committed 200-trial protocol
+│   ├── holdout/                               # committed 80-trial generalisation protocol
 │   └── results/                               # published, immutable evidence
 ├── scripts/
 │   ├── demo_acceptance.sh                     # LEVEL 1 acceptance (no API key)

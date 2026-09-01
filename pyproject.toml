@@ -8,6 +8,14 @@ dependencies = [
     "meta_harness_backend",
 ]
 
+# Experiment tracking is optional. `uv sync` gives a working repository
+# with no W&B account, no credentials and no network; `uv sync --extra
+# wandb` adds the backend that `META_HARNESS_WANDB=1` then logs to.
+[project.optional-dependencies]
+wandb = [
+    "meta_harness_backend[wandb]",
+]
+
 [tool.uv.workspace]
 members = ["sdk", "backend"]
 

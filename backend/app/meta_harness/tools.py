@@ -383,8 +383,16 @@ def apply_patch(workspace: Path, path: str, patch: str) -> dict[str, Any]:
     if patch_error is not None:
         return patch_error
 
+    # ``newline=""`` and an explicit encoding, so the patch reaches
+    # ``git apply`` byte-for-byte as the model wrote it. In text mode
+    # Python rewrites every "\n" to os.linesep, which on Windows turns an
+    # LF unified diff into a CRLF one; git then reads the trailing CR as
+    # part of each context line and every patch fails as
+    # ``context_mismatch``. That failure does not crash anything — it
+    # just makes the inner loop's primary edit tool silently unusable on
+    # Windows, and depresses the measured pass rate with it.
     with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".patch", delete=False
+        mode="w", suffix=".patch", delete=False, newline="", encoding="utf-8"
     ) as patch_file:
         patch_file.write(patch)
         patch_path = patch_file.name

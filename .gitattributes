@@ -1,0 +1,32 @@
+# Line endings are part of this repository's content, not a local detail.
+#
+# `experiment.hash_task` hashes each task's files byte-for-byte, and a
+# published result is only comparable to another one carrying the same
+# task hashes. With `core.autocrlf=true` — the Windows default — a
+# checkout rewrites those files to CRLF, so the same frozen task hashes
+# differently on Windows than on Linux and two runs of "the identical
+# protocol" silently disagree about what they measured.
+#
+# Pinning LF makes a checkout byte-identical on every platform, which is
+# what "frozen tasks" has to mean for the hashes to be worth recording.
+#
+# (`git apply` reconciles an LF patch against a CRLF file on its own, so
+# the inner loop's patch tool is not affected by this — see
+# tests/test_tools.py. The hashing is the reason.)
+
+* text=auto eol=lf
+
+# Frozen, content-hashed evaluation material and the harnesses measured
+# against it. Never platform-converted.
+eval/** text eol=lf
+benchmarks/** text eol=lf
+agents/** text eol=lf
+
+# Shell scripts must keep LF or they will not run under bash.
+*.sh text eol=lf
+
+# Content git should not rewrite.
+*.png binary
+*.jpg binary
+*.ico binary
+uv.lock text eol=lf

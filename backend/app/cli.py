@@ -91,6 +91,16 @@ def inner(
         "--holdout",
         help="Resolve task from eval/holdout/ instead of eval/tasks/",
     ),
+    record: bool = typer.Option(
+        False,
+        "--record",
+        help=(
+            "Tape every model response, tool result and workspace observation "
+            "so this trial can later be replayed exactly with "
+            "`meta-harness verify-replay`. Requires Postgres: a replay is "
+            "positioned by checkpoint."
+        ),
+    ),
 ) -> None:
     """Run ONE inner-loop trial on a single task (async)."""
     from app.meta_harness import metrics as met
@@ -107,7 +117,12 @@ def inner(
 
     harness = _resolve_harness_class(candidate)()
     usage = met.UsageRecorder()
-    met.instrument_harness(harness, usage)
+    if not record:
+        # In the recording path the usage recorder is installed by
+        # ``record_inner_execution``, outside the effects boundary, so a
+        # later replay reports the recorded token counts. Installing it
+        # twice would record every call twice.
+        met.instrument_harness(harness, usage)
 
     run_dir = runs_mod.make_run_dir(REPO_ROOT, run_name)
     trace_dir = (
@@ -123,15 +138,41 @@ def inner(
         trial=1,
     )
 
+    recording_dir = (
+        runs_mod.thread_dir(run_dir, run_name)
+        / "recordings"
+        / f"{candidate}--{task}-trial-1"
+        if record
+        else None
+    )
+
     async def _run() -> dict[str, Any]:
-        with sandbox_for(task_dir / "workspace") as sandbox:
-            return await run_inner_loop(
-                harness,
-                task_dict=task_spec,
-                workspace=sandbox,
-                trace_dir=trace_dir,
-                thread_id=thread_id,
-            )
+        if recording_dir is None:
+            with sandbox_for(task_dir / "workspace") as sandbox:
+                return await run_inner_loop(
+                    harness,
+                    task_dict=task_spec,
+                    workspace=sandbox,
+                    trace_dir=trace_dir,
+                    thread_id=thread_id,
+                )
+
+        from app.meta_harness import replay as replay_mod  # noqa: PLC0415
+        from app.meta_harness.persistence import persistence_layer  # noqa: PLC0415
+
+        async with persistence_layer() as saver:
+            with sandbox_for(task_dir / "workspace") as sandbox:
+                recorded = await replay_mod.record_inner_execution(
+                    harness_factory=lambda: harness,
+                    task_dict=task_spec,
+                    workspace=sandbox,
+                    thread_id=thread_id,
+                    checkpointer=saver,
+                    recording_dir=recording_dir,
+                    trace_dir=trace_dir,
+                    usage=usage,
+                )
+        return recorded["final_state"]
 
     started = time.monotonic()
     final_state = _run_async(_run())
@@ -160,6 +201,7 @@ def inner(
                 "wall_time_s": row["wall_time_s"],
                 "trace_dir": str(trace_dir),
                 "thread_id": thread_id,
+                "recording_dir": str(recording_dir) if recording_dir else None,
             },
             indent=2,
         )
@@ -361,6 +403,23 @@ def loop(
             "skip checkpoint persistence (in-memory; mock-test mode)."
         ),
     ),
+    wandb: bool = typer.Option(
+        None,
+        "--wandb/--no-wandb",
+        help=(
+            "Log iterations, per-task results, token usage and the Pareto "
+            "frontier to Weights & Biases. Optional; defaults to "
+            "META_HARNESS_WANDB. WANDB_MODE=offline works without network."
+        ),
+    ),
+    record: bool = typer.Option(
+        False,
+        "--record",
+        help=(
+            "Tape every inner-loop trial for exact replay. Requires "
+            "--persistent, since a replay is positioned by checkpoint."
+        ),
+    ),
 ) -> None:
     """Run the meta-harness outer loop (async).
 
@@ -402,6 +461,39 @@ def loop(
             typer.echo(f"skill not found: {skill_path}", err=True)
             raise typer.Exit(2)
 
+    from app.meta_harness import tracking as trk
+
+    if record and not persistent:
+        typer.echo(
+            "--record needs --persistent: a tape with no checkpoint history "
+            "cannot be replayed from a checkpoint",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    tracker = trk.make_tracker(
+        enabled=wandb,
+        run_name=run_name,
+        config={
+            "proposer": proposer,
+            "budget": budget,
+            "trials": trials,
+            "workers": workers,
+            "mock_bench": mock_bench,
+            "domain": domain,
+        },
+        tags=["outer-loop", proposer],
+        job_type="loop",
+    )
+    if tracker.enabled:
+        typer.echo(f"tracking: wandb ({tracker.run_url or 'offline'})")
+    elif tracker.reason and wandb:
+        typer.echo(f"tracking: off ({tracker.reason})")
+
+    recording_root = (
+        _recordings_root(run_dir, run_name) if record else None
+    )
+
     async def _run() -> Any:
         # Open the memory store FIRST so its failure mode is isolated
         # from the loop body. Previously a single ``try`` wrapped both
@@ -440,6 +532,8 @@ def loop(
                         skill_path=skill_path,
                         checkpointer=saver,
                         memory_store=mstore,
+                        tracker=tracker,
+                        recording_root=recording_root,
                     )
                 finally:
                     if mstore_cm is not None:
@@ -458,9 +552,11 @@ def loop(
             budget=budget,
             skill_path=skill_path,
             checkpointer=None,
+            tracker=tracker,
         )
 
     final_state = _run_async(_run())
+    tracker.finish()
 
     # Post-eval on holdout set (if requested and meaningful).
     holdout_result: dict[str, Any] | None = None
@@ -487,10 +583,23 @@ def loop(
                 "frontier": final_state.get("frontier"),
                 "persistent": persistent,
                 "holdout": holdout_result,
+                "recording_root": str(recording_root) if recording_root else None,
+                "tracking": (
+                    {"backend": "wandb", "run_url": tracker.run_url}
+                    if tracker.enabled
+                    else {"backend": None, "reason": tracker.reason}
+                ),
             },
             indent=2,
         )
     )
+
+
+def _recordings_root(run_dir: Path, thread_id: str) -> Path:
+    """Where a run's execution tapes live: one directory per branch."""
+    from app.meta_harness import runs as runs_mod
+
+    return runs_mod.thread_dir(run_dir, thread_id) / "recordings"
 
 
 async def _run_holdout_eval(
@@ -703,6 +812,19 @@ def experiment(
         "--output",
         help="Result directory. Defaults to benchmark-results/<experiment-id>/.",
     ),
+    record_trials: int = typer.Option(
+        0,
+        "--record-trials",
+        help=(
+            "Tape this many trials per task per arm for exact-replay evidence. "
+            "Requires Postgres; 0 (the default) records nothing."
+        ),
+    ),
+    wandb: bool = typer.Option(
+        None,
+        "--wandb/--no-wandb",
+        help="Log to Weights & Biases. Defaults to META_HARNESS_WANDB.",
+    ),
 ) -> None:
     """Run the canonical two-arm pass-rate experiment.
 
@@ -782,68 +904,97 @@ def experiment(
             f"{row['task_id']} trial-{row['trial']}"
         )
 
-    async def _run() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        baseline_rows = await exp.run_arm(
-            arm="baseline",
-            harness_factory=baseline_cls,
-            tasks_dir=tasks_dir,
-            trials=n_trials,
-            workers=n_workers,
-            output_dir=output_dir,
-            experiment_id=experiment_id,
-            on_trial=_progress,
-        )
-        candidate_rows = await exp.run_arm(
-            arm="candidate",
-            harness_factory=candidate_cls,
-            tasks_dir=tasks_dir,
-            trials=n_trials,
-            workers=n_workers,
-            output_dir=output_dir,
-            experiment_id=experiment_id,
-            on_trial=_progress,
-        )
-        return baseline_rows, candidate_rows
+    from app.meta_harness import tracking as trk
 
-    baseline_rows, candidate_rows = _run_async(_run())
-
-    resolved = {
-        **cfg,
-        "experiment_id": experiment_id,
-        "arms": {"baseline": baseline, "candidate": candidate},
-        "trials_per_task": n_trials,
-        "workers": n_workers,
-        "total_trials": len(baseline_rows) + len(candidate_rows),
-    }
-    environment = exp.capture_environment(
-        repo_root=REPO_ROOT,
-        model=model,
-        tasks=task_dirs,
-        arm_sources={
-            baseline: REPO_ROOT / "agents" / f"{baseline}.py",
-            candidate: REPO_ROOT / "agents" / f"{candidate}.py",
+    tracker = trk.make_tracker(
+        enabled=wandb,
+        run_name=experiment_id,
+        config={
+            "experiment": cfg.get("experiment"),
+            "task_set": cfg.get("task_set"),
+            "trials_per_task": n_trials,
+            "workers": n_workers,
+            "baseline": baseline,
+            "candidate": candidate,
+            "model": model,
         },
+        tags=["experiment", str(cfg.get("experiment"))],
+        job_type="experiment",
     )
-    summary = exp.summarize(
-        baseline_rows=baseline_rows,
-        candidate_rows=candidate_rows,
-        task_ids=[d.name for d in task_dirs],
-        baseline_label=baseline,
-        candidate_label=candidate,
-    )
-    paths = exp.write_results(
-        output_dir=output_dir,
-        config=resolved,
-        environment=environment,
-        baseline_rows=baseline_rows,
-        candidate_rows=candidate_rows,
-        summary=summary,
-    )
+    if tracker.enabled:
+        typer.echo(f"  tracking:  wandb ({tracker.run_url or 'offline'})")
+
+    async def _run() -> dict[str, Any]:
+        # Recording needs a checkpointer, because a replay is positioned
+        # by checkpoint. Only open Postgres when trials are being taped.
+        if record_trials <= 0:
+            return await exp.run_two_arm_experiment(
+                repo_root=REPO_ROOT,
+                config=cfg,
+                experiment_id=experiment_id,
+                tasks_dir=tasks_dir,
+                baseline_label=baseline,
+                candidate_label=candidate,
+                baseline_factory=baseline_cls,
+                candidate_factory=candidate_cls,
+                arm_sources={
+                    baseline: REPO_ROOT / "agents" / f"{baseline}.py",
+                    candidate: REPO_ROOT / "agents" / f"{candidate}.py",
+                },
+                model=model,
+                trials=n_trials,
+                workers=n_workers,
+                output_dir=output_dir,
+                tracker=tracker,
+                on_trial=_progress,
+            )
+
+        from app.meta_harness.persistence import persistence_layer
+
+        async with persistence_layer() as saver:
+            return await exp.run_two_arm_experiment(
+                repo_root=REPO_ROOT,
+                config=cfg,
+                experiment_id=experiment_id,
+                tasks_dir=tasks_dir,
+                baseline_label=baseline,
+                candidate_label=candidate,
+                baseline_factory=baseline_cls,
+                candidate_factory=candidate_cls,
+                arm_sources={
+                    baseline: REPO_ROOT / "agents" / f"{baseline}.py",
+                    candidate: REPO_ROOT / "agents" / f"{candidate}.py",
+                },
+                model=model,
+                trials=n_trials,
+                workers=n_workers,
+                output_dir=output_dir,
+                checkpointer=saver,
+                tracker=tracker,
+                on_trial=_progress,
+                record_trials_per_task=record_trials,
+            )
+
+    result = _run_async(_run())
+    tracker.finish()
+    summary = result["summary"]
+    paths = result["paths"]
 
     typer.echo("")
     typer.echo(exp.render_report(summary))
     typer.echo("")
+    validation = result["validation"]
+    for name, ok in validation["checks"].items():
+        typer.echo(f"  [{'PASS' if ok else 'FAIL'}] {name}")
+    typer.echo("")
     typer.echo(f"wrote {paths['summary']}")
+    if not validation["identical_protocol"]:
+        typer.echo(
+            "the two arms did not run an identical protocol; the delta above "
+            "is not attributable to the harness alone",
+            err=True,
+        )
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -894,23 +1045,55 @@ def replay(
     limit: int = typer.Option(
         None, "--limit", help="Max checkpoints to walk when replaying a thread."
     ),
+    verify: bool = typer.Option(
+        False,
+        "--verify",
+        help=(
+            "Re-execute the recorded run from --checkpoint against its tape "
+            "and assert exact equivalence. Exits non-zero if the replayed "
+            "node sequence, per-step state hashes or final state hash differ, "
+            "or if the tape is not consumed exactly."
+        ),
+    ),
+    recording: str = typer.Option(
+        None,
+        "--recording",
+        help=(
+            "Recording directory to replay. Defaults to searching "
+            "runs/<run>/ for the recording that holds --checkpoint."
+        ),
+    ),
 ) -> None:
-    """Restore historical state from Postgres. No model calls are issued.
+    """Restore historical state from Postgres, or replay a recorded execution.
 
-    With ``--checkpoint``: return the exact stored state at that
-    checkpoint plus a SHA-256 of its canonical JSON encoding.
+    Three different things, kept apart on purpose:
 
-    Without it: walk the thread's recorded transitions oldest-first.
+    - default: walk the thread's recorded transitions oldest-first. Pure
+      read-back; nothing executes.
+    - ``--checkpoint``: return the exact stored state at that checkpoint
+      plus a SHA-256 of its canonical JSON encoding.
+    - ``--checkpoint --verify``: EXACT REPLAY. Re-execute the inner-loop
+      state machine from that checkpoint with every model response, tool
+      result and workspace observation served from the recorded tape, and
+      assert it reproduces the recording exactly.
 
-    This is checkpoint recovery and recorded-event replay. It does NOT
-    re-run the agent, and it makes no claim that re-executing from a
-    restored checkpoint would reproduce the same model output.
+    None of these issue a model call. Note that ``meta-harness resume`` is
+    the opposite: it re-enters a graph from a checkpoint and issues FRESH
+    model calls, which is a new stochastic execution, not a replay.
     """
     from app.meta_harness import replay as replay_mod
     from app.meta_harness.persistence import persistence_layer
 
     run_dir, manifest = _require_run(run_name)
     thread_id = thread or run_name
+
+    if verify:
+        _verify_recorded_checkpoint_replay(
+            run_dir=run_dir,
+            checkpoint=checkpoint,
+            recording_dir=recording,
+        )
+        return
 
     async def _run() -> dict[str, Any]:
         async with persistence_layer() as saver:
@@ -929,6 +1112,65 @@ def replay(
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from None
     typer.echo(json.dumps(result, indent=2, default=str))
+
+
+def _verify_recorded_checkpoint_replay(
+    *, run_dir: Path, checkpoint: str | None, recording_dir: str | None
+) -> None:
+    """``replay <run> --checkpoint <id> --verify``: exact replay, or exit 1."""
+    from app.meta_harness import recording as rec
+    from app.meta_harness import replay as replay_mod
+    from app.meta_harness.inner import build_inner_graph
+    from app.meta_harness.pipeline import _replay_harness_factory
+    from app.meta_harness.persistence import persistence_layer
+
+    if not checkpoint:
+        typer.echo("--verify requires --checkpoint", err=True)
+        raise typer.Exit(2)
+
+    if recording_dir:
+        directory = Path(recording_dir)
+        if not directory.is_absolute():
+            directory = REPO_ROOT / directory
+        found = rec.read_recording(directory)
+    else:
+        found = None
+        for candidate_dir in rec.discover_recordings(run_dir):
+            loaded = rec.read_recording(candidate_dir)
+            if any(s.checkpoint_id == checkpoint for s in loaded.steps):
+                found = loaded
+                break
+        if found is None:
+            typer.echo(
+                f"no recording under {run_dir} holds checkpoint {checkpoint}. "
+                "Record a run first: `meta-harness inner --record`, or "
+                "`meta-harness resume-experiment --record-trials 1`.",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+    factory = _replay_harness_factory(found, repo_root=REPO_ROOT)
+
+    async def _run() -> dict[str, Any]:
+        async with persistence_layer() as saver:
+            source_graph = build_inner_graph(factory(), checkpointer=saver)
+            return await replay_mod.replay_recorded_execution(
+                recording=found,
+                harness_factory=factory,
+                checkpointer=saver,
+                source_graph=source_graph,
+                from_checkpoint=checkpoint,
+            )
+
+    try:
+        report = _run_async(_run())
+    except KeyError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from None
+
+    typer.echo(replay_mod.render_verification(report))
+    if not report["verified"]:
+        raise typer.Exit(1)
 
 
 def _require_run(run_name: str) -> tuple[Path, dict[str, Any]]:
@@ -1145,6 +1387,699 @@ def memory_list(
         typer.echo(f"No patterns in namespace ('learned_patterns', '{namespace}').")
         return
     typer.echo(json.dumps(entries, indent=2, default=str))
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Exact recorded-execution replay
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.command("verify-replay")
+def verify_replay(
+    recordings: str = typer.Argument(
+        ...,
+        help="Directory holding one or more recordings (searched recursively).",
+    ),
+    limit: int = typer.Option(
+        None, "--limit", help="Verify at most N recordings."
+    ),
+    output: str = typer.Option(
+        None,
+        "--output",
+        help=(
+            "Write the verification report here. Defaults to "
+            "docs/evidence/replay-verification.json, which is what "
+            "`report resume-evidence` reads."
+        ),
+    ),
+) -> None:
+    """Re-execute recorded trials against their tapes and verify equivalence.
+
+    Each recording is replayed twice — once from the start of the run and
+    once from a mid-run checkpoint — and both must reproduce the recorded
+    node sequence, the per-step state hashes and the final state hash, and
+    must consume the tape exactly.
+
+    **No model is called.** ``ReplayEffects`` has no code path that
+    reaches a provider; the count of issued model calls is reported and
+    must be zero.
+
+    Exits non-zero if any replay fails to reproduce its recording.
+    """
+    from app.meta_harness import pipeline as pipe
+    from app.meta_harness.persistence import persistence_layer
+
+    root = Path(recordings)
+    if not root.is_absolute():
+        root = REPO_ROOT / root
+    from app.meta_harness import recording as rec
+
+    found = rec.discover_recordings(root)
+    if not found:
+        typer.echo(f"no recordings found under {root}", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"verifying {len(found)} recording(s) under {root}")
+
+    async def _run() -> dict[str, Any]:
+        # Replaying a whole run needs only the tape. Replaying *from a
+        # checkpoint* additionally needs the store that holds the
+        # recorded thread, so use Postgres when it is reachable and fall
+        # back to an in-memory checkpointer when it is not — reporting
+        # the checkpoint replays as skipped rather than as passes.
+        from app.meta_harness.persistence import healthcheck  # noqa: PLC0415
+
+        if await healthcheck():
+            async with persistence_layer() as saver:
+                return await pipe.verify_recorded_replays(
+                    recordings_root=root,
+                    repo_root=REPO_ROOT,
+                    checkpointer=saver,
+                    limit=limit,
+                )
+
+        from langgraph.checkpoint.memory import InMemorySaver  # noqa: PLC0415
+
+        typer.echo(
+            "  Postgres is not reachable: whole-run replays will be verified, "
+            "replays from a stored checkpoint will be skipped."
+        )
+        return await pipe.verify_recorded_replays(
+            recordings_root=root,
+            repo_root=REPO_ROOT,
+            checkpointer=InMemorySaver(),
+            limit=limit,
+        )
+
+    report = _run_async(_run())
+
+    from app.meta_harness import replay as replay_mod
+
+    for entry in report["reports"]:
+        typer.echo("")
+        typer.echo(f"--- {entry['recording']} ({entry['mode']}) ---")
+        typer.echo(replay_mod.render_verification(entry))
+
+    out_path = (
+        Path(output)
+        if output
+        else REPO_ROOT / "docs" / "evidence" / "replay-verification.json"
+    )
+    if not out_path.is_absolute():
+        out_path = REPO_ROOT / out_path
+    from app.meta_harness import runs as runs_mod
+
+    runs_mod.write_json_atomic(out_path, report)
+    typer.echo("")
+    typer.echo(f"wrote {out_path}")
+
+    for entry in report["skipped"]:
+        typer.echo("")
+        typer.echo(f"--- {entry['recording']} ({entry['mode']}) SKIPPED ---")
+        typer.echo(f"    {entry['reason']}")
+
+    if not report["all_verified"]:
+        typer.echo("EXACT REPLAY FAILED — see the checks above", err=True)
+        raise typer.Exit(1)
+    typer.echo(
+        f"all {report['replays']} replays verified "
+        f"({report['replays_from_checkpoint']} from a stored checkpoint); "
+        f"{report['model_calls_issued']} model calls issued"
+    )
+    if report["skipped"]:
+        typer.echo(
+            f"{len(report['skipped'])} checkpoint replay(s) skipped; see the "
+            f"report for why"
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# The end-to-end evidence pipeline
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.command("resume-experiment")
+def resume_experiment(
+    budget: int = typer.Option(
+        5, "--budget", help="Outer-loop iterations to spend evolving candidates."
+    ),
+    search_trials: int = typer.Option(
+        5,
+        "--search-trials",
+        help=(
+            "Trials per task during evolution. These are the VALIDATION "
+            "numbers candidate selection uses; the final experiment re-measures "
+            "with fresh independent trials."
+        ),
+    ),
+    workers: int = typer.Option(5, "--workers", help="Parallel trial workers."),
+    candidate: str = typer.Option(
+        None,
+        "--candidate",
+        help=(
+            "Skip evolution and measure this already-evolved candidate under "
+            "agents/. Use when a previous run already produced one."
+        ),
+    ),
+    run_name: str = typer.Option(
+        None, "--run-name", help="Run dir under runs/. Auto-generated if omitted."
+    ),
+    domain: str = typer.Option(
+        "coding-agent", "--domain", help="SKILL.md domain for the proposer."
+    ),
+    record_trials: int = typer.Option(
+        1,
+        "--record-trials",
+        help=(
+            "Tape this many trials per task per arm for exact-replay evidence. "
+            "0 disables recording."
+        ),
+    ),
+    holdout: bool = typer.Option(
+        True,
+        "--holdout/--no-holdout",
+        help="Also run the two-arm generalisation experiment on eval/holdout/.",
+    ),
+    wandb: bool = typer.Option(
+        None,
+        "--wandb/--no-wandb",
+        help="Log to Weights & Biases. Defaults to META_HARNESS_WANDB.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help=(
+            "Print the plan and a cost estimate extrapolated from measured "
+            "trials already on disk, then exit without spending anything."
+        ),
+    ),
+) -> None:
+    """Evolve, select on validation only, measure, verify replay, report.
+
+    The one command behind every number in `docs/RESUME_EVIDENCE.md`:
+
+    1. evolve candidate harnesses on the search set with the real proposer;
+    2. select the best candidate using ONLY the validation accuracy the
+       outer loop measured during evolution — the final experiment has not
+       run yet, so its trials cannot influence the choice;
+    3. run the canonical two-arm experiment (5 tasks x 20 trials x 2 arms);
+    4. run the two-arm holdout experiment on tasks the proposer never saw;
+    5. verify a recorded trial replays exactly;
+    6. regenerate the resume-evidence document from the artifacts.
+
+    THIS ISSUES REAL LLM CALLS AND COSTS MONEY. Use ``--dry-run`` first.
+
+    Nothing in this command compares a result to a target. If the measured
+    improvement is below the resume's claim, the claim is reported
+    unsupported and the measured number stands.
+    """
+    import datetime as _dt
+
+    from app.meta_harness import evidence as ev
+    from app.meta_harness import pipeline as pipe
+    from app.meta_harness import runs as runs_mod
+    from app.meta_harness import tracking as trk
+    from app.meta_harness.outer import run_outer_loop
+    from app.meta_harness.persistence import persistence_layer
+
+    search_config = REPO_ROOT / "benchmarks" / "pass-rate" / "config.json"
+    holdout_config = REPO_ROOT / "benchmarks" / "holdout" / "config.json"
+
+    isolation = _experiment_module().check_task_set_isolation(
+        search_dir=REPO_ROOT / "eval" / "tasks",
+        holdout_dir=REPO_ROOT / "eval" / "holdout",
+    )
+    if not isolation["disjoint"]:
+        typer.echo(
+            "search and holdout task sets overlap on "
+            f"{isolation['overlapping_tasks']}; the holdout number would be "
+            "a second search-set measurement",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    planned = _planned_trials(search_config, holdout_config if holdout else None)
+    estimate = pipe.estimate_cost(
+        pipe.collect_measured_rows(REPO_ROOT), planned_trials=planned
+    )
+
+    typer.echo("plan")
+    typer.echo(f"  evolve:      {budget} iterations x {search_trials} trials/task")
+    typer.echo(f"  experiment:  {search_config.relative_to(REPO_ROOT)}")
+    if holdout:
+        typer.echo(f"  holdout:     {holdout_config.relative_to(REPO_ROOT)}")
+    typer.echo(f"  final trials: {planned}")
+    typer.echo(f"  cost estimate: {json.dumps(estimate, indent=2)}")
+
+    if dry_run:
+        typer.echo("")
+        typer.echo("--dry-run: nothing was executed and nothing was spent.")
+        return
+
+    if run_name is None:
+        run_name = "resume-" + _dt.datetime.now(_dt.timezone.utc).strftime(
+            "%Y%m%dT%H%M%SZ"
+        )
+    run_dir = runs_mod.make_run_dir(REPO_ROOT, run_name, fresh=True)
+    output_root = REPO_ROOT / "benchmark-results"
+
+    skill_path = REPO_ROOT / "skills" / f"meta-harness-{domain}" / "SKILL.md"
+    if candidate is None and not skill_path.exists():
+        typer.echo(f"skill not found: {skill_path}", err=True)
+        raise typer.Exit(2)
+
+    tracker = trk.make_tracker(
+        enabled=wandb,
+        run_name=run_name,
+        config={
+            "budget": budget,
+            "search_trials": search_trials,
+            "workers": workers,
+            "record_trials": record_trials,
+            "holdout": holdout,
+        },
+        tags=["resume-experiment"],
+        job_type="resume-experiment",
+    )
+    if tracker.enabled:
+        typer.echo(f"tracking: wandb ({tracker.run_url or 'offline'})")
+    elif tracker.reason:
+        typer.echo(f"tracking: off ({tracker.reason})")
+
+    stages: list[Any] = []
+
+    def _progress(arm: str, row: dict[str, Any]) -> None:
+        mark = "PASS" if row["passed"] else "FAIL"
+        typer.echo(f"  [{arm}] {mark} {row['task_id']} trial-{row['trial']}")
+
+    async def _run() -> list[Any]:
+        collected: list[Any] = []
+        async with persistence_layer() as saver:
+            if candidate is None:
+                typer.echo("")
+                typer.echo("stage 1/6: evolving candidates")
+                final_state = await run_outer_loop(
+                    run_dir=run_dir,
+                    repo_root=REPO_ROOT,
+                    eval_tasks_dir=REPO_ROOT / "eval" / "tasks",
+                    mock_proposer=False,
+                    mock_bench=False,
+                    trials=search_trials,
+                    bench_workers=workers,
+                    budget=budget,
+                    skill_path=skill_path,
+                    checkpointer=saver,
+                    tracker=tracker,
+                )
+                collected.append(
+                    pipe.StageResult(
+                        "evolve",
+                        "ok",
+                        f"{final_state['iteration']} iterations, "
+                        f"{len(final_state.get('candidates') or [])} candidates",
+                        {"best_candidate": final_state.get("best_candidate")},
+                    )
+                )
+                selection = pipe.select_candidate(final_state)
+            else:
+                selection = _selection_from_agents_dir(candidate)
+                collected.append(
+                    pipe.StageResult(
+                        "evolve",
+                        "skipped",
+                        f"--candidate {candidate} supplied; evolution skipped",
+                    )
+                )
+
+            typer.echo("")
+            typer.echo(f"stage 2/6: selection — {selection['reason']}")
+            runs_mod.write_json_atomic(run_dir / "selection.json", selection)
+            collected.append(
+                pipe.StageResult(
+                    "select", "ok", selection["reason"], {"selection": selection}
+                )
+            )
+
+            typer.echo("")
+            typer.echo("stage 3-4/6: canonical + holdout experiments")
+            collected.extend(
+                await pipe.run_measurement_pipeline(
+                    repo_root=REPO_ROOT,
+                    search_config_path=search_config,
+                    holdout_config_path=holdout_config if holdout else None,
+                    selection=selection,
+                    baseline_label="baseline",
+                    output_root=output_root,
+                    workers=workers,
+                    checkpointer=saver,
+                    tracker=tracker,
+                    on_trial=_progress,
+                    record_trials_per_task=record_trials,
+                    run_holdout=holdout,
+                )
+            )
+
+            search_stage = next(
+                (s for s in collected if s.name == "experiment"), None
+            )
+            if search_stage is not None and search_stage.status == "ok":
+                recordings_root = (
+                    Path(search_stage.data["output_dir"]) / "recordings"
+                )
+                if record_trials > 0 and recordings_root.is_dir():
+                    typer.echo("")
+                    typer.echo("stage 5/6: verifying exact recorded replay")
+                    verification = await pipe.verify_recorded_replays(
+                        recordings_root=recordings_root,
+                        repo_root=REPO_ROOT,
+                        checkpointer=saver,
+                        limit=2,
+                    )
+                    runs_mod.write_json_atomic(
+                        REPO_ROOT / "docs" / "evidence" / "replay-verification.json",
+                        verification,
+                    )
+                    collected.append(
+                        pipe.StageResult(
+                            "replay-verify",
+                            "ok" if verification["all_verified"] else "failed",
+                            f"{verification['replays']} replays, "
+                            f"{verification['model_calls_issued']} model calls",
+                            {"verification": verification},
+                        )
+                    )
+                else:
+                    collected.append(
+                        pipe.StageResult(
+                            "replay-verify", "skipped", "no trials were recorded"
+                        )
+                    )
+
+            version = await _capture_version_graph(saver, run_dir, run_name)
+            collected.append(
+                pipe.StageResult(
+                    "version-graph",
+                    "ok",
+                    f"{version['checkpoint_count']} checkpoints, "
+                    f"{version['branch_count']} branches",
+                    {"version_graph": {k: version[k] for k in ("checkpoint_count", "branch_count", "immutable")}},
+                )
+            )
+        return collected
+
+    stages = _run_async(_run())
+
+    typer.echo("")
+    typer.echo("stage 6/6: regenerating resume evidence")
+    report = ev.build_report(REPO_ROOT)
+    evidence_path = REPO_ROOT / "docs" / "RESUME_EVIDENCE.md"
+    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+    evidence_path.write_text(report["markdown"], encoding="utf-8")
+
+    pipe.write_pipeline_log(run_dir, stages)
+    tracker.finish()
+
+    typer.echo("")
+    for stage in stages:
+        typer.echo(f"  [{stage.status}] {stage.name}: {stage.detail}")
+    typer.echo("")
+    typer.echo(f"wrote {evidence_path}")
+    typer.echo(json.dumps(report["counts"], indent=2))
+    if report["any_failed"]:
+        raise typer.Exit(1)
+
+
+def _experiment_module() -> Any:
+    from app.meta_harness import experiment as exp
+
+    return exp
+
+
+def _planned_trials(search_config: Path, holdout_config: Path | None) -> int:
+    """Total final-experiment trials, read from the committed protocols."""
+    exp = _experiment_module()
+    total = 0
+    for path in (search_config, holdout_config):
+        if path is None or not path.exists():
+            continue
+        config = exp.load_config(path)
+        total += len(config.get("tasks") or []) * int(config["trials_per_task"]) * 2
+    return total
+
+
+def _selection_from_agents_dir(candidate: str) -> dict[str, Any]:
+    """Build a selection record for a candidate supplied by hand.
+
+    Recorded as ``operator-supplied`` rather than dressed up as a
+    validation result: no validation number backs this choice, and the
+    evidence document should say so.
+    """
+    cls = _resolve_harness_class(candidate)
+    return {
+        "selected": candidate,
+        "selected_row": {
+            "candidate": candidate,
+            "label": candidate,
+            "import_path": f"agents.{candidate}:{cls.__name__}",
+            "source_path": str(REPO_ROOT / "agents" / f"{candidate}.py"),
+            "validation_accuracy": None,
+            "iteration": None,
+        },
+        "reason": f"operator-supplied candidate agents/{candidate}.py",
+        "selection_basis": (
+            "supplied on the command line; no validation measurement backs "
+            "this choice"
+        ),
+        "table": [],
+    }
+
+
+async def _capture_version_graph(
+    saver: Any, run_dir: Path, run_name: str, *, full: bool = False
+) -> dict[str, Any]:
+    """Read the run's checkpoint DAG out of Postgres and persist it as evidence."""
+    from app.meta_harness import branches as br
+    from app.meta_harness import runs as runs_mod
+    from app.meta_harness import versioning as ver
+
+    # Branch refs live in runs/<run>/branches.json, so the registry has to
+    # know where runs/ is before it can reload them.
+    br.set_runs_root(REPO_ROOT / "runs")
+    manifest = runs_mod.read_manifest(run_dir) or {}
+    graph = _rebuild_graph(run_dir, manifest, saver)
+
+    version = await ver.capture_evidence(
+        graph, run_id=run_name, run_dir=run_dir, full=full
+    )
+    runs_mod.write_json_atomic(
+        REPO_ROOT / "docs" / "evidence" / "version-graph.json", version
+    )
+    return version
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Reports
+# ──────────────────────────────────────────────────────────────────────
+
+report_app = typer.Typer(
+    name="report",
+    help="Derive evidence documents from committed artifacts.",
+    no_args_is_help=True,
+)
+app.add_typer(report_app, name="report")
+
+
+@report_app.command("resume-evidence")
+def report_resume_evidence(
+    output: str = typer.Option(
+        "docs/RESUME_EVIDENCE.md",
+        "--output",
+        help="Where to write the document.",
+    ),
+    check: bool = typer.Option(
+        False,
+        "--check",
+        help=(
+            "Do not write. Regenerate from the artifacts and exit non-zero if "
+            "the committed document disagrees. This is what CI runs."
+        ),
+    ),
+    as_json: bool = typer.Option(
+        False, "--json", help="Print the derived checks as JSON instead."
+    ),
+) -> None:
+    """Derive PASS/FAIL for every resume claim from committed artifacts.
+
+    Measured rows are recomputed from raw trial rows; structural rows
+    compile the graphs and read their node sets; artifact rows read
+    verification reports. No value in the output is hand-entered, and a
+    claim with no supporting artifact reports UNSUPPORTED.
+    """
+    from app.meta_harness import evidence as ev
+
+    report = ev.build_report(REPO_ROOT)
+
+    if as_json:
+        typer.echo(
+            json.dumps(
+                {k: v for k, v in report.items() if k != "markdown"},
+                indent=2,
+                default=str,
+            )
+        )
+        return
+
+    path = Path(output)
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+
+    if check:
+        if not path.exists():
+            typer.echo(f"{path} does not exist; run without --check", err=True)
+            raise typer.Exit(1)
+        committed = ev.comparable(path.read_text(encoding="utf-8"))
+        derived = ev.comparable(report["markdown"])
+        if committed != derived:
+            typer.echo(
+                f"{path} disagrees with the artifacts it claims to summarise. "
+                "Regenerate it with `uv run meta-harness report resume-evidence`.",
+                err=True,
+            )
+            _echo_first_difference(committed, derived)
+            raise typer.Exit(1)
+        typer.echo(f"{path} matches the artifacts it is derived from")
+        return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(report["markdown"], encoding="utf-8")
+    typer.echo(f"wrote {path}")
+    for check_row in report["checks"]:
+        typer.echo(f"  [{check_row['status']}] {check_row['claim']}")
+    typer.echo(json.dumps(report["counts"], indent=2))
+
+
+def _echo_first_difference(committed: str, derived: str) -> None:
+    for index, (a, b) in enumerate(
+        zip(committed.splitlines(), derived.splitlines())
+    ):
+        if a != b:
+            typer.echo(f"  first difference at line {index + 1}:", err=True)
+            typer.echo(f"    committed: {a}", err=True)
+            typer.echo(f"    derived:   {b}", err=True)
+            return
+    typer.echo("  the documents differ in length", err=True)
+
+
+@report_app.command("version-graph")
+def report_version_graph(
+    run_name: str = typer.Argument(..., help="Run name (under runs/)"),
+    output: str = typer.Option(
+        "docs/evidence/version-graph.json",
+        "--output",
+        help="Where to write the version-graph evidence artifact.",
+    ),
+    full: bool = typer.Option(
+        False,
+        "--full",
+        help=(
+            "Include each checkpoint's value summary. Large, and the claim "
+            "does not rest on it; off by default so the artifact stays "
+            "committable."
+        ),
+    ),
+) -> None:
+    """Read a run's checkpoint DAG out of Postgres and persist it as evidence.
+
+    Records the checkpoints (immutable ids with parent references), the
+    branch refs and their fork points, each branch's private working
+    tree, and a re-read immutability check confirming every stored
+    checkpoint still hashes to what it hashed to.
+    """
+    from app.meta_harness.persistence import persistence_layer
+
+    run_dir, _ = _require_run(run_name)
+
+    async def _run() -> dict[str, Any]:
+        async with persistence_layer() as saver:
+            return await _capture_version_graph(
+                saver, run_dir, run_name, full=full
+            )
+
+    version = _run_async(_run())
+    path = Path(output)
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    typer.echo(
+        json.dumps(
+            {
+                "run_id": version["run_id"],
+                "checkpoint_count": version["checkpoint_count"],
+                "branch_count": version["branch_count"],
+                "immutable": version["immutable"],
+                "checkpoints_reread": version["immutability"]["checked"],
+                "threads": {k: len(v) for k, v in version["threads"].items()},
+            },
+            indent=2,
+        )
+    )
+    typer.echo(f"wrote {path}")
+    if not version["immutable"]:
+        typer.echo("a stored checkpoint changed; versioning is broken", err=True)
+        raise typer.Exit(1)
+
+
+@report_app.command("wandb-check")
+def report_wandb_check(
+    output: str = typer.Option(
+        "docs/evidence/wandb-offline.json",
+        "--output",
+        help="Where to write the probe result.",
+    ),
+) -> None:
+    """Probe the W&B adapter in offline mode and record the result.
+
+    Forces ``WANDB_MODE=offline``, so the probe never touches the network
+    and never needs credentials. If ``wandb`` is not installed the probe
+    records that plainly rather than failing — the integration is
+    optional by design, and "the repository runs without it" is exactly
+    what the row in the evidence document asserts.
+    """
+    from app.meta_harness import runs as runs_mod
+    from app.meta_harness import tracking as trk
+
+    result = trk.offline_probe()
+    runs_mod.write_json_atomic(_abs(output), result)
+    typer.echo(json.dumps(result, indent=2))
+    if not result["ok"]:
+        raise typer.Exit(1)
+
+
+@report_app.command("cost-estimate")
+def report_cost_estimate(
+    trials: int = typer.Option(
+        None,
+        "--trials",
+        help="Trials to price. Defaults to the committed protocols' total.",
+    ),
+) -> None:
+    """Price a planned experiment from measured trial rows already on disk.
+
+    Reports ``null`` rather than a number when there is nothing measured
+    to extrapolate from.
+    """
+    from app.meta_harness import pipeline as pipe
+
+    planned = trials if trials is not None else _planned_trials(
+        REPO_ROOT / "benchmarks" / "pass-rate" / "config.json",
+        REPO_ROOT / "benchmarks" / "holdout" / "config.json",
+    )
+    rows = pipe.collect_measured_rows(REPO_ROOT)
+    typer.echo(json.dumps(pipe.estimate_cost(rows, planned_trials=planned), indent=2))
+
+
+def _abs(path_like: str) -> Path:
+    path = Path(path_like)
+    return path if path.is_absolute() else REPO_ROOT / path
 
 
 def main() -> None:

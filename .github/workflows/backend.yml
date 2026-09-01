@@ -66,8 +66,9 @@ jobs:
 
       - name: Assert the Postgres integration tests ran
         # Guards the same failure mode from the other side: these files
-        # exist to exercise persistence, forking and inner checkpointing.
-        # If they collectively report zero passes, the build is a lie.
+        # exist to exercise persistence, forking, inner checkpointing,
+        # the version graph and exact replay against real Postgres. If
+        # they collectively report zero passes, the build is a lie.
         run: |
           cd backend
           uv run pytest -q --no-header \
@@ -75,7 +76,9 @@ jobs:
             tests/test_branch_isolation.py \
             tests/test_branch_persistence.py \
             tests/test_inner_checkpoints.py \
-            tests/test_replay.py 2>&1 | tee pg.log
+            tests/test_replay.py \
+            tests/test_versioning.py \
+            tests/test_exact_replay.py 2>&1 | tee pg.log
           if grep -qE '[0-9]+ skipped' pg.log; then
             echo "::error::Postgres-backed tests were skipped; persistence was not verified"
             exit 1
@@ -87,6 +90,112 @@ jobs:
         with:
           name: pytest-report
           path: pytest-report.xml
+
+  offline-integrity:
+    name: offline suites (no Postgres, no network, no W&B)
+    runs-on: ubuntu-latest
+    env:
+      # Deliberately hostile. These suites must pass with no database, no
+      # API key, no W&B account and no network — that is the property
+      # under test, not an accident of the runner.
+      ANTHROPIC_API_KEY: ""
+      POSTGRES_DSN: "postgresql://unreachable:unreachable@127.0.0.1:1/none"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - run: uv sync --frozen
+
+      - name: Exact replay, recording, tracking and evidence derivation
+        run: |
+          cd backend
+          uv run pytest -q --no-header \
+            tests/test_recording.py \
+            tests/test_exact_replay.py \
+            tests/test_inner_messages.py \
+            tests/test_tracking.py \
+            tests/test_pipeline.py \
+            tests/test_resume_evidence.py
+
+      - name: The W&B adapter degrades cleanly when wandb is absent
+        run: |
+          uv run meta-harness report wandb-check --output /tmp/wandb-probe.json
+          uv run python -c "
+          import json
+          probe = json.load(open('/tmp/wandb-probe.json'))
+          assert probe['ok'], probe
+          assert probe['wandb_installed'] is False, 'this job installs no extras'
+          print('wandb absent, repository still works:', probe['detail'])
+          "
+
+  wandb-offline:
+    name: W&B offline logging (no credentials, no network)
+    runs-on: ubuntu-latest
+    env:
+      WANDB_MODE: offline
+      WANDB_SILENT: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - run: uv sync --frozen --extra wandb
+
+      - name: Probe the adapter in offline mode
+        run: |
+          uv run meta-harness report wandb-check --output /tmp/wandb-probe.json
+          uv run python -c "
+          import json
+          probe = json.load(open('/tmp/wandb-probe.json'))
+          assert probe['ok'] and probe['wandb_installed'], probe
+          assert probe['mode'] == 'offline', probe
+          assert probe['logged'] == 3, probe
+          print('offline W&B run created; version', probe['wandb_version'])
+          "
+
+  resume-evidence:
+    name: resume evidence agrees with the artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - run: uv sync --frozen
+
+      - name: Regenerate the evidence document and diff it
+        # Every row in docs/RESUME_EVIDENCE.md is derived from committed
+        # artifacts. If the committed document disagrees with what those
+        # artifacts now say, it is stale or edited — and a stale claim is
+        # worse than no claim.
+        run: uv run meta-harness report resume-evidence --check
+
+      - name: No claim may be marked FAIL
+        # UNSUPPORTED is a legitimate state: the artifact that would
+        # settle the claim does not exist yet. FAIL means an artifact
+        # exists and contradicts the claim.
+        run: |
+          uv run meta-harness report resume-evidence --json > evidence.json
+          uv run python -c "
+          import json
+          report = json.load(open('evidence.json'))
+          failed = [c for c in report['checks'] if c['status'] == 'FAIL']
+          for check in failed:
+              print('::error::' + check['claim'] + ': ' + check['detail'])
+          counts = report['counts']
+          print(counts['PASS'], 'PASS,', counts['FAIL'], 'FAIL,', counts['UNSUPPORTED'], 'UNSUPPORTED')
+          raise SystemExit(1 if failed else 0)
+          "
 
   benchmark-schema:
     name: benchmark schema + published results
@@ -101,7 +210,7 @@ jobs:
 
       - run: uv sync --frozen
 
-      - name: Validate the committed benchmark protocol
+      - name: Validate the committed benchmark protocols
         run: |
           cd backend
           uv run pytest tests/test_experiment.py -q --no-header
@@ -135,11 +244,24 @@ jobs:
               for key in (
                   "baseline_passes", "baseline_trials",
                   "candidate_passes", "candidate_trials",
+                  "baseline_accuracy", "candidate_accuracy",
                   "absolute_percentage_point_delta",
               ):
                   if recomputed[key] != summary[key]:
                       print(f"::error::{d}: {key} {summary[key]!r} != recomputed {recomputed[key]!r}")
                       failed = True
+
+              # A published result must also record whether its two arms
+              # ran the same protocol. Without that the delta is not
+              # attributable to the harness, whatever it recomputes to.
+              validation_path = d / "validation.json"
+              if not validation_path.exists():
+                  print(f"::error::{d}: no validation.json; the methodology is unrecorded")
+                  failed = True
+              elif not json.loads(validation_path.read_text()).get("identical_protocol"):
+                  print(f"::error::{d}: the two arms did not run an identical protocol")
+                  failed = True
+
               print(f"{d.name}: verified")
           raise SystemExit(1 if failed else 0)
           PY
@@ -160,6 +282,20 @@ jobs:
         run: |
           if git grep -nE 'sk-ant-[A-Za-z0-9_-]{20,}' -- . ':(exclude).github/workflows/*'; then
             echo "::error::an Anthropic API key pattern is committed"; exit 1
+          fi
+
+      - name: No W&B run directories are tracked
+        run: |
+          if git ls-files | grep -qE '(^|/)wandb/'; then
+            echo "::error::a local W&B run directory is tracked"; exit 1
+          fi
+
+      - name: No execution tapes are tracked
+        # A tape holds every model response verbatim. It belongs under
+        # runs/ or benchmark-results/, both of which are gitignored.
+        run: |
+          if git ls-files | grep -qE '(^|/)tape\.jsonl$'; then
+            echo "::error::an execution tape is tracked"; exit 1
           fi
 
       - name: No generated run or benchmark artifacts

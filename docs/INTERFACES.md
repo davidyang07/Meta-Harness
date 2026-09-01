@@ -88,6 +88,311 @@ is the accessor for the one-sentence headline built from a summary.
 These names changed after §1-§9 below were written; nothing under
 `benchmarks/results/` is affected, because no result has been published.
 
+### 0.6 `state["messages"]` has deterministic identity, and `act` replaces it
+
+`act` returns `[RemoveMessage(id=REMOVE_ALL_MESSAGES), *messages]` where
+every message carries a positional `id` of the form `m0000`, `m0001`, …
+(`inner._messages_update`). The reducer is still `add_messages`; what
+changed is what `act` hands it.
+
+**Why both halves are load-bearing.**
+
+- Without stable ids, `add_messages` mints a random UUID per message. Two
+  executions of the same recorded run then produce different state, and
+  no byte-for-byte replay claim can survive that (§0.8).
+- Without the clear, `add_messages` merges by id and never removes, so an
+  `act` whose override-10 overflow strategy dropped messages would leave
+  the dropped tail behind in state.
+
+Together they also make `act` idempotent, which the "LangGraph node side
+effects must be idempotent" invariant requires of a node that can be
+re-entered after an interrupt.
+
+`act` normalises `state["messages"]` back to the Anthropic wire shape on
+entry (`inner._as_api_messages`) and strips the bookkeeping `id` from the
+outgoing request (`inner._request_messages`). The request is therefore
+byte-identical whether `act` was entered from `plan` or from the
+`verify → act` retry edge.
+
+### 0.7 Every crossing into the world goes through `effects`
+
+`app.meta_harness.effects` is the boundary between the inner-loop state
+machine and everything nondeterministic: model responses, tool dispatch,
+the workspace scan, the verify subprocess, the final-file snapshot, and
+every trace write.
+
+| Implementation | Behaviour |
+|---|---|
+| `Effects` (alias `LiveEffects`) | performs the real operation. Default. |
+| `RecordingEffects(writer)` | performs it **and** appends it to a tape. |
+| `ReplayEffects(reader)` | serves it from a tape; never calls the producer. |
+
+`build_inner_graph(harness, *, checkpointer=None, effects=None)` and
+`run_inner_loop(..., effects=None)` take the implementation. The graph's
+*shape* is identical in all three modes.
+
+**Contract for anyone editing a node body:** a new nondeterministic call
+that does not go through `effects.observe` silently breaks exact replay.
+The effect kinds are fixed: `llm`, `tool`, `orient`, `verify`, `files`.
+
+`effects.instrument_harness_for_effects(harness, effects)` wraps
+`_call_llm` on the *instance*, so a candidate that overrode it is
+recorded and replayed at the same boundary as the baseline. **Order
+matters:** apply it *before* `metrics.instrument_harness`, so the usage
+recorder sits outside the effects boundary and a replayed trial reports
+the recorded token counts.
+
+### 0.8 Execution recording (`recording.py`) and exact replay
+
+A recording is a directory:
+
+```
+<recording-id>/
+├── manifest.json    # provenance + the entry state's task and workspace
+├── tape.jsonl       # one row per boundary crossing, in execution order
+└── steps.jsonl      # one row per completed node, joined to its checkpoint
+```
+
+**`tape.jsonl` row**
+
+```json
+{
+  "seq": 4,
+  "kind": "llm",
+  "key": "<sha256 over the request>",
+  "node": "act",
+  "payload": {"content": [...], "model": "...", "usage": {...},
+              "stop_reason": "tool_use"}
+}
+```
+
+`key` is `sha256({"kind": ..., "input": <request>})`. During replay the
+reader demands that the key the graph asks for equals the key recorded at
+that position; anything else raises `ReplayDivergence`. Because each
+request is built from earlier replayed results, one divergence anywhere
+changes every key downstream.
+
+**`steps.jsonl` row**
+
+```json
+{"index": 2, "node": "act", "tape_length": 5,
+ "checkpoint_id": "1f1a...", "state_hash": "<sha256 of the full state>"}
+```
+
+`index` counts node completions in execution order, which is also
+LangGraph's super-step order for the thread. `tape_length` is where the
+continuation begins — that is what makes "replay from checkpoint X"
+answerable. `checkpoint_id` and `state_hash` are filled in after the run
+from the checkpoint history (`replay.finalize_recording`), which raises
+if the tape and the history disagree on length or node order.
+
+**`manifest.json`** carries `schema_version`, `recording_id`,
+`thread_id`, `created_at`, `task_id`, `task` (the full entry task dict),
+`workspace_path`, `model`, `harness_class`, `candidate_source_sha256`,
+`git_commit`, `entry_count`, `step_count`, `tape_sha256`,
+`final_state_sha256` and `usage`. **No environment variables**, for the
+same reason `experiment.capture_environment` captures none.
+`read_recording` re-hashes the entries and refuses a tape that no longer
+matches `tape_sha256`.
+
+### 0.9 Three things called "replay", kept apart
+
+| Operation | Executes? | Model calls | Guarantee |
+|---|---|---|---|
+| `restore_checkpoint` | no | none | the exact stored state, provable by `state_hash` |
+| `replay_events` / `replay_thread` | no | none | the recorded transitions, in order |
+| `replay_recorded_execution` | **yes** | **none** | same nodes, same per-step state hashes, same final state hash, tape consumed exactly |
+| `resume` / `worktree_add` | yes | **fresh** | a *new stochastic execution* from an old state |
+
+`replay_recorded_execution` returns a verification report:
+
+```json
+{
+  "recording_id": "...", "recorded_thread_id": "...", "replay_thread_id": "...",
+  "from_checkpoint": "1f1a..." | null, "start_step_index": 2 | null,
+  "model_calls_issued": 0,
+  "replayed_nodes": ["act", "verify", "submit"],
+  "recorded_nodes": ["act", "verify", "submit"],
+  "recorded_final_state_sha256": "...", "replayed_final_state_sha256": "...",
+  "tape_entries_consumed": 7, "tape_entries_remaining": 0,
+  "usage": {...},
+  "checks": [{"check": "no_divergence", "ok": true, "detail": "..."}, ...],
+  "verified": true, "divergence": null, "guarantee": "..."
+}
+```
+
+The five checks are `no_divergence`, `node_sequence_identical`,
+`per_step_state_hashes_identical`, `final_state_byte_identical`,
+`tape_fully_consumed`. `verified` is their conjunction.
+`meta-harness replay <run> --checkpoint <id> --verify` and
+`meta-harness verify-replay <dir>` exit non-zero when it is false.
+
+**`resume` is not `replay`.** Do not describe `meta-harness resume` or a
+fork as reproducible; they issue fresh model calls.
+
+### 0.10 Experiment results carry a methodology block
+
+`benchmark-results/<id>/` and `benchmarks/results/<id>/` gain
+`validation.json`:
+
+```json
+{
+  "checks": {"same_task_set": true, "same_trials_per_task": true,
+             "same_model": true, "single_metrics_source": true,
+             "measured_only": true, "baseline_complete": true,
+             "candidate_complete": true},
+  "identical_protocol": true,
+  "metrics_sources": ["measured"],
+  "baseline_completeness": {"expected_trials": 100, "observed_trials": 100,
+                            "missing_trials": [], "duplicate_trials": [],
+                            "unexpected_trials": [], "malformed_rows": [],
+                            "complete": true},
+  "candidate_completeness": {...}
+}
+```
+
+`experiment.summarize` is unchanged and still takes only raw rows and
+labels — completeness and protocol equality are computed by
+`trial_completeness` and `check_protocol_equality` and published
+alongside, never folded into the headline number. A raw row is
+*malformed* (outcome unknown) rather than failed if it lacks any of
+`task_id`, `trial`, `passed`, `score`, `metrics_source`, `total_tokens`,
+`wall_time_s`.
+
+`config.json` gains `recorded_trials_per_task`. A raw trial row gains
+`recording_dir` when that trial was taped.
+
+### 0.10b Task hashes are byte hashes, so line endings are content
+
+`experiment.hash_task` hashes each task file's bytes, and a published
+result is comparable only to one carrying the same task hashes. With
+`core.autocrlf=true` — the Windows default — a checkout rewrites those
+files to CRLF, and the same frozen task then hashes differently on
+Windows than on Linux: two runs of "the identical protocol" would
+silently disagree about what they measured.
+
+`.gitattributes` pins `eval/**`, `benchmarks/**` and `agents/**` to
+`eol=lf` so a checkout is byte-identical everywhere.
+`test_task_files_are_committed_with_lf_endings` notices if that pin is
+removed, and `test_hash_task_is_sensitive_to_line_endings` demonstrates
+the failure mode it prevents.
+
+(Separately: `tools.apply_patch` writes the model's diff to its temp file
+with `newline=""`. In text mode Python rewrites every `\n` to
+`os.linesep`, which on Windows turns an LF unified diff into a CRLF one
+and makes `git apply` fail every patch as `context_mismatch` — silently,
+since a failed patch is an ordinary tool error. `git apply` itself
+reconciles an LF patch against a CRLF file without help.)
+
+### 0.11 The holdout protocol
+
+`benchmarks/holdout/config.json` is a second committed protocol with the
+same shape as `benchmarks/pass-rate/config.json`: 2 tasks × 20 trials × 2
+arms = 80 trials, on `eval/holdout/`. Same runner
+(`experiment.run_two_arm_experiment`), same model, same per-task trial
+count, so the two numbers are comparable.
+
+`experiment.check_task_set_isolation(search_dir=, holdout_dir=)` returns
+`{search_tasks, holdout_tasks, overlapping_tasks, disjoint}`.
+`resume-experiment` refuses to run when `disjoint` is false.
+
+### 0.12 Experiment tracking is an adapter, and is optional
+
+`app.meta_harness.tracking` is the only module that may know Weights &
+Biases exists. Core logic calls `log_trial`, `log_iteration`,
+`log_frontier`, `log_experiment`; those translate into a `Tracker`.
+
+`make_tracker(...)` returns a `NullTracker` — carrying a `reason` — when
+tracking is not requested, when `wandb` is not installed, or when it
+fails to start. It never raises. Tracking is requested by `--wandb` or
+`META_HARNESS_WANDB=1`, and is **off by default**. `WANDB_MODE=offline`
+is the supported no-network mode. No credentials are read or logged; the
+config a tracker receives is assembled from the same provenance block the
+experiment writes.
+
+`tracking.offline_probe()` runs the adapter in offline mode and returns
+`{checked_at, mode, wandb_installed, wandb_version, ok, logged, run_url,
+detail}`. A missing `wandb` is `ok: true` with a reason — the property
+being checked is that the repository works without it.
+
+### 0.13 The version graph
+
+`app.meta_harness.versioning` is the read model over checkpoints and
+branches:
+
+| Git | Meta-Harness |
+|---|---|
+| commit | a checkpoint, identified by an immutable `checkpoint_id` |
+| parent commit | `parent_checkpoint_id` |
+| branch ref | a `thread_id` registered in `branches.json` with its fork point |
+| `checkout -b <sha>` | `branches.worktree_add(parent_checkpoint_id=...)` |
+| working tree | `runs/<run>/threads/<thread>/`, private per branch |
+| `git diff A B` | `versioning.diff_checkpoints` |
+
+`version_graph(graph, run_id=)` returns
+`{run_id, threads, checkpoints, edges, branches, checkpoint_count,
+branch_count}`; edge `kind` is `sequential`, `root`, `external-parent` or
+`fork`. `diff_states` reports `{added, removed, changed, identical,
+before_sha256, after_sha256}` with per-key hashes rather than nested
+values. `verify_immutability(graph, thread_id=, expected=)` re-reads
+stored checkpoints and confirms each still hashes to what it hashed to.
+
+A checkpoint written before any node ran carries no state; forking from
+one starts a branch with an empty state. Fork from a checkpoint a node
+produced.
+
+### 0.14 Resume evidence
+
+`docs/RESUME_EVIDENCE.md` is generated by
+`meta-harness report resume-evidence` from `app.meta_harness.evidence`.
+Every row is derived at generation time: measured rows are **recomputed
+from the raw `*-results.jsonl` rows** and fail if the published summary
+no longer matches; structural rows compile both graphs and read their
+node sets, and read declared dependencies out of the workspace
+`pyproject.toml` files; artifact rows read verification reports under
+`docs/evidence/`.
+
+A `Check` is `{key, claim, status, value, detail, evidence}` with status
+`PASS` | `FAIL` | `UNSUPPORTED`. **A claim with no supporting artifact is
+`UNSUPPORTED`, never a softened pass.** The only number in the module is
+`CLAIMED_IMPROVEMENT_PP = 12.0`, which is the assertion under test, not
+an input to any measurement.
+
+Evidence artifacts, all machine-written:
+
+| Path | Written by |
+|---|---|
+| `docs/evidence/replay-verification.json` | `meta-harness verify-replay` |
+| `docs/evidence/version-graph.json` | `meta-harness report version-graph <run>` |
+| `docs/evidence/wandb-offline.json` | `meta-harness report wandb-check` |
+
+`report resume-evidence --check` regenerates and exits non-zero if the
+committed document disagrees; the `generated-at` and `commit` HTML
+comments are stripped before comparison (`evidence.comparable`). CI runs
+it.
+
+### 0.15 New CLI surface
+
+| Command | Purpose |
+|---|---|
+| `meta-harness resume-experiment` | evolve → select on validation only → canonical experiment → holdout → verify replay → regenerate evidence. `--dry-run` prints the plan and a cost estimate and spends nothing. |
+| `meta-harness verify-replay <dir>` | replay every recording under `<dir>` from the start and from a mid-run checkpoint; exit non-zero if any fails. |
+| `meta-harness replay <run> --checkpoint <id> --verify` | exact replay of one recorded execution from that checkpoint. |
+| `meta-harness report resume-evidence [--check\|--json]` | derive `docs/RESUME_EVIDENCE.md`. |
+| `meta-harness report version-graph <run>` | read the checkpoint DAG out of Postgres as evidence. |
+| `meta-harness report wandb-check` | offline W&B probe. |
+| `meta-harness report cost-estimate` | price a planned experiment from measured rows on disk. |
+| `meta-harness inner --record` | tape one trial. |
+| `meta-harness loop --record` `--wandb` | tape every trial; log to W&B. |
+| `meta-harness experiment --record-trials N` `--wandb` | tape N trials per task per arm; log to W&B. |
+
+Candidate selection in `resume-experiment` (`pipeline.select_candidate`)
+takes the outer loop's terminal state and **nothing else**: the final
+experiment has not run at selection time, so its trials cannot influence
+which candidate is tested. The decision and the table it was made from
+are written to `runs/<run>/selection.json`.
+
+
 ---
 
 ## 1. State schemas (LangGraph TypedDicts)

@@ -21,11 +21,31 @@ attributable to the harness and not to the setup.
 
 ## Running it
 
-```bash
-# 1. Produce an evolved candidate (the outer loop writes agents/<name>.py)
-uv run meta-harness loop --proposer claude --budget 5 --fresh
+One command runs the whole sequence — evolve, select, measure, verify,
+report — and is the supported way to produce a publishable result:
 
-# 2. Measure it against the baseline over the canonical protocol
+```bash
+uv run meta-harness resume-experiment --dry-run   # plan + cost estimate, spends nothing
+uv run meta-harness resume-experiment             # THIS COSTS MONEY
+```
+
+The stages, and why they are in this order:
+
+1. **Evolve** on `eval/tasks/` with the real proposer.
+2. **Select** the best candidate from the validation accuracy the outer
+   loop measured *during* evolution. The canonical experiment has not run
+   at this point, so its trials cannot influence which candidate they
+   then measure. The decision and the table it came from are written to
+   `runs/<run>/selection.json`.
+3. **Measure** this protocol: fresh, independent trials for both arms.
+4. **Generalise** on [`../holdout/`](../holdout/README.md).
+5. **Verify** that a recorded trial replays exactly.
+6. **Report** — regenerate `docs/RESUME_EVIDENCE.md` from the artifacts.
+
+The two halves can still be run separately:
+
+```bash
+uv run meta-harness loop --proposer claude --budget 5 --fresh
 uv run meta-harness experiment --candidate <name>
 ```
 
@@ -36,8 +56,15 @@ result is no longer the canonical one — say so if you publish it):
 uv run meta-harness experiment --candidate <name> --trials 2 --workers 2
 ```
 
-**Cost.** 200 trials on Haiku 4.5 is real spend. Estimate before you run
-it: a single trial's measured token usage is printed by
+**Cost.** 200 trials on Haiku 4.5 is real spend. Price it from measured
+trials already on disk before committing to it:
+
+```bash
+uv run meta-harness report cost-estimate
+```
+
+That reports `null` rather than a number when there is nothing measured
+to extrapolate from. To produce a basis, run one real trial:
 `uv run meta-harness inner --task task-001-fix-typo --candidate baseline`.
 
 ## What gets written
@@ -48,9 +75,11 @@ benchmark-results/<experiment-id>/
 ├── environment.json          # provenance (see below)
 ├── baseline-results.jsonl    # one JSON object per baseline trial
 ├── candidate-results.jsonl   # one JSON object per candidate trial
+├── validation.json           # methodology checks (see below)
 ├── summary.json              # derived mechanically from the two JSONL files
 ├── REPORT.md                 # human-readable, generated
-└── traces/{arm}/{task}-trial-{n}/   # per-trial inner-loop traces
+├── traces/{arm}/{task}-trial-{n}/      # per-trial inner-loop traces
+└── recordings/{arm}/{task}-trial-{n}/  # execution tapes (--record-trials N)
 ```
 
 ### Raw trial row
@@ -98,8 +127,9 @@ whose only inputs are the raw trial rows:
 - `per_task` breakdown
 
 `summarize()` takes no target, expected value, or override — there is no
-code path by which a desired number can reach the output. The runner
-prints exactly what the trials say:
+code path by which a desired number can reach the output, and a test
+asserts that by signature inspection. The runner prints exactly what the
+trials say:
 
 ```
 Baseline  (baseline): 63/100 = 63.0%
@@ -113,6 +143,24 @@ Total trials: 200
 The published measurement, once run, lives in
 `benchmarks/results/<experiment-id>/summary.json`.)*
 
+### Methodology checks (`validation.json`)
+
+A delta is attributable to the harness only if everything else was held
+constant. These are derived from the raw rows and published beside them:
+
+| Check | What it rules out |
+|---|---|
+| `same_task_set` | the arms ran different tasks |
+| `same_trials_per_task` | one arm got more attempts |
+| `same_model` | the "harness" delta is really a model delta |
+| `single_metrics_source` / `measured_only` | a mock trial folded into a measured result |
+| `baseline_complete` / `candidate_complete` | missing, duplicated, or malformed trials |
+
+`trial_completeness` names the offending trials rather than reporting a
+count. A row missing its outcome is an **unknown**, not a failure —
+averaging over it would bias the result. If `identical_protocol` is
+false, `REPORT.md` says so above the number and the CLI exits non-zero.
+
 ## Limitations, stated plainly
 
 - **Clustering.** Trials are clustered within tasks; the 20 trials of one
@@ -120,11 +168,18 @@ The published measurement, once run, lives in
   understates the true uncertainty. Treat it as a rough scale, not as a
   significance test.
 - **Search-set, not holdout.** This measures the five tasks the proposer
-  optimised against. Generalisation is a separate measurement:
-  `uv run meta-harness benchmark --candidate <name> --holdout`.
+  optimised against, and the resume claim it supports is a search-set
+  claim. Generalisation is a separate, separately-reported measurement:
+  [`benchmarks/holdout/`](../holdout/README.md).
+- **Selection is upstream of measurement, not downstream.** The candidate
+  is chosen on validation numbers before this protocol runs. Choosing it
+  on *these* trials would make the delta a selection artifact.
 - **Task identity.** A result is only comparable to another result with
   the same task hashes. Changing a task after publishing invalidates the
-  comparison; publish a new experiment id instead.
+  comparison; publish a new experiment id instead. Those are *byte*
+  hashes, so `.gitattributes` pins the eval trees to LF — without it a
+  Windows checkout hashes every frozen task differently from a Linux one
+  and the comparison quietly stops meaning anything.
 - **Model drift.** The provider's model behind a given id can change.
   `environment.json` records the id and the date; it cannot pin weights.
 

@@ -281,3 +281,278 @@ def test_load_config_rejects_an_incomplete_protocol(tmp_path: Path):
     bad.write_text(json.dumps({"experiment": "x"}))
     with pytest.raises(ValueError, match="missing required key"):
         exp.load_config(bad)
+
+
+# ── completeness: an incomplete arm is not the protocol it claims ─────
+
+
+def test_completeness_accepts_a_full_arm():
+    rows = _rows("baseline", {"t1": [True] * 3, "t2": [False] * 3})
+    report = exp.trial_completeness(
+        rows, task_ids=["t1", "t2"], trials_per_task=3, arm="baseline"
+    )
+    assert report["complete"] is True
+    assert report["expected_trials"] == 6
+    assert report["observed_trials"] == 6
+    assert report["missing_trials"] == []
+
+
+def test_completeness_names_the_missing_trials():
+    rows = _rows("baseline", {"t1": [True, False]})
+    report = exp.trial_completeness(
+        rows, task_ids=["t1"], trials_per_task=4, arm="baseline"
+    )
+    assert report["complete"] is False
+    assert report["missing_trials"] == ["t1/trial-3", "t1/trial-4"]
+
+
+def test_completeness_catches_a_duplicated_trial():
+    rows = _rows("baseline", {"t1": [True, False]})
+    rows.append(dict(rows[0]))
+    report = exp.trial_completeness(
+        rows, task_ids=["t1"], trials_per_task=2, arm="baseline"
+    )
+    assert report["complete"] is False
+    assert report["duplicate_trials"] == ["t1/trial-1"]
+
+
+def test_completeness_catches_a_row_missing_its_outcome():
+    """A row with no ``passed`` is an unknown outcome, not a failure."""
+    rows = _rows("baseline", {"t1": [True, False]})
+    rows[1].pop("passed")
+    report = exp.trial_completeness(
+        rows, task_ids=["t1"], trials_per_task=2, arm="baseline"
+    )
+    assert report["complete"] is False
+    assert report["malformed_rows"][0]["missing_fields"] == ["passed"]
+    assert report["missing_trials"] == ["t1/trial-2"]
+
+
+def test_completeness_flags_a_trial_the_protocol_did_not_ask_for():
+    rows = _rows("baseline", {"t1": [True, False, True]})
+    report = exp.trial_completeness(
+        rows, task_ids=["t1"], trials_per_task=2, arm="baseline"
+    )
+    assert report["unexpected_trials"] == ["t1/trial-3"]
+    assert report["complete"] is False
+
+
+# ── protocol equality: the delta must be attributable ─────────────────
+
+
+def test_protocol_equality_passes_for_two_identical_arms():
+    result = exp.check_protocol_equality(
+        baseline_rows=_rows("baseline", {"t1": [True] * 3, "t2": [False] * 3}),
+        candidate_rows=_rows("candidate", {"t1": [True] * 3, "t2": [True] * 3}),
+        task_ids=["t1", "t2"],
+        trials_per_task=3,
+        baseline_model="claude-haiku-4-5-20251001",
+        candidate_model="claude-haiku-4-5-20251001",
+    )
+    assert result["identical_protocol"] is True
+    assert all(result["checks"].values())
+
+
+def test_protocol_equality_fails_when_the_arms_ran_different_trial_counts():
+    result = exp.check_protocol_equality(
+        baseline_rows=_rows("baseline", {"t1": [True] * 3}),
+        candidate_rows=_rows("candidate", {"t1": [True] * 2}),
+        task_ids=["t1"],
+        trials_per_task=3,
+        baseline_model="m",
+        candidate_model="m",
+    )
+    assert result["identical_protocol"] is False
+    assert result["checks"]["same_trials_per_task"] is False
+
+
+def test_protocol_equality_fails_when_the_arms_ran_different_models():
+    """Same harness, different model, is not a harness comparison."""
+    result = exp.check_protocol_equality(
+        baseline_rows=_rows("baseline", {"t1": [True]}),
+        candidate_rows=_rows("candidate", {"t1": [True]}),
+        task_ids=["t1"],
+        trials_per_task=1,
+        baseline_model="claude-haiku-4-5-20251001",
+        candidate_model="claude-sonnet-5",
+    )
+    assert result["identical_protocol"] is False
+    assert result["checks"]["same_model"] is False
+
+
+def test_protocol_equality_rejects_a_mock_trial_in_a_measured_comparison():
+    candidate = _rows("candidate", {"t1": [True]})
+    candidate[0]["metrics_source"] = met.MOCK
+    result = exp.check_protocol_equality(
+        baseline_rows=_rows("baseline", {"t1": [True]}),
+        candidate_rows=candidate,
+        task_ids=["t1"],
+        trials_per_task=1,
+        baseline_model="m",
+        candidate_model="m",
+    )
+    assert result["identical_protocol"] is False
+    assert result["checks"]["single_metrics_source"] is False
+    assert result["checks"]["measured_only"] is False
+    assert result["metrics_sources"] == ["measured", "mock"]
+
+
+def test_protocol_equality_fails_when_the_arms_ran_different_tasks():
+    result = exp.check_protocol_equality(
+        baseline_rows=_rows("baseline", {"t1": [True]}),
+        candidate_rows=_rows("candidate", {"t2": [True]}),
+        task_ids=["t1", "t2"],
+        trials_per_task=1,
+        baseline_model="m",
+        candidate_model="m",
+    )
+    assert result["checks"]["same_task_set"] is False
+
+
+# ── benchmark leakage ─────────────────────────────────────────────────
+
+
+def test_the_committed_task_sets_are_disjoint():
+    isolation = exp.check_task_set_isolation(
+        search_dir=REPO_ROOT / "eval" / "tasks",
+        holdout_dir=REPO_ROOT / "eval" / "holdout",
+    )
+    assert isolation["disjoint"] is True
+    assert isolation["overlapping_tasks"] == []
+    assert len(isolation["search_tasks"]) == 5
+    assert len(isolation["holdout_tasks"]) == 2
+
+
+def test_overlapping_task_sets_are_reported(tmp_path: Path):
+    for parent in ("search", "holdout"):
+        task = tmp_path / parent / "task-shared"
+        task.mkdir(parents=True)
+        (task / "task.json").write_text('{"id": "task-shared"}')
+
+    isolation = exp.check_task_set_isolation(
+        search_dir=tmp_path / "search", holdout_dir=tmp_path / "holdout"
+    )
+    assert isolation["disjoint"] is False
+    assert isolation["overlapping_tasks"] == ["task-shared"]
+
+
+# ── the committed holdout protocol ────────────────────────────────────
+
+
+def test_committed_holdout_config_is_a_two_arm_protocol():
+    config = exp.load_config(REPO_ROOT / "benchmarks" / "holdout" / "config.json")
+    assert config["task_set"] == "eval/holdout"
+    assert config["trials_per_task"] == 20
+    assert (
+        len(config["tasks"]) * config["trials_per_task"] * 2 == config["total_trials"]
+    )
+    assert config["arms"]["candidate"] is None
+
+
+def test_committed_holdout_task_ids_exist_on_disk():
+    config = exp.load_config(REPO_ROOT / "benchmarks" / "holdout" / "config.json")
+    for task_id in config["tasks"]:
+        assert (REPO_ROOT / config["task_set"] / task_id / "task.json").is_file()
+
+
+def test_the_two_protocols_use_the_same_trial_count_per_task():
+    """Comparable numbers need the same per-task depth in both experiments."""
+    search = exp.load_config(REPO_ROOT / "benchmarks" / "pass-rate" / "config.json")
+    holdout = exp.load_config(REPO_ROOT / "benchmarks" / "holdout" / "config.json")
+    assert search["trials_per_task"] == holdout["trials_per_task"]
+
+
+# ── results IO carries the methodology checks ─────────────────────────
+
+
+def _written_results(tmp_path: Path, baseline_spec, candidate_spec, trials: int):
+    baseline = _rows("baseline", baseline_spec)
+    candidate = _rows("candidate", candidate_spec)
+    summary = exp.summarize(
+        baseline_rows=baseline,
+        candidate_rows=candidate,
+        task_ids=["t1"],
+        baseline_label="b",
+        candidate_label="c",
+    )
+    validation = exp.check_protocol_equality(
+        baseline_rows=baseline,
+        candidate_rows=candidate,
+        task_ids=["t1"],
+        trials_per_task=trials,
+        baseline_model="m",
+        candidate_model="m",
+    )
+    return exp.write_results(
+        output_dir=tmp_path / "out",
+        config={"experiment": "t"},
+        environment={"git": {"commit": "abc"}, "model": "m", "tasks": []},
+        baseline_rows=baseline,
+        candidate_rows=candidate,
+        summary=summary,
+        validation=validation,
+    )
+
+
+def test_write_results_persists_the_validation_block(tmp_path: Path):
+    paths = _written_results(tmp_path, {"t1": [True, False]}, {"t1": [True, True]}, 2)
+
+    written = json.loads(paths["validation"].read_text())
+    assert written["identical_protocol"] is True
+    assert "Methodology checks" in paths["report"].read_text(encoding="utf-8")
+
+
+def test_a_failed_protocol_check_is_stated_in_the_report(tmp_path: Path):
+    """The report must not present an unattributable delta as a clean result."""
+    paths = _written_results(tmp_path, {"t1": [True, False]}, {"t1": [True]}, 2)
+    report = paths["report"].read_text(encoding="utf-8")
+    assert "did not run an identical protocol" in report
+
+
+# ── task hashes must not depend on the checkout's platform ────────────
+
+
+def test_task_files_are_committed_with_lf_endings():
+    """A CRLF checkout hashes every frozen task differently.
+
+    `hash_task` hashes bytes, and a published result is only comparable
+    to one carrying the same task hashes. `.gitattributes` pins these
+    trees to LF so a Windows checkout and a Linux one agree; this test is
+    what notices if that pin is removed.
+    """
+    offenders = []
+    for task_dir in (REPO_ROOT / "eval").rglob("*"):
+        if not task_dir.is_file() or "__pycache__" in task_dir.parts:
+            continue
+        if task_dir.suffix not in {".py", ".json", ".md", ".ini", ".txt", ".toml"}:
+            continue
+        if b"\r\n" in task_dir.read_bytes():
+            offenders.append(str(task_dir.relative_to(REPO_ROOT)).replace("\\", "/"))
+    assert offenders == [], (
+        "these eval files have CRLF endings, so their task hashes differ "
+        f"from a Linux checkout's: {offenders}"
+    )
+
+
+def test_gitattributes_pins_the_hashed_trees():
+    attributes = (REPO_ROOT / ".gitattributes").read_text(encoding="utf-8")
+    for tree in ("eval/**", "benchmarks/**", "agents/**"):
+        assert f"{tree} text eol=lf" in attributes, (
+            f"{tree} must be pinned to LF or its content hashes become "
+            "platform-dependent"
+        )
+
+
+def test_hash_task_is_sensitive_to_line_endings(tmp_path: Path):
+    """Demonstrate the failure mode the pin prevents."""
+    lf = tmp_path / "task-lf"
+    (lf / "workspace").mkdir(parents=True)
+    (lf / "task.json").write_bytes(b'{"id": "task-lf"}\n')
+    (lf / "workspace" / "a.py").write_bytes(b"x = 1\ny = 2\n")
+
+    crlf = tmp_path / "task-crlf"
+    (crlf / "workspace").mkdir(parents=True)
+    (crlf / "task.json").write_bytes(b'{"id": "task-lf"}\r\n')
+    (crlf / "workspace" / "a.py").write_bytes(b"x = 1\r\ny = 2\r\n")
+
+    assert exp.hash_task(lf)["task_sha256"] != exp.hash_task(crlf)["task_sha256"]

@@ -233,6 +233,11 @@ Thumbs.db
 # Per-run outputs (filesystem traces, candidate harnesses, proposer sessions)
 /runs/
 
+# Weights & Biases local run data. Offline runs write here; the committed
+# evidence is docs/evidence/wandb-offline.json, not the run directory.
+wandb/
+/backend/wandb/
+
 # Frontend (Next.js)
 frontend/node_modules/
 frontend/.next/

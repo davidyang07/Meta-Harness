@@ -97,9 +97,21 @@ check "meta-harness --help"     bash -c 'uv run meta-harness --help >/dev/null'
 check "meta-harness version"    bash -c 'uv run meta-harness version | grep -q meta-harness'
 check "all subcommands present" bash -c '
   out=$(uv run meta-harness --help 2>&1)
-  for cmd in version inner benchmark loop fork serve experiment checkpoints replay init resume memory; do
+  for cmd in version inner benchmark loop fork serve experiment checkpoints replay \
+             init resume memory verify-replay resume-experiment report; do
     echo "$out" | grep -q "$cmd" || { echo "missing subcommand: $cmd"; exit 1; }
   done
+'
+check "report subcommands present" bash -c '
+  out=$(uv run meta-harness report --help 2>&1)
+  for cmd in resume-evidence version-graph wandb-check cost-estimate; do
+    echo "$out" | grep -q "$cmd" || { echo "missing report subcommand: $cmd"; exit 1; }
+  done
+'
+check "resume-experiment --dry-run spends nothing" bash -c '
+  out=$(uv run meta-harness resume-experiment --dry-run 2>&1)
+  echo "$out"
+  echo "$out" | grep -q "nothing was executed and nothing was spent"
 '
 
 # ── 4. Mock outer loop ───────────────────────────────────────────────
@@ -205,6 +217,41 @@ else
       npx playwright test --project=live-backend"
 fi
 
+# ── 7b. Exact replay, tracking, evidence ─────────────────────────────
+# All of this is provable offline: a scripted harness supplies the
+# model's turns while the real graph, the real tools and the real pytest
+# verify run underneath.
+section "7b. Exact replay, tracking, evidence"
+check "recording + exact replay suite" bash -c '
+  cd backend && uv run pytest -q --no-header \
+    tests/test_recording.py tests/test_exact_replay.py tests/test_inner_messages.py'
+check "W&B adapter suite (no network, no account)" bash -c '
+  cd backend && uv run pytest -q --no-header tests/test_tracking.py'
+check "W&B offline probe" bash -c '
+  out=$(WANDB_MODE=offline uv run meta-harness report wandb-check --output "$LOG_DIR/wandb.json" 2>&1)
+  echo "$out"
+  uv run python -c "
+import json, sys
+probe = json.load(open(sys.argv[1]))
+sys.exit(0 if probe[\"ok\"] else 1)
+" "$LOG_DIR/wandb.json"
+'
+check "evidence agrees with the artifacts" bash -c '
+  uv run meta-harness report resume-evidence --check'
+check "no claim is marked FAIL" bash -c '
+  uv run meta-harness report resume-evidence --json > "$LOG_DIR/evidence.json"
+  uv run python -c "
+import json, sys
+report = json.load(open(sys.argv[1]))
+failed = [c for c in report[\"checks\"] if c[\"status\"] == \"FAIL\"]
+for c in failed:
+    print(c[\"claim\"], \"->\", c[\"detail\"])
+counts = report[\"counts\"]
+print(counts[\"PASS\"], \"PASS,\", counts[\"FAIL\"], \"FAIL,\", counts[\"UNSUPPORTED\"], \"UNSUPPORTED\")
+sys.exit(1 if failed else 0)
+" "$LOG_DIR/evidence.json"
+'
+
 # ── 8. Repository hygiene ────────────────────────────────────────────
 section "8. Repository hygiene"
 check "no tracked .env"         bash -c '! git ls-files | grep -qE "(^|/)\.env$"'
@@ -213,6 +260,10 @@ check "no generated candidates tracked" bash -c '
   git ls-files agents/ | grep -vE "agents/(__init__|baseline)\.py" | grep -q . && exit 1 || exit 0'
 check "no API key patterns tracked" bash -c '
   ! git grep -nE "sk-ant-[A-Za-z0-9_-]{20,}" -- . ":(exclude)scripts/demo_acceptance.sh" >/dev/null 2>&1'
+check "no W&B run directories tracked" bash -c '
+  ! git ls-files | grep -qE "(^|/)wandb/"'
+check "no execution tapes tracked" bash -c '
+  ! git ls-files | grep -qE "(^|/)tape\.jsonl$"'
 
 # ── Summary ──────────────────────────────────────────────────────────
 printf '\n%b── Summary %b\n' "$DIM" "$NC"

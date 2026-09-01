@@ -16,6 +16,9 @@ Use `uv` for all Python workflows.
 - `bash scripts/demo_acceptance.sh`: LEVEL 1 acceptance, no API key required.
 - `bash scripts/live_smoke.sh`: LEVEL 2 acceptance, needs credentials; prints SKIPPED without them.
 - `uv run meta-harness experiment --candidate <name>`: the canonical 200-trial pass-rate experiment (real cost).
+- `uv run meta-harness resume-experiment --dry-run`: print the measurement plan and a cost estimate; spends nothing. Drop `--dry-run` to evolve, select, measure, verify replay and regenerate the evidence document (real cost).
+- `uv run meta-harness verify-replay <recordings-dir>`: re-execute recorded trials against their tapes and fail loudly on any divergence. No model calls.
+- `uv run meta-harness report resume-evidence --check`: what CI runs; non-zero if `docs/RESUME_EVIDENCE.md` disagrees with the artifacts it is derived from.
 
 ## Invariants That Must Not Regress
 
@@ -47,6 +50,28 @@ weakening one of those tests, fix the root cause instead.
 8. **The benchmark summary is derived from raw trial rows.** `summarize()`
    takes no target or expected value, and must not gain one.
    (`tests/test_experiment.py`)
+9. **Selection cannot see the test.** `pipeline.select_candidate` takes
+   the outer loop's terminal state and nothing else, so the final
+   experiment's trials cannot influence which candidate they measure.
+   (`tests/test_pipeline.py`)
+10. **Every crossing into the world goes through `effects`.** A new
+    nondeterministic call in an inner-loop node that skips
+    `effects.observe` silently breaks exact replay.
+    (`tests/test_exact_replay.py`)
+11. **Message identity is deterministic and `act` replaces.** Without
+    stable ids `add_messages` mints a random UUID per message and no two
+    executions produce the same state; without the clear, a trimmed
+    trajectory leaves its tail behind. (`tests/test_inner_messages.py`)
+12. **Tracking never leaks into core logic.** `tracking.py` is the only
+    module that may name `wandb`, tracking is off by default, and it
+    never raises into a caller. (`tests/test_tracking.py`)
+13. **Task hashes are byte hashes.** `.gitattributes` pins `eval/**`,
+    `benchmarks/**` and `agents/**` to LF; without it a Windows checkout
+    hashes every frozen task differently from a Linux one.
+    (`tests/test_experiment.py`)
+14. **Resume evidence is derived, never written.** A claim with no
+    supporting artifact reports `UNSUPPORTED`; no pass rate or delta is
+    hard-coded. (`tests/test_resume_evidence.py`)
 
 ## Capabilities and evidence
 
@@ -55,6 +80,16 @@ it and the command that validates it. If you change behaviour a
 capability entry depends on, update that document in the same change. Do
 not report a quantitative result without a committed artifact under
 `benchmarks/results/` that reproduces it.
+
+`docs/RESUME_EVIDENCE.md` is **generated** by
+`uv run meta-harness report resume-evidence` and must never be edited by
+hand: CI regenerates it and fails on any disagreement. Its inputs are the
+machine-written artifacts in `docs/evidence/` — also never hand-edited.
+
+Say which "replay" you mean. `replay_recorded_execution` re-runs a
+recorded run against its tape and reproduces it exactly with zero model
+calls; `meta-harness resume` and forking issue *fresh* model calls and
+are not reproducible. Do not describe the second as a replay.
 
 ## Coding Style & Naming Conventions
 Follow existing Python style: 4-space indentation, type hints, `Path`-based filesystem code, and concise module docstrings. Use `snake_case` for modules, functions, and package directories; use `PascalCase` for classes such as `BaselineHarness`. Keep CLI and backend imports explicit. No formatter or linter config is checked in today, so match the surrounding file style closely and avoid introducing new tooling conventions inside a single change.
