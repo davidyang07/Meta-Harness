@@ -28,6 +28,16 @@ edge-case inputs); task.json `baseline_pass_rate` / `best_known_pass_rate`
 calibrations were updated to match. See §27 for the full real/mock
 accounting and §28 for the per-task adversarial-test design log.
 
+**Verification pass — 2026-09-01.** Re-verified the accounting claims against
+`backend/app/meta_harness/metrics.py`, `benchmark.py` and `outer.py`. One class
+of inaccuracy was corrected: this document described `tokens` and `cost_usd` as
+zero-filled stubs in the real-bench path and real token aggregation as an
+unimplemented roadmap item. Both statements were stale — the instrumentation
+exists, unmeasured cost is `None` rather than `0.0`, and every payload carries
+`metrics_source`. §5.3 and §24.14 were rewritten; the Part-I bullet above now
+points at them. Line references of the form `outer.py:347-348` predate several
+refactors and should be treated as historical, not as current coordinates.
+
 **Verification pass — 2026-04-25.** This document was re-verified against the
 live codebase on 2026-04-25 by reading every file it cites and grepping for
 each method/method-call referenced. The pass surfaced four classes of
@@ -45,10 +55,10 @@ inaccuracy that have since been corrected here:
    `MemoryPanel` uses 3 hardcoded fixtures rather than calling
    `GET /memory/{ns}`; `startSSE` routes all 11 SSE event types into
    reducer actions. See §16-17 for the actual state of each component.
-4. **Honest accounting** — `tokens` and `cost_usd` are zeros in the real-bench
-   path (`outer.py:347-348, 357-358`); only mock-bench synthesizes a
-   token curve. The dashboard "cost" displays will read $0 for live runs
-   until token aggregation is wired through. See §5.3 caveat and §24.14.
+4. **Honest accounting** — *superseded; see the 2026-09-01 note below.*
+   Token and cost aggregation is implemented in
+   `backend/app/meta_harness/metrics.py`; unmeasured cost is `None`, never
+   `0.0`, and every payload carries `metrics_source`. See §5.3 and §24.14.
 
 Test count, verified by `cd backend && uv run pytest tests/ -q`:
 **82 passed, 1 skipped, 0 failed**.
@@ -514,25 +524,31 @@ inner-loop trials don't use `interrupt()` (LangGraph's pause primitive).
 per LangGraph issue #6624 — so `create_task` is mandatory there. For trials,
 `gather` is fine.
 
-**Honest accounting caveat — `tokens` and `cost_usd` are zeros in the real
-bench path** (`outer.py:347-348, 357-358`). The current implementation does
-not aggregate per-trial token usage from inner-loop responses; it writes:
+**Honest accounting — implemented (2026-09-01).** The zero-filled `tokens` /
+`cost_usd` block this section used to describe is gone. Per-call usage is
+recorded by `metrics.UsageRecorder`, which wraps a harness' `_call_llm` and
+reads the Anthropic SDK's `usage` block; `to_trial_row` folds the calls of one
+`(task, trial)` into a row, and `metrics.aggregate_trials` folds rows into
+totals, means and medians. `benchmark.py` calls it once for both paths, so the
+mock and measured shapes are identical and differ only in `metrics_source`.
 
-```python
-eval_result = {
-    ...
-    "tokens": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-    "cost_usd": 0.0,
-    "wall_time_s": round(time.monotonic() - started, 2),
-    "avg_tokens": avg_tokens,   # only set in mock-bench path
-    ...
-}
-```
+Two rules the rest of the codebase now relies on, and which replace the old
+caveat rather than soften it:
 
-So a "cost" displayed in the UI for a real-bench run will be `$0.00`. The
-mock-bench path *does* synthesize an `avg_tokens` curve (`base + iter * 800`)
-so the Pareto-on-tokens chart has a meaningful x-axis. Wiring real token
-aggregation through the inner loop is a roadmap item, not implemented.
+1. **Unknown cost is `None`, never `0.0`.** A model with no configured price
+   yields `cost_usd: None` and sets `cost_complete: False` on the aggregate.
+   `outer.py` seeds `"cost_usd": None` for exactly this reason. Writing
+   `$0.00` for "we did not measure it" is how a Pareto frontier silently
+   starts optimising against a fiction.
+2. **Mock and measured numbers never mix.** Every payload carries
+   `metrics_source` (`"measured"` | `"mock"`), and `aggregate_trials` refuses
+   to fold rows whose source disagrees with the declared one.
+
+Pricing is configuration rather than a constant: `META_HARNESS_PRICING` may
+point at a JSON file of per-model rates that overrides or extends the built-in
+table. The Pareto frontier compares on measured tokens, and a candidate whose
+tokens were never measured carries `avg_tokens: null` and is compared on
+accuracy alone.
 
 ### 5.4 The `update_frontier` node (`outer.py:395-536`)
 
@@ -3081,15 +3097,20 @@ doc's verification pass:
 These hooks are covered by `backend/tests/test_inner.py`; candidate overrides
 now have behavioral effect during benchmark runs.
 
-### 24.14 `tokens` and `cost_usd` are stubbed in real-bench eval results
+### 24.14 `tokens` and `cost_usd` are measured (was: stubbed)
 
-`outer.py:347-348, 357` write zeros for both fields in the `_mock_bench=False`
-path. The dashboard's "cost" / "avg_tokens" displays are therefore fictional
-on real runs. Mock-bench DOES synthesize an `avg_tokens` curve (`24000 +
-iter * 800`), so the Pareto-on-tokens chart has a meaningful x-axis on
-mock-bench runs only. Real token aggregation through the inner loop
-(reading `response.usage` from each `_call_llm` and summing) is a roadmap
-item, not implemented.
+**Resolved 2026-09-01.** This entry used to record that the real-bench path
+wrote zeros for both fields and that reading `response.usage` from each
+`_call_llm` and summing it was "a roadmap item, not implemented". That is
+exactly what `backend/app/meta_harness/metrics.py` now does:
+`instrument_harness` installs a `UsageRecorder` around `_call_llm`,
+`to_trial_row` folds a trial, and `aggregate_trials` folds a candidate.
+
+What replaced the stub is *not* a number for every run. An unpriced model
+still yields `cost_usd: None` and `cost_complete: False`, and the dashboard
+renders that as "no data" rather than `$0.00` — the distinction between
+"measured zero" and "not measured" is the whole point, and it is enforced by
+`metrics.aggregate_trials` refusing to mix `metrics_source` values.
 
 ### 24.15 SSE `startSSE` routes all 11 event types into UI
 

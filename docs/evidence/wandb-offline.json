@@ -1,0 +1,10 @@
+{
+  "checked_at": "2026-08-29T08:45:24.542370+00:00",
+  "mode": "offline",
+  "wandb_installed": true,
+  "wandb_version": "0.29.0",
+  "ok": true,
+  "logged": 3,
+  "run_url": null,
+  "detail": "offline run created; no network access required"
+}

@@ -1,0 +1,667 @@
+{
+  "run_id": "evidence-vg",
+  "threads": {
+    "evidence-vg": [
+      "1f1a40b6-8457-6cd1-bfff-f87bedcef804",
+      "1f1a40b6-845e-6017-8000-91687b4fdc66",
+      "1f1a40b6-8615-6b29-8001-76b469913880",
+      "1f1a40b6-86cd-6c28-8002-8d0d07f3247a",
+      "1f1a40b6-8755-6ea8-8003-cf6a0b4d379b",
+      "1f1a40b6-8935-603f-8004-9e0887d9d75b",
+      "1f1a40b6-8a8c-62a6-8005-b5d5bd9dd31d",
+      "1f1a40b6-8ab3-615b-8006-495cfe292a80",
+      "1f1a40b6-8b4a-6beb-8007-a0b3e0802112",
+      "1f1a40b6-8c9f-615b-8008-84333b757d7b",
+      "1f1a40b6-8f23-6c65-8009-fd552c80607f",
+      "1f1a40b6-8fa8-66ad-800a-b667792b962f",
+      "1f1a40b6-9028-65d1-800b-46b967c5ca8b",
+      "1f1a40b6-9133-6494-800c-d479c04de228"
+    ],
+    "evidence-vg.fork.09cec182": [
+      "1f1a40b8-77a7-6745-8000-160b035e890c",
+      "1f1a40b8-799a-608d-8001-f2a618707f7a",
+      "1f1a40b8-7a42-68ca-8002-857717390fff",
+      "1f1a40b8-7b40-67a2-8003-0cce950113d1",
+      "1f1a40b8-7b9d-69d2-8004-196d4e9ca10c",
+      "1f1a40b8-7c13-6d16-8005-cc2928e66ba4",
+      "1f1a40b8-7d06-620d-8006-a37ebc4d64b8",
+      "1f1a40b8-7dca-6d70-8007-293eeabf3d59",
+      "1f1a40b8-7df7-64d7-8008-a931c859b9d6",
+      "1f1a40b8-7e5f-619e-8009-16c90a735d6d",
+      "1f1a40b8-7f73-6e17-800a-7bbcfc3721ea"
+    ],
+    "evidence-vg.fork.0e7270e2": [
+      "1f1a40ba-1d54-6156-8000-b614af2954a6",
+      "1f1a40ba-1f74-68f9-8001-59b379f45e29",
+      "1f1a40ba-202a-688b-8002-c43ec314b102",
+      "1f1a40ba-20ee-6247-8003-9d7dec0020d1",
+      "1f1a40ba-213d-6ae6-8004-9a146a354218",
+      "1f1a40ba-21a4-6634-8005-f640e1e6adbc",
+      "1f1a40ba-22b1-68fa-8006-82b7ca8c9942",
+      "1f1a40ba-23bb-67b9-8007-544818e95696",
+      "1f1a40ba-23ec-6533-8008-d8c2f969afd2",
+      "1f1a40ba-246e-6ea0-8009-c425b395182d",
+      "1f1a40ba-25d7-6a33-800a-a35942b53975"
+    ]
+  },
+  "checkpoints": [
+    {
+      "checkpoint_id": "1f1a40b6-8457-6cd1-bfff-f87bedcef804",
+      "thread_id": "evidence-vg",
+      "parent_checkpoint_id": null,
+      "node": "__input__",
+      "ts": "2026-08-30T00:40:32.617568+00:00",
+      "iteration": null
+    },
+    {
+      "checkpoint_id": "1f1a40b6-845e-6017-8000-91687b4fdc66",
+      "thread_id": "evidence-vg",
+      "parent_checkpoint_id": "1f1a40b6-8457-6cd1-bfff-f87bedcef804",
+      "node": "__input__",
+      "ts": "2026-08-30T00:40:32.620097+00:00",
+      "iteration": 0
+    },
+    {
+      "checkpoint_id": "1f1a40b6-8615-6b29-8001-76b469913880",
+      "thread_id": "evidence-vg",
+      "parent_checkpoint_id": "1f1a40b6-845e-6017-8000-91687b4fdc66",
+      "node": "propose",
+      "ts": "2026-08-30T00:40:32.800200+00:00",
+      "iteration": 1
+    },
+    {
+      "checkpoint_id": "1f1a40b6-86cd-6c28-8002-8d0d07f3247a",
+      "thread_id": "evidence-vg",
+      "parent_checkpoint_id": "1f1a40b6-8615-6b29-8001-76b469913880",
+      "node": "validate",
+      "ts": "2026-08-30T00:40:32.875589+00:00",
+      "iteration": 1
+    },
+    {
+      "checkpoint_id": "1f1a40b6-8755-6ea8-8003-cf6a0b4d379b",
+      "thread_id": "evidence-vg",
+      "parent_checkpoint_id": "1f1a40b6-86cd-6c28-8002-8d0d07f3247a",
+      "node": "benchmark",
+      "ts": "2026-08-30T00:40:32.931358+00:00",
+      "iteration": 1
+    },
+    {
+      "checkpoint_id": "1f1a40b6-8935-603f-8004-9e0887d9d75b",
+      "thread_id": "evidence-vg",
+      "parent_checkpoint_id": "1f1a40b6-8755-6ea8-8003-cf6a0b4d379b",
+      "node": "update_frontier",
+      "ts": "2026-08-30T00:40:33.127589+00:00",
+      "iteration": 1
+    },
+    {
+      "checkpoint_id": "1f1a40b6-8a8c-62a6-8005-b5d5bd9dd31d",
+      "thread_id": "evidence-vg",
+      "parent_checkpoint_id": "1f1a40b6-8935-603f-8004-9e0887d9d75b",
+      "node": "propose",
+      "ts": "2026-08-30T00:40:33.268149+00:00",
+      "iteration": 2
+    },
+    {
+      "checkpoint_id": "1f1a40b6-8ab3-615b-8006-495cfe292a80",
+      "thread_id": "evidence-vg",
+      "parent_checkpoint_id": "1f1a40b6-8a8c-62a6-8005-b5d5bd9dd31d",
+      "node": "validate",
+      "ts": "2026-08-30T00:40:33.284093+00:00",
+      "iteration": 2
+    },
+    {
+      "checkpoint_id": "1f1a40b6-8b4a-6beb-8007-a0b3e0802112",
+      "thread_id": "evidence-vg",
+      "parent_checkpoint_id": "1f1a40b6-8ab3-615b-8006-495cfe292a80",
+      "node": "benchmark",
+      "ts": "2026-08-30T00:40:33.346207+00:00",
+      "iteration": 2
+    },
+    {
+      "checkpoint_id": "1f1a40b6-8c9f-615b-8008-84333b757d7b",
+      "thread_id": "evidence-vg",
+      "parent_checkpoint_id": "1f1a40b6-8b4a-6beb-8007-a0b3e0802112",
+      "node": "update_frontier",
+      "ts": "2026-08-30T00:40:33.485611+00:00",
+      "iteration": 2
+    },
+    {
+      "checkpoint_id": "1f1a40b6-8f23-6c65-8009-fd552c80607f",
+      "thread_id": "evidence-vg",
+      "parent_checkpoint_id": "1f1a40b6-8c9f-615b-8008-84333b757d7b",
+      "node": "propose",
+      "ts": "2026-08-30T00:40:33.749675+00:00",
+      "iteration": 3
+    },
+    {
+      "checkpoint_id": "1f1a40b6-8fa8-66ad-800a-b667792b962f",
+      "thread_id": "evidence-vg",
+      "parent_checkpoint_id": "1f1a40b6-8f23-6c65-8009-fd552c80607f",
+      "node": "validate",
+      "ts": "2026-08-30T00:40:33.804012+00:00",
+      "iteration": 3
+    },
+    {
+      "checkpoint_id": "1f1a40b6-9028-65d1-800b-46b967c5ca8b",
+      "thread_id": "evidence-vg",
+      "parent_checkpoint_id": "1f1a40b6-8fa8-66ad-800a-b667792b962f",
+      "node": "benchmark",
+      "ts": "2026-08-30T00:40:33.856412+00:00",
+      "iteration": 3
+    },
+    {
+      "checkpoint_id": "1f1a40b6-9133-6494-800c-d479c04de228",
+      "thread_id": "evidence-vg",
+      "parent_checkpoint_id": "1f1a40b6-9028-65d1-800b-46b967c5ca8b",
+      "node": "update_frontier",
+      "ts": "2026-08-30T00:40:33.965692+00:00",
+      "iteration": 3
+    },
+    {
+      "checkpoint_id": "1f1a40b8-77a7-6745-8000-160b035e890c",
+      "thread_id": "evidence-vg.fork.09cec182",
+      "parent_checkpoint_id": null,
+      "node": null,
+      "ts": "2026-08-30T00:41:24.974121+00:00",
+      "iteration": 1
+    },
+    {
+      "checkpoint_id": "1f1a40b8-799a-608d-8001-f2a618707f7a",
+      "thread_id": "evidence-vg.fork.09cec182",
+      "parent_checkpoint_id": "1f1a40b8-77a7-6745-8000-160b035e890c",
+      "node": "benchmark",
+      "ts": "2026-08-30T00:41:25.178324+00:00",
+      "iteration": 1
+    },
+    {
+      "checkpoint_id": "1f1a40b8-7a42-68ca-8002-857717390fff",
+      "thread_id": "evidence-vg.fork.09cec182",
+      "parent_checkpoint_id": "1f1a40b8-799a-608d-8001-f2a618707f7a",
+      "node": "update_frontier",
+      "ts": "2026-08-30T00:41:25.247366+00:00",
+      "iteration": 1
+    },
+    {
+      "checkpoint_id": "1f1a40b8-7b40-67a2-8003-0cce950113d1",
+      "thread_id": "evidence-vg.fork.09cec182",
+      "parent_checkpoint_id": "1f1a40b8-7a42-68ca-8002-857717390fff",
+      "node": "propose",
+      "ts": "2026-08-30T00:41:25.351363+00:00",
+      "iteration": 2
+    },
+    {
+      "checkpoint_id": "1f1a40b8-7b9d-69d2-8004-196d4e9ca10c",
+      "thread_id": "evidence-vg.fork.09cec182",
+      "parent_checkpoint_id": "1f1a40b8-7b40-67a2-8003-0cce950113d1",
+      "node": "validate",
+      "ts": "2026-08-30T00:41:25.389530+00:00",
+      "iteration": 2
+    },
+    {
+      "checkpoint_id": "1f1a40b8-7c13-6d16-8005-cc2928e66ba4",
+      "thread_id": "evidence-vg.fork.09cec182",
+      "parent_checkpoint_id": "1f1a40b8-7b9d-69d2-8004-196d4e9ca10c",
+      "node": "benchmark",
+      "ts": "2026-08-30T00:41:25.437913+00:00",
+      "iteration": 2
+    },
+    {
+      "checkpoint_id": "1f1a40b8-7d06-620d-8006-a37ebc4d64b8",
+      "thread_id": "evidence-vg.fork.09cec182",
+      "parent_checkpoint_id": "1f1a40b8-7c13-6d16-8005-cc2928e66ba4",
+      "node": "update_frontier",
+      "ts": "2026-08-30T00:41:25.537189+00:00",
+      "iteration": 2
+    },
+    {
+      "checkpoint_id": "1f1a40b8-7dca-6d70-8007-293eeabf3d59",
+      "thread_id": "evidence-vg.fork.09cec182",
+      "parent_checkpoint_id": "1f1a40b8-7d06-620d-8006-a37ebc4d64b8",
+      "node": "propose",
+      "ts": "2026-08-30T00:41:25.617742+00:00",
+      "iteration": 3
+    },
+    {
+      "checkpoint_id": "1f1a40b8-7df7-64d7-8008-a931c859b9d6",
+      "thread_id": "evidence-vg.fork.09cec182",
+      "parent_checkpoint_id": "1f1a40b8-7dca-6d70-8007-293eeabf3d59",
+      "node": "validate",
+      "ts": "2026-08-30T00:41:25.635981+00:00",
+      "iteration": 3
+    },
+    {
+      "checkpoint_id": "1f1a40b8-7e5f-619e-8009-16c90a735d6d",
+      "thread_id": "evidence-vg.fork.09cec182",
+      "parent_checkpoint_id": "1f1a40b8-7df7-64d7-8008-a931c859b9d6",
+      "node": "benchmark",
+      "ts": "2026-08-30T00:41:25.678491+00:00",
+      "iteration": 3
+    },
+    {
+      "checkpoint_id": "1f1a40b8-7f73-6e17-800a-7bbcfc3721ea",
+      "thread_id": "evidence-vg.fork.09cec182",
+      "parent_checkpoint_id": "1f1a40b8-7e5f-619e-8009-16c90a735d6d",
+      "node": "update_frontier",
+      "ts": "2026-08-30T00:41:25.791856+00:00",
+      "iteration": 3
+    },
+    {
+      "checkpoint_id": "1f1a40ba-1d54-6156-8000-b614af2954a6",
+      "thread_id": "evidence-vg.fork.0e7270e2",
+      "parent_checkpoint_id": null,
+      "node": null,
+      "ts": "2026-08-30T00:42:09.189894+00:00",
+      "iteration": 1
+    },
+    {
+      "checkpoint_id": "1f1a40ba-1f74-68f9-8001-59b379f45e29",
+      "thread_id": "evidence-vg.fork.0e7270e2",
+      "parent_checkpoint_id": "1f1a40ba-1d54-6156-8000-b614af2954a6",
+      "node": "benchmark",
+      "ts": "2026-08-30T00:42:09.412870+00:00",
+      "iteration": 1
+    },
+    {
+      "checkpoint_id": "1f1a40ba-202a-688b-8002-c43ec314b102",
+      "thread_id": "evidence-vg.fork.0e7270e2",
+      "parent_checkpoint_id": "1f1a40ba-1f74-68f9-8001-59b379f45e29",
+      "node": "update_frontier",
+      "ts": "2026-08-30T00:42:09.487436+00:00",
+      "iteration": 1
+    },
+    {
+      "checkpoint_id": "1f1a40ba-20ee-6247-8003-9d7dec0020d1",
+      "thread_id": "evidence-vg.fork.0e7270e2",
+      "parent_checkpoint_id": "1f1a40ba-202a-688b-8002-c43ec314b102",
+      "node": "propose",
+      "ts": "2026-08-30T00:42:09.567413+00:00",
+      "iteration": 2
+    },
+    {
+      "checkpoint_id": "1f1a40ba-213d-6ae6-8004-9a146a354218",
+      "thread_id": "evidence-vg.fork.0e7270e2",
+      "parent_checkpoint_id": "1f1a40ba-20ee-6247-8003-9d7dec0020d1",
+      "node": "validate",
+      "ts": "2026-08-30T00:42:09.600122+00:00",
+      "iteration": 2
+    },
+    {
+      "checkpoint_id": "1f1a40ba-21a4-6634-8005-f640e1e6adbc",
+      "thread_id": "evidence-vg.fork.0e7270e2",
+      "parent_checkpoint_id": "1f1a40ba-213d-6ae6-8004-9a146a354218",
+      "node": "benchmark",
+      "ts": "2026-08-30T00:42:09.642184+00:00",
+      "iteration": 2
+    },
+    {
+      "checkpoint_id": "1f1a40ba-22b1-68fa-8006-82b7ca8c9942",
+      "thread_id": "evidence-vg.fork.0e7270e2",
+      "parent_checkpoint_id": "1f1a40ba-21a4-6634-8005-f640e1e6adbc",
+      "node": "update_frontier",
+      "ts": "2026-08-30T00:42:09.752462+00:00",
+      "iteration": 2
+    },
+    {
+      "checkpoint_id": "1f1a40ba-23bb-67b9-8007-544818e95696",
+      "thread_id": "evidence-vg.fork.0e7270e2",
+      "parent_checkpoint_id": "1f1a40ba-22b1-68fa-8006-82b7ca8c9942",
+      "node": "propose",
+      "ts": "2026-08-30T00:42:09.861359+00:00",
+      "iteration": 3
+    },
+    {
+      "checkpoint_id": "1f1a40ba-23ec-6533-8008-d8c2f969afd2",
+      "thread_id": "evidence-vg.fork.0e7270e2",
+      "parent_checkpoint_id": "1f1a40ba-23bb-67b9-8007-544818e95696",
+      "node": "validate",
+      "ts": "2026-08-30T00:42:09.881372+00:00",
+      "iteration": 3
+    },
+    {
+      "checkpoint_id": "1f1a40ba-246e-6ea0-8009-c425b395182d",
+      "thread_id": "evidence-vg.fork.0e7270e2",
+      "parent_checkpoint_id": "1f1a40ba-23ec-6533-8008-d8c2f969afd2",
+      "node": "benchmark",
+      "ts": "2026-08-30T00:42:09.934877+00:00",
+      "iteration": 3
+    },
+    {
+      "checkpoint_id": "1f1a40ba-25d7-6a33-800a-a35942b53975",
+      "thread_id": "evidence-vg.fork.0e7270e2",
+      "parent_checkpoint_id": "1f1a40ba-246e-6ea0-8009-c425b395182d",
+      "node": "update_frontier",
+      "ts": "2026-08-30T00:42:10.082604+00:00",
+      "iteration": 3
+    }
+  ],
+  "edges": [
+    {
+      "from": null,
+      "to": "1f1a40b6-8457-6cd1-bfff-f87bedcef804",
+      "kind": "root"
+    },
+    {
+      "from": "1f1a40b6-8457-6cd1-bfff-f87bedcef804",
+      "to": "1f1a40b6-845e-6017-8000-91687b4fdc66",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40b6-845e-6017-8000-91687b4fdc66",
+      "to": "1f1a40b6-8615-6b29-8001-76b469913880",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40b6-8615-6b29-8001-76b469913880",
+      "to": "1f1a40b6-86cd-6c28-8002-8d0d07f3247a",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40b6-86cd-6c28-8002-8d0d07f3247a",
+      "to": "1f1a40b6-8755-6ea8-8003-cf6a0b4d379b",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40b6-8755-6ea8-8003-cf6a0b4d379b",
+      "to": "1f1a40b6-8935-603f-8004-9e0887d9d75b",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40b6-8935-603f-8004-9e0887d9d75b",
+      "to": "1f1a40b6-8a8c-62a6-8005-b5d5bd9dd31d",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40b6-8a8c-62a6-8005-b5d5bd9dd31d",
+      "to": "1f1a40b6-8ab3-615b-8006-495cfe292a80",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40b6-8ab3-615b-8006-495cfe292a80",
+      "to": "1f1a40b6-8b4a-6beb-8007-a0b3e0802112",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40b6-8b4a-6beb-8007-a0b3e0802112",
+      "to": "1f1a40b6-8c9f-615b-8008-84333b757d7b",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40b6-8c9f-615b-8008-84333b757d7b",
+      "to": "1f1a40b6-8f23-6c65-8009-fd552c80607f",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40b6-8f23-6c65-8009-fd552c80607f",
+      "to": "1f1a40b6-8fa8-66ad-800a-b667792b962f",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40b6-8fa8-66ad-800a-b667792b962f",
+      "to": "1f1a40b6-9028-65d1-800b-46b967c5ca8b",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40b6-9028-65d1-800b-46b967c5ca8b",
+      "to": "1f1a40b6-9133-6494-800c-d479c04de228",
+      "kind": "sequential"
+    },
+    {
+      "from": null,
+      "to": "1f1a40b8-77a7-6745-8000-160b035e890c",
+      "kind": "root"
+    },
+    {
+      "from": "1f1a40b8-77a7-6745-8000-160b035e890c",
+      "to": "1f1a40b8-799a-608d-8001-f2a618707f7a",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40b8-799a-608d-8001-f2a618707f7a",
+      "to": "1f1a40b8-7a42-68ca-8002-857717390fff",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40b8-7a42-68ca-8002-857717390fff",
+      "to": "1f1a40b8-7b40-67a2-8003-0cce950113d1",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40b8-7b40-67a2-8003-0cce950113d1",
+      "to": "1f1a40b8-7b9d-69d2-8004-196d4e9ca10c",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40b8-7b9d-69d2-8004-196d4e9ca10c",
+      "to": "1f1a40b8-7c13-6d16-8005-cc2928e66ba4",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40b8-7c13-6d16-8005-cc2928e66ba4",
+      "to": "1f1a40b8-7d06-620d-8006-a37ebc4d64b8",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40b8-7d06-620d-8006-a37ebc4d64b8",
+      "to": "1f1a40b8-7dca-6d70-8007-293eeabf3d59",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40b8-7dca-6d70-8007-293eeabf3d59",
+      "to": "1f1a40b8-7df7-64d7-8008-a931c859b9d6",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40b8-7df7-64d7-8008-a931c859b9d6",
+      "to": "1f1a40b8-7e5f-619e-8009-16c90a735d6d",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40b8-7e5f-619e-8009-16c90a735d6d",
+      "to": "1f1a40b8-7f73-6e17-800a-7bbcfc3721ea",
+      "kind": "sequential"
+    },
+    {
+      "from": null,
+      "to": "1f1a40ba-1d54-6156-8000-b614af2954a6",
+      "kind": "root"
+    },
+    {
+      "from": "1f1a40ba-1d54-6156-8000-b614af2954a6",
+      "to": "1f1a40ba-1f74-68f9-8001-59b379f45e29",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40ba-1f74-68f9-8001-59b379f45e29",
+      "to": "1f1a40ba-202a-688b-8002-c43ec314b102",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40ba-202a-688b-8002-c43ec314b102",
+      "to": "1f1a40ba-20ee-6247-8003-9d7dec0020d1",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40ba-20ee-6247-8003-9d7dec0020d1",
+      "to": "1f1a40ba-213d-6ae6-8004-9a146a354218",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40ba-213d-6ae6-8004-9a146a354218",
+      "to": "1f1a40ba-21a4-6634-8005-f640e1e6adbc",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40ba-21a4-6634-8005-f640e1e6adbc",
+      "to": "1f1a40ba-22b1-68fa-8006-82b7ca8c9942",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40ba-22b1-68fa-8006-82b7ca8c9942",
+      "to": "1f1a40ba-23bb-67b9-8007-544818e95696",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40ba-23bb-67b9-8007-544818e95696",
+      "to": "1f1a40ba-23ec-6533-8008-d8c2f969afd2",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40ba-23ec-6533-8008-d8c2f969afd2",
+      "to": "1f1a40ba-246e-6ea0-8009-c425b395182d",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40ba-246e-6ea0-8009-c425b395182d",
+      "to": "1f1a40ba-25d7-6a33-800a-a35942b53975",
+      "kind": "sequential"
+    },
+    {
+      "from": "1f1a40b6-86cd-6c28-8002-8d0d07f3247a",
+      "to": "evidence-vg.fork.09cec182",
+      "kind": "fork",
+      "branch_id": "09cec182"
+    },
+    {
+      "from": "1f1a40b6-86cd-6c28-8002-8d0d07f3247a",
+      "to": "evidence-vg.fork.0e7270e2",
+      "kind": "fork",
+      "branch_id": "0e7270e2"
+    }
+  ],
+  "branches": [
+    {
+      "branch_id": "09cec182",
+      "run_id": "evidence-vg",
+      "thread_id": "evidence-vg.fork.09cec182",
+      "parent_thread_id": "evidence-vg",
+      "parent_checkpoint_id": "1f1a40b6-86cd-6c28-8002-8d0d07f3247a",
+      "status": "completed",
+      "created_at": "2026-08-30T00:41:24.941797+00:00",
+      "started_at": "2026-08-30T00:41:25.033165+00:00",
+      "finished_at": "2026-08-30T00:41:26.590362+00:00",
+      "cancelled_at": null,
+      "error": null,
+      "mods": {
+        "proposer_prior": "branch A"
+      },
+      "name": "evidence-branch",
+      "parent_candidate": "baseline",
+      "live": false
+    },
+    {
+      "branch_id": "0e7270e2",
+      "run_id": "evidence-vg",
+      "thread_id": "evidence-vg.fork.0e7270e2",
+      "parent_thread_id": "evidence-vg",
+      "parent_checkpoint_id": "1f1a40b6-86cd-6c28-8002-8d0d07f3247a",
+      "status": "completed",
+      "created_at": "2026-08-30T00:42:09.108914+00:00",
+      "started_at": "2026-08-30T00:42:09.242603+00:00",
+      "finished_at": "2026-08-30T00:42:10.838084+00:00",
+      "cancelled_at": null,
+      "error": null,
+      "mods": {
+        "proposer_prior": "branch B"
+      },
+      "name": "evidence-branch-2",
+      "parent_candidate": "baseline",
+      "live": false
+    }
+  ],
+  "checkpoint_count": 36,
+  "branch_count": 2,
+  "immutable": true,
+  "immutability": {
+    "checked": 36,
+    "immutable": true,
+    "threads": [
+      {
+        "thread_id": "evidence-vg",
+        "checked": 14,
+        "immutable": true,
+        "mismatched": []
+      },
+      {
+        "thread_id": "evidence-vg.fork.09cec182",
+        "checked": 11,
+        "immutable": true,
+        "mismatched": []
+      },
+      {
+        "thread_id": "evidence-vg.fork.0e7270e2",
+        "checked": 11,
+        "immutable": true,
+        "mismatched": []
+      }
+    ],
+    "method": "every stored checkpoint on every thread was re-read and its canonical-JSON SHA-256 compared against the hash taken moments earlier in the same process"
+  },
+  "branch_artifacts": {
+    "evidence-vg": {
+      "thread_dir": "C:\\Users\\danda\\OneDrive\\Documents\\GitHub\\Meta-Harness\\runs\\evidence-vg\\threads\\evidence-vg",
+      "candidate_sources": {
+        "_mock_iter_1": {
+          "path": "C:\\Users\\danda\\OneDrive\\Documents\\GitHub\\Meta-Harness\\runs\\evidence-vg\\threads\\evidence-vg\\agents\\_mock_iter_1.py",
+          "sha256": "14d80f1a79ac841788c389c9413417710eb6a96fe54704928637430e18e0bc6b"
+        },
+        "_mock_iter_2": {
+          "path": "C:\\Users\\danda\\OneDrive\\Documents\\GitHub\\Meta-Harness\\runs\\evidence-vg\\threads\\evidence-vg\\agents\\_mock_iter_2.py",
+          "sha256": "3840d0499aa4a338ccbc5b7d09a479687a72568f44f02a815066a4e910448d5a"
+        },
+        "_mock_iter_3": {
+          "path": "C:\\Users\\danda\\OneDrive\\Documents\\GitHub\\Meta-Harness\\runs\\evidence-vg\\threads\\evidence-vg\\agents\\_mock_iter_3.py",
+          "sha256": "c930f038e58ded806eb87045b594fca7b60059151f738dc0aa449d36fe96e0f6"
+        }
+      },
+      "candidates": [
+        "_mock_iter_1",
+        "_mock_iter_2",
+        "_mock_iter_3",
+        "baseline"
+      ],
+      "has_frontier": true,
+      "evolution_rows": 4
+    },
+    "evidence-vg.fork.09cec182": {
+      "thread_dir": "C:\\Users\\danda\\OneDrive\\Documents\\GitHub\\Meta-Harness\\runs\\evidence-vg\\threads\\evidence-vg.fork.09cec182",
+      "candidate_sources": {
+        "_mock_iter_2__bb598539": {
+          "path": "C:\\Users\\danda\\OneDrive\\Documents\\GitHub\\Meta-Harness\\runs\\evidence-vg\\threads\\evidence-vg.fork.09cec182\\agents\\_mock_iter_2__bb598539.py",
+          "sha256": "3840d0499aa4a338ccbc5b7d09a479687a72568f44f02a815066a4e910448d5a"
+        },
+        "_mock_iter_3__bb598539": {
+          "path": "C:\\Users\\danda\\OneDrive\\Documents\\GitHub\\Meta-Harness\\runs\\evidence-vg\\threads\\evidence-vg.fork.09cec182\\agents\\_mock_iter_3__bb598539.py",
+          "sha256": "c930f038e58ded806eb87045b594fca7b60059151f738dc0aa449d36fe96e0f6"
+        }
+      },
+      "candidates": [
+        "_mock_iter_1",
+        "_mock_iter_2__bb598539",
+        "_mock_iter_3__bb598539"
+      ],
+      "has_frontier": true,
+      "evolution_rows": 3
+    },
+    "evidence-vg.fork.0e7270e2": {
+      "thread_dir": "C:\\Users\\danda\\OneDrive\\Documents\\GitHub\\Meta-Harness\\runs\\evidence-vg\\threads\\evidence-vg.fork.0e7270e2",
+      "candidate_sources": {
+        "_mock_iter_2__ccf161ce": {
+          "path": "C:\\Users\\danda\\OneDrive\\Documents\\GitHub\\Meta-Harness\\runs\\evidence-vg\\threads\\evidence-vg.fork.0e7270e2\\agents\\_mock_iter_2__ccf161ce.py",
+          "sha256": "3840d0499aa4a338ccbc5b7d09a479687a72568f44f02a815066a4e910448d5a"
+        },
+        "_mock_iter_3__ccf161ce": {
+          "path": "C:\\Users\\danda\\OneDrive\\Documents\\GitHub\\Meta-Harness\\runs\\evidence-vg\\threads\\evidence-vg.fork.0e7270e2\\agents\\_mock_iter_3__ccf161ce.py",
+          "sha256": "c930f038e58ded806eb87045b594fca7b60059151f738dc0aa449d36fe96e0f6"
+        }
+      },
+      "candidates": [
+        "_mock_iter_1",
+        "_mock_iter_2__ccf161ce",
+        "_mock_iter_3__ccf161ce"
+      ],
+      "has_frontier": true,
+      "evolution_rows": 3
+    }
+  },
+  "values_summaries_included": false
+}

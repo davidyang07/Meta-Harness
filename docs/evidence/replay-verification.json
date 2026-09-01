@@ -1,0 +1,183 @@
+{
+  "recordings_root": "C:\\Users\\danda\\OneDrive\\Documents\\GitHub\\Meta-Harness\\runs\\replay-evidence",
+  "recordings_verified": 1,
+  "recorded_models": [
+    "scripted-offline"
+  ],
+  "recorded_tasks": [
+    "task-001-fix-typo"
+  ],
+  "replays": 2,
+  "replays_from_checkpoint": 1,
+  "skipped": [],
+  "all_verified": true,
+  "model_calls_issued": 0,
+  "reports": [
+    {
+      "recording": "task-001-fix-typo-trial-1",
+      "mode": "full",
+      "recording_id": "task-001-fix-typo-trial-1",
+      "recorded_thread_id": "record::replay-evidence::task-001-fix-typo::trial-1::a12040f4",
+      "recorded_model": "scripted-offline",
+      "recorded_harness_class": "agents.baseline:BaselineHarness",
+      "recorded_task_id": "task-001-fix-typo",
+      "recorded_with": "scripted model turns; no provider call was made. The graph, the six tools, the pytest verify subprocess and the Postgres checkpoints are real.",
+      "replay_thread_id": "record::replay-evidence::task-001-fix-typo::trial-1::a12040f4::replay::e86f87af",
+      "from_checkpoint": null,
+      "start_step_index": null,
+      "model_calls_issued": 0,
+      "replayed_nodes": [
+        "orient",
+        "plan",
+        "act",
+        "verify",
+        "submit"
+      ],
+      "recorded_nodes": [
+        "orient",
+        "plan",
+        "act",
+        "verify",
+        "submit"
+      ],
+      "recorded_final_state_sha256": "73ea1df960f0ed8aed03bd9257465f7df6bd333598d4dc62073d96cba1b14f5b",
+      "replayed_final_state_sha256": "73ea1df960f0ed8aed03bd9257465f7df6bd333598d4dc62073d96cba1b14f5b",
+      "tape_entries_consumed": 9,
+      "tape_entries_remaining": 0,
+      "usage": {
+        "llm_calls": 4,
+        "input_tokens": 4800,
+        "output_tokens": 720,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 5520,
+        "cost_usd": null
+      },
+      "checks": [
+        {
+          "check": "no_divergence",
+          "ok": true,
+          "detail": "the tape served every request in order"
+        },
+        {
+          "check": "node_sequence_identical",
+          "ok": true,
+          "detail": {
+            "recorded": [
+              "orient",
+              "plan",
+              "act",
+              "verify",
+              "submit"
+            ],
+            "replayed": [
+              "orient",
+              "plan",
+              "act",
+              "verify",
+              "submit"
+            ]
+          }
+        },
+        {
+          "check": "per_step_state_hashes_identical",
+          "ok": true,
+          "detail": "5 steps matched their recorded state hash"
+        },
+        {
+          "check": "final_state_byte_identical",
+          "ok": true,
+          "detail": {
+            "recorded": "73ea1df960f0ed8aed03bd9257465f7df6bd333598d4dc62073d96cba1b14f5b",
+            "replayed": "73ea1df960f0ed8aed03bd9257465f7df6bd333598d4dc62073d96cba1b14f5b"
+          }
+        },
+        {
+          "check": "tape_fully_consumed",
+          "ok": true,
+          "detail": "9 entries consumed, 0 left unread"
+        }
+      ],
+      "verified": true,
+      "divergence": null,
+      "guarantee": "exact replay of a recorded execution: the inner-loop graph re-executed with every model response, tool result and filesystem observation served from the recorded tape; no external model call was issued"
+    },
+    {
+      "recording": "task-001-fix-typo-trial-1",
+      "mode": "from-checkpoint",
+      "recording_id": "task-001-fix-typo-trial-1",
+      "recorded_thread_id": "record::replay-evidence::task-001-fix-typo::trial-1::a12040f4",
+      "recorded_model": "scripted-offline",
+      "recorded_harness_class": "agents.baseline:BaselineHarness",
+      "recorded_task_id": "task-001-fix-typo",
+      "recorded_with": "scripted model turns; no provider call was made. The graph, the six tools, the pytest verify subprocess and the Postgres checkpoints are real.",
+      "replay_thread_id": "record::replay-evidence::task-001-fix-typo::trial-1::a12040f4::replay::ec6e0ecc",
+      "from_checkpoint": "1f1a40d9-feb0-619d-8003-7ea9772b8ead",
+      "start_step_index": 2,
+      "model_calls_issued": 0,
+      "replayed_nodes": [
+        "verify",
+        "submit"
+      ],
+      "recorded_nodes": [
+        "verify",
+        "submit"
+      ],
+      "recorded_final_state_sha256": "73ea1df960f0ed8aed03bd9257465f7df6bd333598d4dc62073d96cba1b14f5b",
+      "replayed_final_state_sha256": "73ea1df960f0ed8aed03bd9257465f7df6bd333598d4dc62073d96cba1b14f5b",
+      "tape_entries_consumed": 2,
+      "tape_entries_remaining": 0,
+      "usage": {
+        "llm_calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 0,
+        "cost_usd": null
+      },
+      "checks": [
+        {
+          "check": "no_divergence",
+          "ok": true,
+          "detail": "the tape served every request in order"
+        },
+        {
+          "check": "node_sequence_identical",
+          "ok": true,
+          "detail": {
+            "recorded": [
+              "verify",
+              "submit"
+            ],
+            "replayed": [
+              "verify",
+              "submit"
+            ]
+          }
+        },
+        {
+          "check": "per_step_state_hashes_identical",
+          "ok": true,
+          "detail": "2 steps matched their recorded state hash"
+        },
+        {
+          "check": "final_state_byte_identical",
+          "ok": true,
+          "detail": {
+            "recorded": "73ea1df960f0ed8aed03bd9257465f7df6bd333598d4dc62073d96cba1b14f5b",
+            "replayed": "73ea1df960f0ed8aed03bd9257465f7df6bd333598d4dc62073d96cba1b14f5b"
+          }
+        },
+        {
+          "check": "tape_fully_consumed",
+          "ok": true,
+          "detail": "2 entries consumed, 0 left unread"
+        }
+      ],
+      "verified": true,
+      "divergence": null,
+      "guarantee": "exact replay of a recorded execution: the inner-loop graph re-executed with every model response, tool result and filesystem observation served from the recorded tape; no external model call was issued"
+    }
+  ]
+}
