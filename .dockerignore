@@ -1,0 +1,56 @@
+# Build context for infra/Dockerfile. The context is the repository root
+# because the uv workspace spans sdk/ and backend/ and uv.lock at the root
+# pins both.
+#
+# Two rules worth keeping in mind when editing this file:
+#   - anything excluded here cannot be COPYed in the Dockerfile;
+#   - a secret that reaches the context can end up in an image layer, so
+#     .env and friends are excluded unconditionally.
+
+# ── secrets: never in the context, let alone a layer ──────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ── version control and CI ────────────────────────────────────────────
+.git/
+.github/
+.gitignore
+.gitattributes
+
+# ── virtualenvs and caches: rebuilt inside the image ──────────────────
+.venv/
+**/.venv/
+**/__pycache__/
+**/*.py[codz]
+.pytest_cache/
+**/.pytest_cache/
+backend/.pytest-tmp/
+.mypy_cache/
+.ruff_cache/
+.uv/
+
+# ── generated run artifacts. Large, and never image content ───────────
+runs/
+benchmark-results/
+wandb/
+backend/wandb/
+graphify-out/
+
+# ── the dashboard is a separate deployable; not in this image ─────────
+frontend/
+
+# ── docs and design records ───────────────────────────────────────────
+docs/
+*.md
+!README.md
+
+# ── OS / editor junk ──────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.kilo/
+.kilocode/

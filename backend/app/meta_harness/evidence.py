@@ -498,7 +498,19 @@ def build_checks(repo_root: Path) -> list[Check]:
             repo_root=repo_root,
             dependency=None,
             dependencies=dependencies,
-            files=["infra/docker-compose.yml"],
+            # A compose file that provisions a database is not "Docker as
+            # a project technology" -- it is a dev dependency. The claim
+            # is only supported while the application itself has an image,
+            # a container healthcheck, a build context that excludes
+            # secrets, and something that checks the container actually
+            # serves.
+            files=[
+                "infra/docker-compose.yml",
+                "infra/Dockerfile",
+                "infra/healthcheck.py",
+                ".dockerignore",
+                "scripts/docker_smoke.sh",
+            ],
         )
     )
     checks.append(

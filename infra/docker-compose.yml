@@ -1,13 +1,23 @@
-# Local Postgres for Meta-Harness — AsyncPostgresSaver checkpointer +
-# PostgresStore cross-run memory.
+# Meta-Harness local stack: the FastAPI backend and the Postgres it
+# checkpoints into (AsyncPostgresSaver checkpointer + PostgresStore
+# cross-run memory).
 #
 # Usage:
-#   docker compose -f infra/docker-compose.yml up -d postgres
-#   docker compose -f infra/docker-compose.yml logs -f postgres
-#   docker compose -f infra/docker-compose.yml down -v   # wipe volume
+#   # everything, building the backend image
+#   docker compose -f infra/docker-compose.yml up -d --build
+#   docker compose -f infra/docker-compose.yml logs -f backend
+#   curl localhost:8000/health
 #
-# The DSN matches .env.example:
-#   POSTGRES_DSN=postgresql://meta_harness:meta_harness@localhost:5432/meta_harness
+#   # database only, for running the CLI and the test suite on the host
+#   docker compose -f infra/docker-compose.yml up -d postgres
+#
+#   docker compose -f infra/docker-compose.yml down     # stop
+#   docker compose -f infra/docker-compose.yml down -v  # stop and wipe data
+#
+# No credentials are baked into the image. The backend reads its
+# configuration from the environment; ANTHROPIC_API_KEY is passed through
+# from the host (or an .env file next to this one) and is empty unless you
+# set it — the API itself does not need it, only live model runs do.
 
 services:
   postgres:
@@ -19,6 +29,8 @@ services:
       POSTGRES_PASSWORD: meta_harness
       POSTGRES_DB: meta_harness
     ports:
+      # Published so the host CLI and `pytest` can reach the same
+      # database the backend container uses.
       - "5432:5432"
     volumes:
       - meta_harness_pgdata:/var/lib/postgresql/data
@@ -28,5 +40,44 @@ services:
       timeout: 5s
       retries: 10
 
+  backend:
+    build:
+      # The repository root, because the uv workspace spans sdk/ and
+      # backend/ and the root uv.lock pins both.
+      context: ..
+      dockerfile: infra/Dockerfile
+    image: meta-harness-backend:local
+    container_name: meta-harness-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        # Not just "started": the backend degrades to in-memory
+        # checkpointing if Postgres is unreachable at startup, which
+        # disables checkpoint history, forking and branch recovery.
+        condition: service_healthy
+    environment:
+      # `postgres` is the compose service name, not localhost — localhost
+      # inside the container is the container.
+      POSTGRES_DSN: postgresql://meta_harness:meta_harness@postgres:5432/meta_harness
+      META_HARNESS_PORT: "8000"
+      # Passed through from the host environment or an .env file beside
+      # this one; empty is fine, and is the default. Only live model runs
+      # need it, and none are started by bringing the stack up.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      META_HARNESS_INNER_MODEL: ${META_HARNESS_INNER_MODEL:-}
+    ports:
+      - "8000:8000"
+    volumes:
+      # Run artifacts are the interesting output of a run and should
+      # survive the container.
+      - meta_harness_runs:/app/runs
+    healthcheck:
+      test: ["CMD", "python", "/app/infra/healthcheck.py"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+
 volumes:
   meta_harness_pgdata:
+  meta_harness_runs:

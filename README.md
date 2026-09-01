@@ -129,6 +129,47 @@ docker compose -f infra/docker-compose.yml up -d postgres
 cd backend && uv run pytest tests/ -q                         # backend suite
 ```
 
+### Or run the whole stack in Docker
+
+The backend has a production-shaped image (`infra/Dockerfile`) and is a
+compose service beside Postgres, so a checkout with Docker and nothing
+else installed can bring up a working API:
+
+```bash
+docker compose -f infra/docker-compose.yml up -d --build       # postgres + backend
+curl localhost:8000/health
+# {"status":"ok","persistence":"postgres","persistence_error":null,...}
+
+docker compose -f infra/docker-compose.yml logs -f backend
+docker compose -f infra/docker-compose.yml down                # stop
+docker compose -f infra/docker-compose.yml down -v             # stop and wipe data
+```
+
+`up -d postgres` on its own still gives you just the database, which is
+what you want when running the CLI and the test suite on the host.
+
+A few properties worth knowing, because they are enforced rather than
+aspirational — `bash scripts/docker_smoke.sh` checks every one of them,
+and so does the `docker` job in CI:
+
+- **Reproducible dependencies.** The image installs from `uv.lock` with
+  `uv sync --frozen`, so a drifted lockfile fails the build instead of
+  shipping an image whose dependencies differ from the tested ones.
+- **Non-root.** The process runs as uid 10001, not root.
+- **No credentials in the image.** `POSTGRES_DSN`, `ANTHROPIC_API_KEY`
+  and the `META_HARNESS_*` knobs are read from the environment at run
+  time; `.env` is excluded from the build context entirely.
+- **An honest healthcheck.** The container reports *unhealthy* when the
+  API is up but Postgres is not. A backend in that state still answers
+  requests, with checkpointing silently degraded to in-memory — no
+  checkpoint history, no forking, no branch recovery — and that is
+  precisely the failure worth surfacing rather than hiding. Set
+  `META_HARNESS_HEALTHCHECK_REQUIRE_POSTGRES=0` to run without a database
+  on purpose.
+
+No API key is needed to bring the stack up; nothing it starts spends
+anything.
+
 ---
 
 ## Demo modes
@@ -407,7 +448,10 @@ meta-harness/
 ├── agents/
 │   ├── baseline.py                            # immutable starting harness
 │   └── (...)                                  # proposer-generated candidates (gitignored)
-├── infra/docker-compose.yml                   # postgres:16 service
+├── infra/
+│   ├── docker-compose.yml                     # postgres:16 + backend services
+│   ├── Dockerfile                             # backend image (multi-stage, non-root)
+│   └── healthcheck.py                         # container health: API up AND Postgres reached
 └── docs/                                      # contracts + capability evidence
 ```
 
@@ -466,6 +510,7 @@ in the same commit.
 | State machines | LangGraph 0.2+ |
 | Checkpointer | `AsyncPostgresSaver` (langgraph-checkpoint-postgres) |
 | Database | Postgres 16 (Docker; `infra/docker-compose.yml`) |
+| Containers | Docker + Compose: backend image (`infra/Dockerfile`, multi-stage, non-root, healthchecked) and Postgres, built and smoke-tested in CI |
 | Backend API | FastAPI 0.115+ + Uvicorn |
 | Inner-loop LLM | Claude Haiku 4.5 (default; rate-limit-friendly + ~10× cheaper than Sonnet) |
 | Proposer LLM | Claude Code CLI subprocess (subscription auth) |
