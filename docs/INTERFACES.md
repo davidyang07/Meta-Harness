@@ -284,6 +284,80 @@ and makes `git apply` fail every patch as `context_mismatch` — silently,
 since a failed patch is an ordinary tool error. `git apply` itself
 reconciles an LF patch against a CRLF file without help.)
 
+### 0.10c The summary carries a task-cluster-aware interval
+
+`experiment.summarize` gains two keys. It still takes only raw rows and
+labels — no target, no expected value, no threshold — and everything below
+is derived from the rows.
+
+```json
+{
+  "distinct_tasks": 5,
+  "difference_ci": {
+    "method": "wald-95", "difference": 0.14,
+    "lower": 0.014, "upper": 0.266, "confidence": 0.95,
+    "standard_error": 0.064, "assumptions": "..."
+  },
+  "cluster_bootstrap_ci": {
+    "method": "task-cluster-bootstrap-percentile",
+    "cluster_unit": "task_id",
+    "difference": 0.14, "lower": 0.04, "upper": 0.24,
+    "confidence": 0.95, "resamples": 10000, "seed": 20260901,
+    "clusters": 5,
+    "cluster_sizes": {"task-001-fix-typo": {"baseline_trials": 20,
+                                            "candidate_trials": 20}},
+    "informative": false,
+    "assumptions": "...",
+    "limitation": "5 task clusters. Cluster-robust intervals are ..."
+  }
+}
+```
+
+**Why a second interval.** `wald_diff_ci` treats each of the 200 trials as
+an independent Bernoulli observation. They are not: 20 trials of one task
+are 20 looks at the same problem, so the design has 5 independent units,
+not 200. The Wald interval is kept for comparison with the naive reading
+and is now labelled as mis-stating precision. Note the direction is *not*
+guaranteed — a per-task effect that is consistent across tasks can make
+the cluster-aware interval the narrower of the two.
+
+**The method.** `cluster_bootstrap_diff_ci` resamples **tasks** with
+replacement, `len(clusters)` draws per resample, and takes *every* trial of
+a drawn task from *both* arms. The paired draw matters: both arms ran the
+identical task set, so they are not independent samples. The interval is
+the percentile interval of the resampled `p_candidate - p_baseline`.
+
+**Determinism.** `BOOTSTRAP_SEED = 20260901` and
+`BOOTSTRAP_RESAMPLES = 10000` are module constants, published inside the
+payload, and clusters are iterated in sorted order. The same rows and the
+same seed reproduce the interval byte-for-byte on any machine, so a
+published interval can be recomputed from the published rows alone.
+
+**Measured only.** `cluster_bootstrap_diff_ci` raises `ValueError` on any
+row whose `metrics_source` is not `"measured"`. A scripted or mock trial
+cannot reach a published interval, in addition to the existing
+`check_protocol_equality` and `aggregate_trials` guards.
+
+**Cluster count is disclosed, not papered over.**
+`MIN_INFORMATIVE_CLUSTERS = 30` is a rule of thumb about when a
+cluster-robust interval stops describing a population of tasks and starts
+describing the handful in hand. Nothing changes behaviour when it is
+crossed; below it, `informative` is `false` and a `limitation` string is
+set, which `render_report` prints as a `LIMITATION:` line and
+`_report_markdown` renders as a blockquote above the result. With fewer
+than two clusters there is nothing to resample and the bounds are `null`
+with a `note` — never a fabricated interval.
+
+**No p-value.** With 5 (search) and 2 (holdout) clusters a hypothesis test
+is not defensible, so none is computed and none appears in any payload;
+`test_no_significance_verdict_or_p_value_is_produced` asserts it. Adding
+easy tasks purely to raise the cluster count would raise the count without
+adding evidence, and is deliberately not done.
+
+`reported_metric_sentence` — the one sentence a reader may quote — now
+appends the cluster-aware interval and the cluster count, so the point
+estimate never travels without them.
+
 ### 0.11 The holdout protocol
 
 `benchmarks/holdout/config.json` is a second committed protocol with the

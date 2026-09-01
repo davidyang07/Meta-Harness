@@ -151,6 +151,256 @@ def test_wald_interval_handles_zero_trials():
     assert ci["lower"] is None and ci["upper"] is None
 
 
+# ── task-cluster-aware uncertainty ────────────────────────────────────
+
+
+def test_clustering_is_by_task_id():
+    clusters = exp.task_clusters(
+        _rows("baseline", {"t1": [True, False], "t2": [True]}),
+        _rows("candidate", {"t1": [True, True], "t2": [False]}),
+        ["t1", "t2"],
+    )
+    assert sorted(clusters) == ["t1", "t2"]
+    assert clusters["t1"] == {"baseline": [True, False], "candidate": [True, True]}
+    assert clusters["t2"] == {"baseline": [True], "candidate": [False]}
+
+
+def test_a_task_with_trials_in_only_one_arm_is_not_a_cluster():
+    """A cluster must be resamplable in both arms or it is not paired."""
+    clusters = exp.task_clusters(
+        _rows("baseline", {"t1": [True], "t2": [True]}),
+        _rows("candidate", {"t1": [True]}),
+        ["t1", "t2"],
+    )
+    assert list(clusters) == ["t1"]
+
+
+def test_every_trial_of_a_sampled_task_stays_with_it(monkeypatch):
+    """The defining property: tasks are drawn, trials are not.
+
+    Every draw is pinned to one cluster, so the resampled proportion must
+    be exactly that task's proportion — impossible if the bootstrap were
+    splitting a task's trials across draws.
+    """
+    baseline = _rows("baseline", {"easy": [True] * 10, "hard": [False] * 10})
+    candidate = _rows("candidate", {"easy": [True] * 10, "hard": [False] * 10})
+
+    class _AlwaysHard:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def randrange(self, _n):
+            return 1  # sorted(["easy", "hard"])[1] == "hard"
+
+    monkeypatch.setattr(exp.random, "Random", _AlwaysHard)
+    ci = exp.cluster_bootstrap_diff_ci(
+        baseline_rows=baseline,
+        candidate_rows=candidate,
+        task_ids=["easy", "hard"],
+        resamples=25,
+    )
+    # Drawing "hard" twice gives 0/20 in both arms: difference exactly 0.
+    assert ci["lower"] == 0.0 and ci["upper"] == 0.0
+    assert ci["cluster_sizes"]["hard"] == {
+        "baseline_trials": 10,
+        "candidate_trials": 10,
+    }
+
+
+def test_the_interval_is_reproducible_under_the_recorded_seed():
+    baseline = _rows(
+        "baseline", {f"t{i}": [True] * i + [False] * (5 - i) for i in range(1, 6)}
+    )
+    candidate = _rows(
+        "candidate", {f"t{i}": [True] * (i + 1) + [False] * (4 - i) for i in range(1, 5)}
+    )
+    task_ids = [f"t{i}" for i in range(1, 6)]
+    kwargs = dict(baseline_rows=baseline, candidate_rows=candidate, task_ids=task_ids)
+
+    first = exp.cluster_bootstrap_diff_ci(**kwargs)
+    second = exp.cluster_bootstrap_diff_ci(**kwargs)
+    assert first == second
+    assert first["seed"] == exp.BOOTSTRAP_SEED
+    assert first["resamples"] == exp.BOOTSTRAP_RESAMPLES
+
+    other = exp.cluster_bootstrap_diff_ci(**kwargs, seed=exp.BOOTSTRAP_SEED + 1)
+    assert other["seed"] != first["seed"]
+
+
+def test_the_seed_and_resample_count_are_published_with_the_interval():
+    """An interval nobody can recompute is not evidence."""
+    summary = exp.summarize(
+        baseline_rows=_rows("baseline", {"a": [True, False], "b": [False, False]}),
+        candidate_rows=_rows("candidate", {"a": [True, True], "b": [True, False]}),
+        task_ids=["a", "b"],
+        baseline_label="baseline",
+        candidate_label="evolved",
+    )
+    ci = summary["cluster_bootstrap_ci"]
+    for key in ("seed", "resamples", "method", "cluster_unit", "cluster_sizes"):
+        assert key in ci, key
+    assert ci["cluster_unit"] == "task_id"
+
+
+def test_a_mock_row_can_never_produce_a_published_interval():
+    """Scripted rows must not become measured evidence."""
+    candidate = _rows("candidate", {"t1": [True], "t2": [True]})
+    candidate[0]["metrics_source"] = met.MOCK
+    with pytest.raises(ValueError, match="mock"):
+        exp.cluster_bootstrap_diff_ci(
+            baseline_rows=_rows("baseline", {"t1": [True], "t2": [False]}),
+            candidate_rows=candidate,
+            task_ids=["t1", "t2"],
+        )
+
+
+def test_a_mock_row_also_fails_the_whole_summary():
+    baseline = _rows("baseline", {"t1": [True], "t2": [True]})
+    baseline[0]["metrics_source"] = met.MOCK
+    with pytest.raises(ValueError):
+        exp.summarize(
+            baseline_rows=baseline,
+            candidate_rows=_rows("candidate", {"t1": [True], "t2": [True]}),
+            task_ids=["t1", "t2"],
+            baseline_label="baseline",
+            candidate_label="evolved",
+        )
+
+
+def test_the_summary_reports_the_number_of_distinct_tasks():
+    summary = exp.summarize(
+        baseline_rows=_rows("baseline", {"a": [True], "b": [False], "c": [True]}),
+        candidate_rows=_rows("candidate", {"a": [True], "b": [True], "c": [True]}),
+        task_ids=["a", "b", "c"],
+        baseline_label="baseline",
+        candidate_label="evolved",
+    )
+    assert summary["distinct_tasks"] == 3
+    assert summary["cluster_bootstrap_ci"]["clusters"] == 3
+
+
+def test_a_small_cluster_count_is_disclosed_rather_than_hidden():
+    summary = exp.summarize(
+        baseline_rows=_rows("baseline", {"a": [True, False], "b": [False, False]}),
+        candidate_rows=_rows("candidate", {"a": [True, True], "b": [True, False]}),
+        task_ids=["a", "b"],
+        baseline_label="baseline",
+        candidate_label="evolved",
+    )
+    ci = summary["cluster_bootstrap_ci"]
+    assert ci["informative"] is False
+    assert str(ci["clusters"]) in ci["limitation"]
+    assert str(exp.MIN_INFORMATIVE_CLUSTERS) in ci["limitation"]
+    # And it reaches the reader, not just the JSON.
+    assert "LIMITATION" in exp.render_report(summary)
+
+
+def test_one_cluster_yields_no_interval_rather_than_a_fake_one():
+    ci = exp.cluster_bootstrap_diff_ci(
+        baseline_rows=_rows("baseline", {"only": [True, False]}),
+        candidate_rows=_rows("candidate", {"only": [True, True]}),
+        task_ids=["only"],
+    )
+    assert ci["lower"] is None and ci["upper"] is None
+    assert ci["informative"] is False
+    assert "two task clusters" in ci["note"]
+
+
+def test_no_significance_verdict_or_p_value_is_produced():
+    """The design cannot support a test, so none may appear in the payload."""
+    summary = exp.summarize(
+        baseline_rows=_rows("baseline", {"a": [True, False], "b": [False, False]}),
+        candidate_rows=_rows("candidate", {"a": [True, True], "b": [True, False]}),
+        task_ids=["a", "b"],
+        baseline_label="baseline",
+        candidate_label="evolved",
+    )
+    blob = json.dumps(summary).lower()
+    for banned in ("p_value", "pvalue", "significant", "reject_null"):
+        assert banned not in blob, banned
+
+
+def test_the_bootstrap_takes_no_target_or_expected_improvement():
+    signature = inspect.signature(exp.cluster_bootstrap_diff_ci)
+    for name in signature.parameters:
+        assert not any(
+            token in name.lower()
+            for token in ("target", "expect", "claim", "goal", "threshold", "improv")
+        ), name
+
+
+def test_no_target_improvement_can_reach_the_statistics():
+    """12pp is a claim about the result, never an input to it.
+
+    The statistics surface is searched for the resume's number so it
+    cannot be smuggled in as a default, a constant or a nudge.
+    """
+    statistics_source = "".join(
+        inspect.getsource(fn)
+        for fn in (
+            exp.wald_diff_ci,
+            exp.task_clusters,
+            exp.cluster_bootstrap_diff_ci,
+            exp._arm_stats,
+            exp._per_task,
+            exp.summarize,
+        )
+    )
+    for literal in ("12.0", "0.12", "12 percentage", "12pp"):
+        assert literal not in statistics_source, literal
+    assert "CLAIMED_IMPROVEMENT" not in inspect.getsource(exp)
+
+
+def test_summary_values_are_recomputed_from_the_raw_rows_not_carried():
+    """Flipping one raw trial must move every derived number."""
+    baseline = _rows("baseline", {"a": [True, False], "b": [False, False]})
+    candidate = _rows("candidate", {"a": [True, True], "b": [True, False]})
+    task_ids = ["a", "b"]
+    kwargs = dict(
+        task_ids=task_ids, baseline_label="baseline", candidate_label="evolved"
+    )
+    before = exp.summarize(
+        baseline_rows=baseline, candidate_rows=candidate, **kwargs
+    )
+    candidate[3]["passed"] = True  # task "b", trial 2
+    after = exp.summarize(baseline_rows=baseline, candidate_rows=candidate, **kwargs)
+
+    assert after["candidate_passes"] == before["candidate_passes"] + 1
+    assert (
+        after["absolute_percentage_point_delta"]
+        > before["absolute_percentage_point_delta"]
+    )
+    assert (
+        after["cluster_bootstrap_ci"]["difference"]
+        != before["cluster_bootstrap_ci"]["difference"]
+    )
+    assert after["per_task"]["b"]["candidate_passes"] == 2
+
+
+def test_the_quotable_sentence_carries_the_cluster_interval():
+    summary = exp.summarize(
+        baseline_rows=_rows("baseline", {"a": [True, False], "b": [False, False]}),
+        candidate_rows=_rows("candidate", {"a": [True, True], "b": [True, False]}),
+        task_ids=["a", "b"],
+        baseline_label="baseline",
+        candidate_label="evolved",
+    )
+    sentence = exp.reported_metric_sentence(summary)
+    assert "task-clustered bootstrap interval" in sentence
+    assert "2 evaluation tasks" in sentence
+
+
+def test_the_committed_search_protocol_has_few_enough_tasks_to_need_the_caveat():
+    """Guards the disclosure against a quiet change in the task set.
+
+    If the search set ever grows past the cluster threshold this test
+    fails, and the report wording should be revisited on purpose rather
+    than left describing a limitation that no longer applies.
+    """
+    config = exp.load_config(REPO_ROOT / "benchmarks" / "pass-rate" / "config.json")
+    assert len(config["tasks"]) < exp.MIN_INFORMATIVE_CLUSTERS
+
+
 def test_reported_metric_sentence_quotes_only_measured_values():
     summary = exp.summarize(
         baseline_rows=_rows("baseline", {"t": [True, False, False, False]}),

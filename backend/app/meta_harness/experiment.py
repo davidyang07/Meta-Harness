@@ -31,6 +31,7 @@ import hashlib
 import json
 import math
 import platform
+import random
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -170,9 +171,183 @@ def wald_diff_ci(
         "method": "wald-95",
         "assumptions": (
             "independent Bernoulli trials; trials are clustered within tasks, "
-            "so the true interval is wider than this one"
+            "so this interval mis-states the design's precision. The direction "
+            "is not guaranteed: it is usually too narrow, but a per-task effect "
+            "that is consistent across tasks can make the cluster-aware "
+            "interval the narrower of the two. Report both."
         ),
     }
+
+
+#: Task-cluster bootstrap configuration. Both values are recorded in every
+#: summary, because an interval nobody can recompute is not evidence.
+BOOTSTRAP_RESAMPLES = 10000
+BOOTSTRAP_SEED = 20260901
+
+#: Cluster-robust inference is conventionally regarded as unreliable below
+#: roughly this many clusters. It is a rule of thumb about when an interval
+#: stops describing a population of tasks and starts describing the handful
+#: of tasks in hand -- NOT a threshold above which the interval becomes
+#: valid, and nothing in this module changes behaviour when it is crossed.
+#: It exists so the limitation is reported rather than left to the reader.
+MIN_INFORMATIVE_CLUSTERS = 30
+
+
+def _percentile(ordered: list[float], q: float) -> float:
+    """Linear-interpolated quantile of an already-sorted list."""
+    if not ordered:
+        raise ValueError("no values")
+    if len(ordered) == 1:
+        return ordered[0]
+    position = q * (len(ordered) - 1)
+    low = math.floor(position)
+    high = math.ceil(position)
+    if low == high:
+        return ordered[int(position)]
+    return ordered[low] + (ordered[high] - ordered[low]) * (position - low)
+
+
+def task_clusters(
+    baseline_rows: list[dict[str, Any]],
+    candidate_rows: list[dict[str, Any]],
+    task_ids: list[str],
+) -> dict[str, dict[str, list[bool]]]:
+    """Group both arms' trials by ``task_id``.
+
+    The cluster is the task, not the trial: twenty trials of one task are
+    twenty looks at the same problem, and treating them as twenty
+    independent observations is what makes a Wald interval on 200 trials
+    look far more precise than the design can support.
+    """
+    clusters: dict[str, dict[str, list[bool]]] = {}
+    for task_id in task_ids:
+        baseline = [bool(r["passed"]) for r in baseline_rows if r["task_id"] == task_id]
+        candidate = [
+            bool(r["passed"]) for r in candidate_rows if r["task_id"] == task_id
+        ]
+        if baseline and candidate:
+            clusters[task_id] = {"baseline": baseline, "candidate": candidate}
+    return clusters
+
+
+def cluster_bootstrap_diff_ci(
+    *,
+    baseline_rows: list[dict[str, Any]],
+    candidate_rows: list[dict[str, Any]],
+    task_ids: list[str],
+    resamples: int = BOOTSTRAP_RESAMPLES,
+    seed: int = BOOTSTRAP_SEED,
+    confidence: float = 0.95,
+) -> dict[str, Any]:
+    """Percentile interval for ``p_candidate - p_baseline``, clustering by task.
+
+    Tasks are the independent unit. Each resample draws ``len(clusters)``
+    task ids with replacement and takes **every** trial of a drawn task,
+    from both arms, keeping the within-task correlation the design
+    actually has. The paired draw -- the same sampled task contributes its
+    baseline *and* its candidate trials -- matters because both arms ran
+    the identical task set, so the arms are not independent samples.
+
+    What this fixes: a Wald interval on 200 trials assumes 200 independent
+    Bernoulli observations and states a precision the design cannot
+    support. What it does **not** fix: with a handful of tasks the
+    resampling distribution is coarse and driven by which of a few tasks
+    happened to be drawn. Nor does it guarantee a wider interval than the
+    Wald one -- a per-task effect that is consistent across tasks can make
+    this the narrower of the two, which is information, not reassurance.
+    The interval is reported with ``clusters`` and ``informative`` so that
+    limit travels with the number instead of being lost.
+
+    Deterministic: seeded ``random.Random``, clusters iterated in sorted
+    order, so the same rows and the same ``seed`` give the same interval on
+    any machine.
+
+    Raises ``ValueError`` on any row that is not ``metrics_source ==
+    "measured"``. A scripted or mock trial must never reach a published
+    interval.
+    """
+    for row in (*baseline_rows, *candidate_rows):
+        source = row.get("metrics_source")
+        if source != met.MEASURED:
+            raise ValueError(
+                f"cannot bootstrap a {source!r} trial into a measured interval"
+            )
+
+    clusters = task_clusters(baseline_rows, candidate_rows, task_ids)
+    names = sorted(clusters)
+    base: dict[str, Any] = {
+        "method": "task-cluster-bootstrap-percentile",
+        "cluster_unit": "task_id",
+        "confidence": confidence,
+        "resamples": resamples,
+        "seed": seed,
+        "clusters": len(names),
+        "cluster_sizes": {
+            name: {
+                "baseline_trials": len(clusters[name]["baseline"]),
+                "candidate_trials": len(clusters[name]["candidate"]),
+            }
+            for name in names
+        },
+    }
+
+    if len(names) < 2:
+        return {
+            **base,
+            "difference": None,
+            "lower": None,
+            "upper": None,
+            "informative": False,
+            "note": (
+                "fewer than two task clusters: there is nothing to resample "
+                "over, so no cluster-aware interval exists for this design"
+            ),
+        }
+
+    observed_b = sum(sum(clusters[n]["baseline"]) for n in names)
+    observed_bn = sum(len(clusters[n]["baseline"]) for n in names)
+    observed_c = sum(sum(clusters[n]["candidate"]) for n in names)
+    observed_cn = sum(len(clusters[n]["candidate"]) for n in names)
+    observed = observed_c / observed_cn - observed_b / observed_bn
+
+    rng = random.Random(seed)
+    draws: list[float] = []
+    for _ in range(resamples):
+        b_pass = b_n = c_pass = c_n = 0
+        for _ in names:
+            picked = clusters[names[rng.randrange(len(names))]]
+            b_pass += sum(picked["baseline"])
+            b_n += len(picked["baseline"])
+            c_pass += sum(picked["candidate"])
+            c_n += len(picked["candidate"])
+        if b_n and c_n:
+            draws.append(c_pass / c_n - b_pass / b_n)
+
+    draws.sort()
+    alpha = (1.0 - confidence) / 2.0
+    informative = len(names) >= MIN_INFORMATIVE_CLUSTERS
+    result = {
+        **base,
+        "difference": round(observed, 6),
+        "lower": round(_percentile(draws, alpha), 6),
+        "upper": round(_percentile(draws, 1.0 - alpha), 6),
+        "informative": informative,
+        "assumptions": (
+            "tasks are resampled with replacement as the independent unit "
+            "and every trial of a drawn task travels with it; both arms ran "
+            "the same task set, so a drawn task contributes to both"
+        ),
+    }
+    if not informative:
+        result["limitation"] = (
+            f"{len(names)} task clusters. Cluster-robust intervals are "
+            f"conventionally regarded as unreliable below ~{MIN_INFORMATIVE_CLUSTERS} "
+            "clusters: this interval describes the tasks in hand, and should "
+            "not be read as an estimate for coding tasks in general. Widening "
+            "it with easy tasks would raise the cluster count without adding "
+            "evidence, so the task set is left as it is and the limit stated."
+        )
+    return result
 
 
 def _arm_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -239,6 +414,7 @@ def summarize(
     """
     baseline = _arm_stats(baseline_rows)
     candidate = _arm_stats(candidate_rows)
+    clusters = task_clusters(baseline_rows, candidate_rows, task_ids)
     delta_pp = (
         round((candidate["accuracy"] - baseline["accuracy"]) * 100, 4)
         if baseline["accuracy"] is not None and candidate["accuracy"] is not None
@@ -256,12 +432,20 @@ def summarize(
         "candidate_accuracy": candidate["accuracy"],
         "absolute_percentage_point_delta": delta_pp,
         "total_trials": baseline["trials"] + candidate["trials"],
+        "distinct_tasks": len(clusters),
         "difference_ci": wald_diff_ci(
             baseline["passes"],
             baseline["trials"],
             candidate["passes"],
             candidate["trials"],
         ),
+        "cluster_bootstrap_ci": cluster_bootstrap_diff_ci(
+            baseline_rows=baseline_rows,
+            candidate_rows=candidate_rows,
+            task_ids=task_ids,
+        )
+        if clusters
+        else None,
         "per_task": _per_task(baseline_rows, candidate_rows, task_ids),
         "arms": {"baseline": baseline, "candidate": candidate},
         "metrics_source": met.MEASURED,
@@ -427,12 +611,23 @@ def reported_metric_sentence(summary: dict[str, Any]) -> str:
     delta = summary.get("absolute_percentage_point_delta")
     if delta is None:
         return "No measured result: the experiment produced no trials."
-    return (
+    sentence = (
         f"Improved agent pass rate by {delta:+.1f} percentage points "
         f"across {summary['total_trials']} task trials "
         f"({summary['baseline_passes']}/{summary['baseline_trials']} baseline vs "
         f"{summary['candidate_passes']}/{summary['candidate_trials']} evolved)."
     )
+    # The point estimate never travels without the cluster-aware interval
+    # and the cluster count: those are what say how much of this number is
+    # the harness and how much is five tasks.
+    ci = summary.get("cluster_bootstrap_ci") or {}
+    if ci.get("lower") is not None:
+        sentence += (
+            f" 95% task-clustered bootstrap interval "
+            f"[{ci['lower'] * 100:+.1f}, {ci['upper'] * 100:+.1f}] pp over "
+            f"{ci['clusters']} evaluation tasks."
+        )
+    return sentence
 
 
 def render_report(summary: dict[str, Any]) -> str:
@@ -453,9 +648,22 @@ def render_report(summary: dict[str, Any]) -> str:
         lines.append(
             f"95% CI on the difference: "
             f"[{ci['lower'] * 100:+.1f}, {ci['upper'] * 100:+.1f}] pp "
-            f"({ci['method']})"
+            f"({ci['method']}; assumes independent trials)"
+        )
+    cluster_ci = summary.get("cluster_bootstrap_ci") or {}
+    if cluster_ci.get("lower") is not None:
+        lines.append(
+            f"95% CI, clustering by task: "
+            f"[{cluster_ci['lower'] * 100:+.1f}, {cluster_ci['upper'] * 100:+.1f}] pp "
+            f"({cluster_ci['method']}, {cluster_ci['resamples']} resamples, "
+            f"seed {cluster_ci['seed']})"
         )
     lines.append(f"Total trials: {summary['total_trials']}")
+    if summary.get("distinct_tasks") is not None:
+        lines.append(f"Distinct evaluation tasks (clusters): {summary['distinct_tasks']}")
+    if cluster_ci.get("limitation"):
+        lines.append("")
+        lines.append(f"LIMITATION: {cluster_ci['limitation']}")
     lines.append("")
     lines.append("Per task:")
     for task_id, row in summary.get("per_task", {}).items():
@@ -749,6 +957,33 @@ def _validation_markdown(validation: dict[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
+def _statistics_limitation_markdown(summary: dict[str, Any]) -> str:
+    """State the cluster-count limitation where a reader cannot miss it."""
+    ci = summary.get("cluster_bootstrap_ci") or {}
+    clusters = ci.get("clusters")
+    if not clusters:
+        return (
+            "**No cluster-aware interval.** This experiment has no task with "
+            "trials in both arms, so there is nothing to resample over."
+        )
+    if ci.get("informative"):
+        return (
+            f"Clustered over **{clusters} evaluation tasks**, "
+            f"{ci['resamples']} resamples, seed `{ci['seed']}`."
+        )
+    return (
+        f"> **Read the interval with this in mind: there are only "
+        f"{clusters} task clusters.**\n"
+        f">\n"
+        f"> {ci.get('limitation', '')}\n"
+        f">\n"
+        f"> The trial count ({summary.get('total_trials')}) is large; the "
+        f"number of *independent* units is not. Precision is bounded by the "
+        f"number of tasks, not by the number of trials, and adding trials to "
+        f"these same tasks cannot narrow it."
+    )
+
+
 def _report_markdown(
     config: dict[str, Any],
     environment: dict[str, Any],
@@ -786,12 +1021,31 @@ uv run meta-harness experiment --config benchmarks/pass-rate/config.json \\
     --candidate <candidate-name>
 ```
 
+## Statistics
+
+Two intervals are reported, and they answer different questions:
+
+- **Wald, on the difference in proportions.** Assumes every trial is an
+  independent Bernoulli observation. It is not — twenty trials of one task
+  are twenty looks at the same problem — so this interval mis-states
+  precision and is kept only for comparison with the naive reading. It is
+  usually too narrow, but that direction is not guaranteed.
+- **Task-cluster bootstrap (percentile).** Resamples **tasks** with
+  replacement as the independent unit; every trial of a drawn task travels
+  with it, and a drawn task contributes to both arms because both arms ran
+  the identical task set. Deterministic under the recorded seed, so this
+  interval can be recomputed from the published rows alone.
+
+{_statistics_limitation_markdown(summary)}
+
+No p-value and no significance verdict is reported. With this many task
+clusters a hypothesis test would not be defensible, and stating an effect
+with a cluster-aware interval is the honest form of the result.
+
 ## Limitations
 
-- Trials are clustered within tasks, so the reported Wald interval on the
-  difference in proportions is optimistic about independence.
 - Results are tied to the task hashes in `environment.json`. Changing a
   task invalidates comparison with this experiment.
-- This measures the five frozen search tasks. Generalisation to unseen
-  tasks is a separate holdout measurement.
+- This measures the frozen search tasks. Generalisation to unseen tasks is
+  a separate holdout measurement.
 """

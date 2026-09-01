@@ -123,7 +123,13 @@ whose only inputs are the raw trial rows:
 - `baseline_passes` / `baseline_trials` / `baseline_accuracy`
 - `candidate_passes` / `candidate_trials` / `candidate_accuracy`
 - `absolute_percentage_point_delta`
-- `difference_ci` — 95% Wald interval on the difference in proportions
+- `total_trials` and `distinct_tasks` — trials per arm, and how many
+  independent evaluation tasks those trials are spread over
+- `difference_ci` — 95% Wald interval on the difference in proportions.
+  Assumes independent trials, which this design does not have; kept for
+  comparison with the naive reading
+- `cluster_bootstrap_ci` — 95% percentile interval from a **task-cluster
+  bootstrap**, which is the one to quote
 - `per_task` breakdown
 
 `summarize()` takes no target, expected value, or override — there is no
@@ -135,8 +141,16 @@ trials say:
 Baseline  (baseline): 63/100 = 63.0%
 Candidate (evolved):  75/100 = 75.0%
 Absolute improvement: +12.0 percentage points
-95% CI on the difference: [-1.0, +25.0] pp (wald-95)
+95% CI on the difference: [-1.0, +25.0] pp (wald-95; assumes independent trials)
+95% CI, clustering by task: [-4.0, +23.0] pp (task-cluster-bootstrap-percentile,
+                                              10000 resamples, seed 20260901)
 Total trials: 200
+Distinct evaluation tasks (clusters): 5
+
+LIMITATION: 5 task clusters. Cluster-robust intervals are conventionally
+regarded as unreliable below ~30 clusters: this interval describes the
+tasks in hand, and should not be read as an estimate for coding tasks in
+general.
 ```
 
 *(Illustrative formatting only — the numbers above are not a measurement.
@@ -163,10 +177,33 @@ false, `REPORT.md` says so above the number and the CLI exits non-zero.
 
 ## Limitations, stated plainly
 
-- **Clustering.** Trials are clustered within tasks; the 20 trials of one
-  task are not independent draws. The Wald interval therefore
-  understates the true uncertainty. Treat it as a rough scale, not as a
-  significance test.
+- **Only five independent units.** This is the limitation that matters
+  most, and no amount of trials fixes it. Trials are clustered within
+  tasks: the 20 trials of one task are 20 looks at the same problem, so
+  the design has **5 independent units, not 200**. Precision is bounded by
+  the number of tasks. Adding trials to these same five tasks cannot
+  narrow the real interval, only the Wald one — which is exactly why the
+  Wald interval is not the number to quote.
+
+  `cluster_bootstrap_ci` resamples **tasks** with replacement as the
+  independent unit, carrying every trial of a drawn task with it and
+  drawing the same task into both arms (both arms ran the identical task
+  set). It is deterministic under the published seed, so anyone can
+  recompute it from the published rows.
+
+  It does **not** rescue the design. Cluster-robust intervals are
+  conventionally regarded as unreliable below roughly 30 clusters; with 5,
+  the interval describes these five tasks and should not be read as an
+  estimate for coding tasks in general. `summary.json` carries
+  `informative: false` and a `limitation` string saying so, and both the
+  console report and `REPORT.md` print it above the number.
+
+- **No p-value, deliberately.** With 5 task clusters a significance test
+  would not be defensible, so none is computed and none appears in any
+  payload. The result is a measured effect reported with cluster-aware
+  uncertainty, which is the honest form it can take. Adding easy tasks to
+  raise the cluster count would raise the count without adding evidence,
+  and is not done.
 - **Search-set, not holdout.** This measures the five tasks the proposer
   optimised against, and the resume claim it supports is a search-set
   claim. Generalisation is a separate, separately-reported measurement:

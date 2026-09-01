@@ -54,9 +54,17 @@ the result, not a failure.** The harness was evolved against the search
 tasks; some of the gain there is fit to those five tasks. The holdout
 delta is the part that transferred.
 
-Two trials-worth of tasks is a small holdout, and the 95% Wald interval
-on 80 clustered trials is wide. Report it with that interval, and do not
-quote a holdout delta without it.
+**Two tasks is two clusters.** That is the binding constraint on this
+number, and it is worse here than on the search set. The 80 trials are 80
+looks at two problems, so `cluster_bootstrap_ci` resamples exactly two
+units and its interval is coarse by construction — it can take only a
+handful of distinct values. `summary.json` reports `clusters: 2` and
+`informative: false` for this reason.
+
+Report the holdout delta with that interval and that cluster count, always.
+A holdout delta quoted bare is not a generalisation claim; it is one number
+from two tasks. No significance test is computed, because none would be
+defensible at this cluster count.
 
 ## Output
 
