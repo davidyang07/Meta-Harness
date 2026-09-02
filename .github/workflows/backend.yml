@@ -119,7 +119,7 @@ jobs:
             tests/test_inner_messages.py \
             tests/test_tracking.py \
             tests/test_pipeline.py \
-            tests/test_resume_evidence.py
+            tests/test_capability_evidence.py
 
       - name: The W&B adapter degrades cleanly when wandb is absent
         run: |
@@ -160,8 +160,8 @@ jobs:
           print('offline W&B run created; version', probe['wandb_version'])
           "
 
-  resume-evidence:
-    name: resume evidence agrees with the artifacts
+  capability-evidence:
+    name: capability evidence agrees with the artifacts
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -174,18 +174,18 @@ jobs:
       - run: uv sync --frozen
 
       - name: Regenerate the evidence document and diff it
-        # Every row in docs/RESUME_EVIDENCE.md is derived from committed
+        # Every row in docs/CAPABILITY_EVIDENCE.md is derived from committed
         # artifacts. If the committed document disagrees with what those
         # artifacts now say, it is stale or edited — and a stale claim is
         # worse than no claim.
-        run: uv run meta-harness report resume-evidence --check
+        run: uv run meta-harness report capability-evidence --check
 
       - name: No claim may be marked FAIL
         # UNSUPPORTED is a legitimate state: the artifact that would
         # settle the claim does not exist yet. FAIL means an artifact
         # exists and contradicts the claim.
         run: |
-          uv run meta-harness report resume-evidence --json > evidence.json
+          uv run meta-harness report capability-evidence --json > evidence.json
           uv run python -c "
           import json
           report = json.load(open('evidence.json'))
@@ -196,6 +196,35 @@ jobs:
           print(counts['PASS'], 'PASS,', counts['FAIL'], 'FAIL,', counts['UNSUPPORTED'], 'UNSUPPORTED')
           raise SystemExit(1 if failed else 0)
           "
+
+      - name: No row grades a measurement against a target
+        # An evidence document with a bar to clear has an interest in its
+        # own answer, and every later decision about tasks, trials and
+        # selection gets made in that bar's shadow. There is no target
+        # anywhere in this repository and none may be reintroduced.
+        run: |
+          uv run python -c "
+          import json
+          report = json.load(open('evidence.json'))
+          bad = []
+          for check in report['checks']:
+              text = (check['claim'] + ' ' + check['detail']).lower()
+              if '>=' in text or 'at least' in text or 'target' in text:
+                  bad.append(check['claim'])
+          for claim in bad:
+              print('::error::threshold-shaped claim: ' + claim)
+          raise SystemExit(1 if bad else 0)
+          "
+
+      - name: The documented command names still resolve
+        # docs/, README and CI all name these. A rename that leaves a
+        # documented command dead is a broken document, not a cleanup.
+        run: |
+          for cmd in "report capability-evidence" "report resume-evidence" \
+                     "canonical-experiment" "resume-experiment"; do
+            uv run meta-harness $cmd --help >/dev/null \
+              || { echo "::error::meta-harness $cmd does not resolve"; exit 1; }
+          done
 
   benchmark-schema:
     name: benchmark schema + published results
@@ -213,7 +242,29 @@ jobs:
       - name: Validate the committed benchmark protocols
         run: |
           cd backend
-          uv run pytest tests/test_experiment.py -q --no-header
+          uv run pytest tests/test_experiment.py tests/test_holdout_isolation.py \
+            -q --no-header
+
+      - name: No committed task declares an expected outcome
+        # A `baseline_pass_rate` in a task spec is a target sitting inside
+        # the measuring instrument: nothing reads it, so nothing catches
+        # a task set being tuned until it produces the wanted number.
+        run: |
+          uv run python -c "
+          import json, pathlib, sys
+          banned = ('baseline_pass_rate', 'best_known_pass_rate',
+                    'calibration_note', 'expected_pass_rate', 'target_pass_rate')
+          bad = {}
+          for parent in ('tasks', 'holdout'):
+              for spec in sorted(pathlib.Path('eval', parent).glob('*/task.json')):
+                  data = json.loads(spec.read_text())
+                  present = [f for f in banned if f in data]
+                  if present:
+                      bad[str(spec)] = present
+          for path, fields in bad.items():
+              print('::error::' + path + ' declares ' + ', '.join(fields))
+          sys.exit(1 if bad else 0)
+          "
 
       - name: Re-derive every published summary from its raw rows
         # A published number must be recomputable from the committed
@@ -343,15 +394,15 @@ jobs:
         # These four paths were once listed in a developer's
         # .git/info/exclude as "local-only artifacts". They are not: the
         # evidence document is a generated contract artifact that the
-        # resume-evidence job regenerates and diffs, and three jobs in
+        # capability-evidence job regenerates and diffs, and three jobs in
         # this workflow import or run them. Untracking them again turns
         # this workflow red in ways that look unrelated to the cause.
         run: |
           missing=0
           for path in \
             backend/app/meta_harness/evidence.py \
-            backend/tests/test_resume_evidence.py \
-            docs/RESUME_EVIDENCE.md \
+            backend/tests/test_capability_evidence.py \
+            docs/CAPABILITY_EVIDENCE.md \
             docs/evidence/README.md
           do
             if ! git ls-files --error-unmatch "$path" >/dev/null 2>&1; then
@@ -366,3 +417,15 @@ jobs:
                       scripts/docker_smoke.sh; do
             [ -f "$path" ] || { echo "::error::missing $path"; exit 1; }
           done
+
+      - name: The single verification entry point exists and parses
+        # `make verify` is what the README tells a reviewer to run. If it
+        # is missing or has a syntax error, the README is lying.
+        run: |
+          for path in Makefile scripts/verify.sh; do
+            [ -f "$path" ] || { echo "::error::missing $path"; exit 1; }
+          done
+          bash -n scripts/verify.sh
+          bash -n scripts/docker_smoke.sh
+          bash -n scripts/demo_acceptance.sh
+          make -n verify >/dev/null

@@ -32,7 +32,7 @@ GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; DIM='\033[2m'; NC='\0
 # checks that build a path from it silently wrote to the filesystem root:
 #
 #   meta-harness report wandb-check --output /wandb.json
-#   meta-harness report resume-evidence --json > /evidence.json
+#   meta-harness report capability-evidence --json > /evidence.json
 #
 # which on Windows hung the ladder at "W&B offline probe" and meant the
 # two evidence checks never read what they claimed to.
@@ -199,18 +199,24 @@ check "meta-harness version"    bash -c 'uv run meta-harness version | grep -q m
 check "all subcommands present" bash -c '
   out=$(uv run meta-harness --help 2>&1)
   for cmd in version inner benchmark loop fork serve experiment checkpoints replay \
-             init resume memory verify-replay resume-experiment report; do
+             init resume memory verify-replay canonical-experiment report; do
     echo "$out" | grep -q "$cmd" || { echo "missing subcommand: $cmd"; exit 1; }
   done
 '
 check "report subcommands present" bash -c '
   out=$(uv run meta-harness report --help 2>&1)
-  for cmd in resume-evidence version-graph wandb-check cost-estimate; do
+  for cmd in capability-evidence version-graph wandb-check cost-estimate; do
     echo "$out" | grep -q "$cmd" || { echo "missing report subcommand: $cmd"; exit 1; }
   done
 '
-check "resume-experiment --dry-run spends nothing" bash -c '
-  out=$(uv run meta-harness resume-experiment --dry-run 2>&1)
+# The pre-rename names are hidden from --help but still registered, so
+# anything already scripted against them keeps working.
+check "deprecated command aliases still resolve" bash -c '
+  uv run meta-harness resume-experiment --help >/dev/null &&
+  uv run meta-harness report resume-evidence --help >/dev/null
+'
+check "canonical-experiment --dry-run spends nothing" bash -c '
+  out=$(uv run meta-harness canonical-experiment --dry-run 2>&1)
   echo "$out"
   echo "$out" | grep -q "nothing was executed and nothing was spent"
 '
@@ -337,9 +343,9 @@ sys.exit(0 if probe[\"ok\"] else 1)
 " "$LOG_DIR/wandb.json"
 '
 check "evidence agrees with the artifacts" bash -c '
-  uv run meta-harness report resume-evidence --check'
+  uv run meta-harness report capability-evidence --check'
 check "no claim is marked FAIL" bash -c '
-  uv run meta-harness report resume-evidence --json > "$LOG_DIR/evidence.json"
+  uv run meta-harness report capability-evidence --json > "$LOG_DIR/evidence.json"
   uv run python -c "
 import json, sys
 report = json.load(open(sys.argv[1]))

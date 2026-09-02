@@ -14,7 +14,7 @@ is what the claim is about; it is not a substitute for the pass-rate
 measurement, which needs a provider and appears as UNSUPPORTED until one
 is run.
 
-With credentials, `meta-harness resume-experiment --record-trials N`
+With credentials, `meta-harness canonical-experiment --record-trials N`
 overwrites this artifact with recordings of real provider calls.
 
 Usage:
