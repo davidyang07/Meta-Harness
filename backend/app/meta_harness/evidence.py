@@ -1,7 +1,7 @@
-"""Derive the resume-evidence document from committed artifacts.
+"""Derive the capability-evidence document from committed artifacts.
 
-Every row in `docs/RESUME_EVIDENCE.md` is produced here, and every row is
-computed rather than written down:
+Every row in `docs/CAPABILITY_EVIDENCE.md` is produced here, and every row
+is computed rather than written down:
 
 - **Measured rows** (pass rates, the percentage-point delta, trial
   counts) are recomputed from the raw ``*-results.jsonl`` rows of a
@@ -15,10 +15,13 @@ computed rather than written down:
   that a command produced, and FAIL when there is none.
 
 There is no constant in this module holding a pass rate, a delta, or a
-target, other than the resume's own stated threshold — which is the
-claim being tested, not an input to the measurement. A claim with no
-supporting artifact reports UNSUPPORTED. That is a correct outcome, not
-a bug to work around.
+target of any kind, and no row asserts that a measurement cleared a
+threshold. A threshold row is how a document starts steering the
+measurement it is supposed to report: once a number has a bar to clear,
+every later decision about tasks, trials and selection is made in its
+shadow. The rows here state what was measured and how it can be
+re-derived, and nothing else. A claim with no supporting artifact
+reports UNSUPPORTED — a correct outcome, not a bug to work around.
 """
 
 from __future__ import annotations
@@ -36,9 +39,9 @@ from typing import Any
 
 from app.meta_harness import experiment as exp
 
-#: The improvement the resume claims, in percentage points. This is the
-#: assertion under test — never an input to any measurement.
-CLAIMED_IMPROVEMENT_PP = 12.0
+#: Repository-relative path of the generated document. One definition, so
+#: the CLI, the tests and CI cannot drift apart on where it lives.
+DOCUMENT_PATH = "docs/CAPABILITY_EVIDENCE.md"
 
 PASS = "PASS"
 FAIL = "FAIL"
@@ -47,7 +50,7 @@ UNSUPPORTED = "UNSUPPORTED"
 
 @dataclass
 class Check:
-    """One resume claim, its verdict, and where the verdict came from."""
+    """One capability claim, its verdict, and where it came from."""
 
     key: str
     claim: str
@@ -370,7 +373,7 @@ def _stack_check(
 
 
 def build_checks(repo_root: Path) -> list[Check]:
-    """Derive every resume claim's verdict. The whole document is this list."""
+    """Derive every capability claim's verdict. The document is this list."""
     checks: list[Check] = []
     dependencies = declared_dependencies(repo_root)
     nodes = graph_node_sets(repo_root)
@@ -651,7 +654,7 @@ def _replay_check(repo_root: Path) -> Check:
                 "what is missing is a verification report from a recorded "
                 "production run. Produce one with `meta-harness inner "
                 "--record` then `meta-harness verify-replay <dir>`, or as "
-                "part of `meta-harness resume-experiment`."
+                "part of `meta-harness canonical-experiment`."
             ),
             evidence=["backend/tests/test_exact_replay.py"],
         )
@@ -716,11 +719,16 @@ def _replay_check(repo_root: Path) -> Check:
 
 
 def _measurement_checks(search: dict[str, Any] | None) -> list[Check]:
-    """The four numeric rows plus the >=12pp verdict."""
+    """The measured rows, each re-derived from the raw trial rows.
+
+    There is deliberately no "did it clear X points" row. The delta is
+    reported with the interval that describes its precision, and the
+    reader draws the conclusion.
+    """
     if search is None:
         missing = (
             "no published pass-rate experiment under benchmarks/results/. "
-            "Run `uv run meta-harness resume-experiment` with credentials, "
+            "Run `uv run meta-harness canonical-experiment` with credentials, "
             "then commit the result directory."
         )
         return [
@@ -737,10 +745,6 @@ def _measurement_checks(search: dict[str, Any] | None) -> list[Check]:
                 ("baseline_pass_rate", "Baseline pass rate"),
                 ("evolved_pass_rate", "Evolved pass rate"),
                 ("absolute_improvement_pp", "Absolute percentage-point improvement"),
-                (
-                    "improvement_at_least_claim",
-                    f"Improvement >= {CLAIMED_IMPROVEMENT_PP:.0f} percentage points",
-                ),
             )
         ]
 
@@ -805,35 +809,45 @@ def _measurement_checks(search: dict[str, Any] | None) -> list[Check]:
             status=PASS if delta is not None else UNSUPPORTED,
             value=delta,
             detail=(
-                f"95% Wald interval on the difference: "
-                f"[{_pp(ci.get('lower'))}, {_pp(ci.get('upper'))}] pp. Trials "
-                f"are clustered within tasks, so the true interval is wider."
+                _delta_detail(delta, ci, summary.get("cluster_bootstrap_ci"))
                 if delta is not None
                 else "no measured delta"
             ),
             evidence=evidence,
         ),
-        Check(
-            key="improvement_at_least_claim",
-            claim=f"Improvement >= {CLAIMED_IMPROVEMENT_PP:.0f} percentage points",
-            status=(
-                UNSUPPORTED
-                if delta is None
-                else PASS
-                if delta >= CLAIMED_IMPROVEMENT_PP
-                else FAIL
-            ),
-            value=delta,
-            detail=(
-                "no measured delta to test the claim against"
-                if delta is None
-                else f"measured {delta:+.1f} pp against a claimed "
-                f"{CLAIMED_IMPROVEMENT_PP:+.0f} pp"
-            ),
-            evidence=evidence,
-        ),
     ]
     return checks
+
+
+def _delta_detail(
+    delta: float,
+    wald: dict[str, Any],
+    cluster: dict[str, Any] | None,
+) -> str:
+    """State the delta with the interval that describes its precision.
+
+    Both intervals are reported. The Wald one assumes 200 independent
+    Bernoulli trials, which the design does not have — trials are
+    clustered within tasks — so the cluster-aware interval is the one to
+    read, and its own limitation travels with it.
+    """
+    parts = [
+        f"measured {delta:+.1f} pp; 95% Wald interval on the difference "
+        f"[{_pp(wald.get('lower'))}, {_pp(wald.get('upper'))}] pp, which "
+        f"assumes independent trials the design does not have"
+    ]
+    if cluster and cluster.get("lower") is not None:
+        parts.append(
+            f"95% task-cluster bootstrap interval "
+            f"[{_pp(cluster.get('lower'))}, {_pp(cluster.get('upper'))}] pp "
+            f"over {cluster.get('clusters')} task clusters "
+            f"({cluster.get('resamples')} resamples, seed {cluster.get('seed')})"
+        )
+        if not cluster.get("informative", True):
+            parts.append(str(cluster.get("limitation", "")).strip())
+    else:
+        parts.append("no cluster-aware interval exists for this design")
+    return ". ".join(part.rstrip(".") for part in parts if part) + "."
 
 
 def _holdout_checks(holdout: dict[str, Any] | None) -> list[Check]:
@@ -845,8 +859,9 @@ def _holdout_checks(holdout: dict[str, Any] | None) -> list[Check]:
                 status=UNSUPPORTED,
                 value=None,
                 detail=(
-                    "no published holdout experiment. This is a separate claim "
-                    "from the resume's search-set number, not a substitute for it."
+                    "no published holdout experiment. Generalisation to "
+                    "unseen tasks is a separate claim from the search-set "
+                    "number, not a substitute for it."
                 ),
                 evidence=[],
             )
@@ -893,7 +908,7 @@ def _fmt_value(value: Any) -> str:
 def render_markdown(
     checks: list[Check], *, repo_root: Path, generated_at: str | None = None
 ) -> str:
-    """The whole of ``docs/RESUME_EVIDENCE.md``.
+    """The whole of ``docs/CAPABILITY_EVIDENCE.md``.
 
     Deterministic apart from the header timestamp, which CI strips before
     comparing so a regeneration check does not fail on the clock.
@@ -907,16 +922,17 @@ def render_markdown(
     counts = {status: sum(1 for c in checks if c.status == status) for status in (PASS, FAIL, UNSUPPORTED)}
 
     lines = [
-        "# Resume evidence",
+        "# Capability evidence",
         "",
         f"<!-- generated-at: {generated_at or datetime.now(timezone.utc).isoformat()} -->",
         f"<!-- commit: {git_commit(repo_root)} -->",
         "",
-        "Generated by `uv run meta-harness report resume-evidence`. Every row",
-        "below is derived from committed artifacts — raw trial rows, compiled",
-        "graphs, declared dependencies, verification reports — at the moment",
-        "the command ran. Nothing here is hand-entered, and a claim with no",
-        "supporting artifact reports `UNSUPPORTED` rather than being softened.",
+        "Generated by `uv run meta-harness report capability-evidence`. Every",
+        "row below is derived from committed artifacts — raw trial rows,",
+        "compiled graphs, declared dependencies, verification reports — at the",
+        "moment the command ran. Nothing here is hand-entered, and a claim with",
+        "no supporting artifact reports `UNSUPPORTED` rather than being",
+        "softened. No row asserts that a measurement cleared a target.",
         "",
         "CI regenerates this file and fails if it disagrees with the raw",
         "results, so a stale or edited number cannot survive a push.",
@@ -951,10 +967,10 @@ def render_markdown(
         "",
         "```bash",
         "# the measured rows: recompute the published summary from raw trials",
-        "cd backend && uv run pytest tests/test_resume_evidence.py -q",
+        "cd backend && uv run pytest tests/test_capability_evidence.py -q",
         "",
         "# the structural rows: compile both graphs and read their node sets",
-        "uv run meta-harness report resume-evidence --json",
+        "uv run meta-harness report capability-evidence --json",
         "",
         "# the replay row: re-execute a recorded trial against its tape",
         "uv run meta-harness verify-replay <recordings-dir>",
@@ -970,7 +986,7 @@ def render_markdown(
         "the pass-rate rows that means the canonical experiment has not been",
         "run against a real model — it costs money and needs credentials. The",
         "one command that produces every missing artifact is",
-        "`uv run meta-harness resume-experiment`.",
+        "`uv run meta-harness canonical-experiment`.",
         "",
     ]
     return "\n".join(lines)
@@ -1001,8 +1017,8 @@ def build_report(repo_root: Path) -> dict[str, Any]:
 
 
 __all__ = [
-    "CLAIMED_IMPROVEMENT_PP",
     "Check",
+    "DOCUMENT_PATH",
     "FAIL",
     "PASS",
     "UNSUPPORTED",

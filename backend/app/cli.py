@@ -1144,7 +1144,7 @@ def _verify_recorded_checkpoint_replay(
             typer.echo(
                 f"no recording under {run_dir} holds checkpoint {checkpoint}. "
                 "Record a run first: `meta-harness inner --record`, or "
-                "`meta-harness resume-experiment --record-trials 1`.",
+                "`meta-harness canonical-experiment --record-trials 1`.",
                 err=True,
             )
             raise typer.Exit(1)
@@ -1409,7 +1409,7 @@ def verify_replay(
         help=(
             "Write the verification report here. Defaults to "
             "docs/evidence/replay-verification.json, which is what "
-            "`report resume-evidence` reads."
+            "`report capability-evidence` reads."
         ),
     ),
 ) -> None:
@@ -1518,8 +1518,12 @@ def verify_replay(
 # ──────────────────────────────────────────────────────────────────────
 
 
-@app.command("resume-experiment")
-def resume_experiment(
+# ``resume-experiment`` was the original name and still works. It reads as
+# though it resumes something, which it does not — it runs the canonical
+# measurement end to end — so the primary name says what it does.
+@app.command("resume-experiment", hidden=True)
+@app.command("canonical-experiment")
+def canonical_experiment(
     budget: int = typer.Option(
         5, "--budget", help="Outer-loop iterations to spend evolving candidates."
     ),
@@ -1576,7 +1580,7 @@ def resume_experiment(
 ) -> None:
     """Evolve, select on validation only, measure, verify replay, report.
 
-    The one command behind every number in `docs/RESUME_EVIDENCE.md`:
+    The one command behind every number in `docs/CAPABILITY_EVIDENCE.md`:
 
     1. evolve candidate harnesses on the search set with the real proposer;
     2. select the best candidate using ONLY the validation accuracy the
@@ -1585,13 +1589,13 @@ def resume_experiment(
     3. run the canonical two-arm experiment (5 tasks x 20 trials x 2 arms);
     4. run the two-arm holdout experiment on tasks the proposer never saw;
     5. verify a recorded trial replays exactly;
-    6. regenerate the resume-evidence document from the artifacts.
+    6. regenerate the capability-evidence document from the artifacts.
 
     THIS ISSUES REAL LLM CALLS AND COSTS MONEY. Use ``--dry-run`` first.
 
-    Nothing in this command compares a result to a target. If the measured
-    improvement is below the resume's claim, the claim is reported
-    unsupported and the measured number stands.
+    Nothing in this command compares a result to a target: there is no
+    target anywhere in the pipeline. Whatever the measured delta is, it is
+    what gets reported.
     """
     import datetime as _dt
 
@@ -1637,7 +1641,7 @@ def resume_experiment(
         return
 
     if run_name is None:
-        run_name = "resume-" + _dt.datetime.now(_dt.timezone.utc).strftime(
+        run_name = "experiment-" + _dt.datetime.now(_dt.timezone.utc).strftime(
             "%Y%m%dT%H%M%SZ"
         )
     run_dir = runs_mod.make_run_dir(REPO_ROOT, run_name, fresh=True)
@@ -1658,8 +1662,8 @@ def resume_experiment(
             "record_trials": record_trials,
             "holdout": holdout,
         },
-        tags=["resume-experiment"],
-        job_type="resume-experiment",
+        tags=["canonical-experiment"],
+        job_type="canonical-experiment",
     )
     if tracker.enabled:
         typer.echo(f"tracking: wandb ({tracker.run_url or 'offline'})")
@@ -1790,9 +1794,9 @@ def resume_experiment(
     stages = _run_async(_run())
 
     typer.echo("")
-    typer.echo("stage 6/6: regenerating resume evidence")
+    typer.echo("stage 6/6: regenerating capability evidence")
     report = ev.build_report(REPO_ROOT)
-    evidence_path = REPO_ROOT / "docs" / "RESUME_EVIDENCE.md"
+    evidence_path = REPO_ROOT / "docs" / ev.DOCUMENT_PATH
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
     evidence_path.write_text(report["markdown"], encoding="utf-8")
 
@@ -1889,12 +1893,14 @@ report_app = typer.Typer(
 app.add_typer(report_app, name="report")
 
 
-@report_app.command("resume-evidence")
-def report_resume_evidence(
+# ``resume-evidence`` was the original name and still works.
+@report_app.command("resume-evidence", hidden=True)
+@report_app.command("capability-evidence")
+def report_capability_evidence(
     output: str = typer.Option(
-        "docs/RESUME_EVIDENCE.md",
+        None,
         "--output",
-        help="Where to write the document.",
+        help="Where to write the document. Defaults to docs/CAPABILITY_EVIDENCE.md.",
     ),
     check: bool = typer.Option(
         False,
@@ -1908,7 +1914,7 @@ def report_resume_evidence(
         False, "--json", help="Print the derived checks as JSON instead."
     ),
 ) -> None:
-    """Derive PASS/FAIL for every resume claim from committed artifacts.
+    """Derive PASS/FAIL for every capability claim from committed artifacts.
 
     Measured rows are recomputed from raw trial rows; structural rows
     compile the graphs and read their node sets; artifact rows read
@@ -1929,7 +1935,7 @@ def report_resume_evidence(
         )
         return
 
-    path = Path(output)
+    path = Path(output) if output else Path(ev.DOCUMENT_PATH)
     if not path.is_absolute():
         path = REPO_ROOT / path
 
@@ -1942,7 +1948,8 @@ def report_resume_evidence(
         if committed != derived:
             typer.echo(
                 f"{path} disagrees with the artifacts it claims to summarise. "
-                "Regenerate it with `uv run meta-harness report resume-evidence`.",
+                "Regenerate it with "
+                "`uv run meta-harness report capability-evidence`.",
                 err=True,
             )
             _echo_first_difference(committed, derived)

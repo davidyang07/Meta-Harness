@@ -775,7 +775,7 @@ async def run_two_arm_experiment(
     """Run both arms, derive the summary, check the methodology, persist.
 
     The single place a two-arm result is produced, so ``experiment`` and
-    ``resume-experiment`` cannot drift into measuring different things.
+    ``canonical-experiment`` cannot drift into measuring different things.
 
     ``record_trials_per_task`` tapes the first N trials of each task in
     each arm for exact replay. Recording is bounded because a tape holds

@@ -1,10 +1,11 @@
-"""The resume-evidence document must be derived, not written.
+"""The capability-evidence document must be derived, not written.
 
 Three properties, in order of importance:
 
-1. **Nothing is hard-coded.** No pass rate, delta or trial count lives in
-   ``evidence.py``. The one number it does hold is the resume's claimed
-   threshold, which is the assertion being tested, not an input.
+1. **Nothing is hard-coded.** No pass rate, delta, trial count or
+   target threshold lives in ``evidence.py``. There is no row of the
+   form "the measurement cleared X": a document that grades a number
+   against a bar is a document with an interest in the answer.
 2. **Measured rows are recomputed from raw trials.** A published summary
    that no longer falls out of its own trial rows fails the row it
    supports.
@@ -124,24 +125,41 @@ def _repo(tmp_path: Path) -> Path:
 
 
 def test_no_pass_rate_or_delta_is_hard_coded_in_the_evidence_module():
-    """The only number allowed here is the claim being tested."""
+    """No rate may be written down where one could be measured."""
     source = (
         REPO_ROOT / "backend" / "app" / "meta_harness" / "evidence.py"
     ).read_text(encoding="utf-8")
     code = "\n".join(
         line for line in source.splitlines() if not line.strip().startswith("#")
     )
-    # Strip the one legitimate constant and the docstrings that explain it.
-    code = code.replace("CLAIMED_IMPROVEMENT_PP = 12.0", "")
     suspicious = re.findall(r"\b0\.\d{2,}\b", code)
     assert suspicious == [], f"hard-coded rates in evidence.py: {suspicious}"
 
 
-def test_the_only_threshold_is_the_claim_under_test():
-    assert ev.CLAIMED_IMPROVEMENT_PP == 12.0
-    checks = {c.key: c for c in ev.build_checks(REPO_ROOT)}
-    claim = checks["improvement_at_least_claim"]
-    assert "12 percentage points" in claim.claim
+def test_the_evidence_module_holds_no_target_threshold():
+    """No constant, and no row, grades a measurement against a bar.
+
+    A threshold row is how a report acquires an interest in its own
+    answer: once there is a bar to clear, the tasks, the trial count and
+    the selection rule all get chosen in its shadow. The document states
+    what was measured and how to re-derive it, and stops there.
+    """
+    source = (
+        REPO_ROOT / "backend" / "app" / "meta_harness" / "evidence.py"
+    ).read_text(encoding="utf-8")
+    for banned in ("CLAIMED_IMPROVEMENT", "improvement_at_least", "percentage points"):
+        assert banned not in source, f"{banned!r} is back in evidence.py"
+
+    keys = {c.key for c in ev.build_checks(REPO_ROOT)}
+    assert not any("at_least" in key or "claim" in key for key in keys), keys
+
+
+def test_no_check_grades_a_measurement_against_a_threshold():
+    """Every row states a fact; none of them states a verdict on a target."""
+    for check in ev.build_checks(REPO_ROOT):
+        text = f"{check.claim} {check.detail}".lower()
+        assert ">=" not in text and "at least" not in text, check.claim
+        assert "target" not in text, check.claim
 
 
 # ── measured rows are recomputed ──────────────────────────────────────
@@ -194,8 +212,8 @@ def test_a_full_protocol_passes_the_trial_count_row(tmp_path: Path):
     assert checks["canonical_200_trials"].status == ev.PASS
 
 
-def test_the_claim_row_reports_the_measured_delta_either_way(tmp_path: Path):
-    """Below the claim is a FAIL with the real number, never a soft PASS."""
+def test_a_small_delta_is_reported_as_the_number_it_is(tmp_path: Path):
+    """A modest improvement is a modest improvement, not a failure."""
     repo = _repo(tmp_path)
     _publish(
         repo,
@@ -203,23 +221,48 @@ def test_the_claim_row_reports_the_measured_delta_either_way(tmp_path: Path):
         candidate_spec={"t1": [True] * 11 + [False] * 9},
     )
     checks = {c.key: c for c in ev._measurement_checks(ev.latest_experiment(repo))}
-    claim = checks["improvement_at_least_claim"]
+    delta = checks["absolute_improvement_pp"]
 
-    assert claim.value == 5.0
-    assert claim.status == ev.FAIL
-    assert "measured +5.0 pp" in claim.detail
+    assert delta.value == 5.0
+    assert delta.status == ev.PASS
+    assert "measured +5.0 pp" in delta.detail
 
 
-def test_the_claim_row_passes_when_the_measurement_supports_it(tmp_path: Path):
+def test_a_regression_is_reported_rather_than_suppressed(tmp_path: Path):
+    """A candidate that does worse publishes a negative delta."""
     repo = _repo(tmp_path)
     _publish(
         repo,
-        baseline_spec={"t1": [True] * 10 + [False] * 10},
-        candidate_spec={"t1": [True] * 15 + [False] * 5},
+        baseline_spec={"t1": [True] * 15 + [False] * 5},
+        candidate_spec={"t1": [True] * 10 + [False] * 10},
     )
     checks = {c.key: c for c in ev._measurement_checks(ev.latest_experiment(repo))}
-    assert checks["improvement_at_least_claim"].value == 25.0
-    assert checks["improvement_at_least_claim"].status == ev.PASS
+    delta = checks["absolute_improvement_pp"]
+
+    assert delta.value == -25.0
+    assert delta.status == ev.PASS
+    assert "measured -25.0 pp" in delta.detail
+
+
+def test_the_delta_row_carries_the_cluster_aware_interval(tmp_path: Path):
+    """The interval that describes this design travels with the number.
+
+    The Wald interval assumes 200 independent Bernoulli trials. The
+    design has 5 tasks, so a reader given only the Wald bounds is given a
+    precision the experiment cannot support.
+    """
+    repo = _repo(tmp_path)
+    _publish(
+        repo,
+        baseline_spec={f"t{i}": [True] * 10 + [False] * 10 for i in range(1, 6)},
+        candidate_spec={f"t{i}": [True] * 15 + [False] * 5 for i in range(1, 6)},
+    )
+    checks = {c.key: c for c in ev._measurement_checks(ev.latest_experiment(repo))}
+    detail = checks["absolute_improvement_pp"].detail
+
+    assert "task-cluster bootstrap interval" in detail
+    assert "5 task clusters" in detail
+    assert "seed" in detail
 
 
 # ── absence reports UNSUPPORTED ───────────────────────────────────────
@@ -230,7 +273,7 @@ def test_no_published_experiment_reports_unsupported(tmp_path: Path):
     checks = {c.key: c for c in ev._measurement_checks(None)}
     assert all(c.status == ev.UNSUPPORTED for c in checks.values())
     assert all(c.value is None for c in checks.values())
-    assert "resume-experiment" in checks["baseline_pass_rate"].detail
+    assert "canonical-experiment" in checks["baseline_pass_rate"].detail
 
 
 def test_no_holdout_experiment_reports_unsupported_not_pass():

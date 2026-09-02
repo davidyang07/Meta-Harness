@@ -1,6 +1,6 @@
 """End-to-end evidence pipeline: evolve → select → measure → verify → report.
 
-``meta-harness resume-experiment`` is this module. It exists so the
+``meta-harness canonical-experiment`` is this module. It exists so the
 sequence that produces a publishable number is one command and one code
 path rather than a README paragraph someone follows by hand.
 
