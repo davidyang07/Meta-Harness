@@ -7,9 +7,22 @@ import { test, expect } from '@playwright/test';
  */
 test.describe('Dashboard (mock mode, no backend)', () => {
   test.beforeEach(async ({ page }) => {
-    await page.route('http://localhost:8000/health', route => route.abort());
+    // Match by path, not by host. The app's base URL is
+    // NEXT_PUBLIC_API_BASE_URL and only falls back to localhost:8000, so a
+    // host-qualified pattern stopped matching the moment CI set that
+    // variable to http://127.0.0.1:8000. The abort silently did nothing,
+    // the app found the real backend CI had started, took the *live* path
+    // instead of the mock one, and failed to load a run that only exists
+    // as a fixture -- so "mock mode, no backend" was neither, and all
+    // seven tests died in this hook waiting for a connection that was
+    // never going to happen.
+    await page.route('**/health', route => route.abort());
     await page.goto('/runs/demo-2026-04-25');
     await page.getByText('SSE connected').waitFor({ timeout: 10_000 });
+    // Guard the guard: "SSE connected" alone does not distinguish the
+    // fixture path from a live backend. The provenance label does, and it
+    // is what would have caught the abort silently not matching.
+    await expect(page.getByTestId('metrics-provenance')).toContainText(/Mock/i);
   });
 
   test('trajectory tree renders nodes', async ({ page }) => {
