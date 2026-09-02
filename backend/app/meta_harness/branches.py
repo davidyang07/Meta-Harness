@@ -379,8 +379,31 @@ async def worktree_add(
 
 
 async def cancel_branch(thread_id: str) -> BranchMetadata:
-    """Cancel a live branch task and mark its metadata cancelled."""
-    metadata = _require_branch(thread_id)
+    """Cancel a branch task if this process owns one, and mark it cancelled.
+
+    Resolved through ``get_branch`` rather than the in-memory registry
+    alone, because a branch that outlived the process that created it
+    exists only on disk. ``list_branches`` and ``get_branch`` already
+    merge both sources so a restarted API reports the full tree; this
+    used to be the one path that did not, and it failed hard:
+
+        DELETE /runs/<id>  ->  cancel_branch(<persisted branch>)
+                           ->  KeyError: unknown branch thread_id
+                           ->  HTTP 500, non-JSON body
+
+    That is reachable only after a real restart, which is why it stayed
+    hidden — the acceptance ladder's "survives a backend restart" check
+    was not restarting anything.
+
+    Having no task here is not an error: the branch is not running in
+    this process, so there is nothing to cancel and marking the metadata
+    cancelled is the whole job. A thread id unknown to *both* memory and
+    disk still raises ``KeyError``, which is what the API's 404 path
+    depends on.
+    """
+    metadata = get_branch(thread_id)
+    if metadata is None:
+        raise KeyError(f"unknown branch thread_id: {thread_id}")
     task = branch_registry.get(thread_id)
     if task is not None and not task.done():
         task.cancel()
@@ -536,13 +559,6 @@ def _mark_cancelled(metadata: BranchMetadata) -> None:
     metadata.finished_at = metadata.finished_at or metadata.cancelled_at
     metadata.live = False
     persist_branch(metadata)
-
-
-def _require_branch(thread_id: str) -> BranchMetadata:
-    metadata = branch_metadata.get(thread_id)
-    if metadata is None:
-        raise KeyError(f"unknown branch thread_id: {thread_id}")
-    return metadata
 
 
 async def _find_snapshot(

@@ -247,3 +247,65 @@ async def test_persistence_is_a_no_op_when_no_runs_root_is_configured():
     )
     br.persist_branch(metadata)  # must not raise
     assert br.load_persisted_branches("whatever") == []
+
+
+async def test_a_branch_recovered_from_disk_can_still_be_cancelled(tmp_path: Path):
+    """Cancelling after a restart must not blow up on the persisted tree.
+
+    `list_branches` and `get_branch` merge memory with disk so a restarted
+    API reports the full tree, but `cancel_branch` resolved memory only.
+    `DELETE /runs/<id>` iterates the merged list and cancels each branch,
+    so after a restart it raised
+
+        KeyError: unknown branch thread_id: <run>.fork.<id>
+
+    which FastAPI turned into an HTTP 500 with a non-JSON body. Reachable
+    only after a *real* restart, which is why it went unnoticed: the
+    acceptance ladder's "survives a backend restart" check was killing a
+    subshell and leaving the server running, so it queried the process it
+    believed it had replaced.
+
+    There is nothing to cancel for a branch this process never started.
+    Marking its metadata cancelled is the whole job.
+    """
+    runs_root = tmp_path / "runs"
+    br.set_runs_root(runs_root)
+
+    async with persistence_layer() as saver:
+        name = unique_name("cancel-after-restart")
+        run_dir, graph = await _root_run(runs_root, name, saver)
+        checkpoint_id = await _fork_point(graph, name)
+        metadata, task = await br.worktree_add(
+            graph,
+            run_id=name,
+            parent_thread_id=name,
+            parent_checkpoint_id=checkpoint_id,
+            mods={"proposer_prior": "cancel-me", "budget_remaining": 1},
+            name="restart-branch",
+        )
+        await task
+
+    # A fresh process: the branch exists on disk and nowhere else.
+    br.clear_branch_state()
+    assert br.branch_metadata == {}
+    assert br.branch_registry == {}
+    assert (run_dir / "branches.json").is_file()
+
+    cancelled = await br.cancel_branch(metadata.thread_id)
+
+    assert cancelled.thread_id == metadata.thread_id
+    assert cancelled.live is False
+    # The branch had already completed, so cancelling must not rewrite a
+    # terminal status into "cancelled".
+    assert cancelled.status == "completed"
+
+    # And it is still cancellable through the merged view the API uses.
+    assert metadata.thread_id in {b.thread_id for b in br.list_branches(run_id=name)}
+
+
+async def test_cancelling_an_unknown_branch_still_raises(tmp_path: Path):
+    """The 404 path in the branches API depends on this KeyError."""
+    br.set_runs_root(tmp_path / "runs")
+    br.clear_branch_state()
+    with pytest.raises(KeyError, match="unknown branch thread_id"):
+        await br.cancel_branch("no-such-run.fork.deadbeef")
