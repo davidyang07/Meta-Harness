@@ -60,8 +60,12 @@ inaccuracy that have since been corrected here:
    `backend/app/meta_harness/metrics.py`; unmeasured cost is `None`, never
    `0.0`, and every payload carries `metrics_source`. See §5.3 and §24.14.
 
-Test count, verified by `cd backend && uv run pytest tests/ -q`:
-**82 passed, 1 skipped, 0 failed**.
+Test count, verified by `cd backend && uv run pytest tests/ -q` on
+2026-09-02 against a live Postgres: **375 passed, 1 skipped, 0 failed**
+(the skip is `test_inner.py`'s live-LLM test, which needs
+`ANTHROPIC_API_KEY`). The same command on the Linux CI runner reports the
+same counts, and the Postgres-backed suites report 61 passed / 0 skipped
+under their own gate.
 
 ---
 

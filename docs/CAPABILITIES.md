@@ -405,9 +405,19 @@ The parts that make the number defensible, each checked mechanically:
 - **Search and holdout are disjoint.** `check_task_set_isolation` runs
   before the pipeline starts; `resume-experiment` refuses to proceed on
   overlap.
-- **Uncertainty is reported with its assumptions.** A 95% Wald interval
-  on the difference of proportions, stated alongside the caveat that
-  trials are clustered within tasks.
+- **Uncertainty is reported with its assumptions, and clustered by task.**
+  Two intervals, because they answer different questions. The 95% Wald
+  interval on the difference of proportions assumes 200 independent
+  Bernoulli trials, which the design does not have, and is kept only for
+  comparison with the naive reading. `cluster_bootstrap_ci` resamples
+  **tasks** with replacement as the independent unit — every trial of a
+  drawn task travels with it, and a drawn task contributes to both arms
+  because both arms ran the identical task set. It is deterministic under
+  a published seed (`BOOTSTRAP_SEED`, `BOOTSTRAP_RESAMPLES`, both carried
+  in the payload), so anyone can recompute it from the published rows.
+  `summary.json` also reports `distinct_tasks`, and a mock trial cannot
+  reach a published interval — `cluster_bootstrap_diff_ci` raises on any
+  row that is not `metrics_source == "measured"`.
 
 **Protocol**: [`benchmarks/pass-rate/README.md`](../benchmarks/pass-rate/README.md)
 **Published results**: `benchmarks/results/` (currently empty)
@@ -429,11 +439,33 @@ every published summary on each push.
 
 ### Limitations
 
-Trials are clustered within tasks, so the Wald interval understates
-uncertainty. The canonical protocol measures the five search tasks the
-proposer optimised against; the holdout protocol is the separate
-generalisation measurement, and a smaller holdout delta is the expected
-shape of the result rather than a failure.
+**Five task clusters, not 200 independent trials.** This is the binding
+limitation and no number of trials fixes it: the 20 trials of one task
+are 20 looks at the same problem, so precision is bounded by the number
+of tasks. Adding trials to the same five tasks narrows the Wald interval
+without adding evidence, which is why the Wald interval is not the one to
+quote.
+
+The task-cluster bootstrap stops the interval pretending trials are
+independent; it does not rescue the design. Cluster-robust intervals are
+conventionally regarded as unreliable below roughly 30 clusters
+(`MIN_INFORMATIVE_CLUSTERS`), and this protocol has 5 on the search set
+and 2 on the holdout. `summary.json` therefore carries
+`informative: false` and a `limitation` string, `render_report` prints it
+as a `LIMITATION:` line, and `REPORT.md` renders it as a blockquote above
+the result. The interval describes the tasks in hand and is not an
+estimate for coding tasks in general.
+
+**No p-value.** At this cluster count a significance test would not be
+defensible, so none is computed and none appears in any payload
+(`test_no_significance_verdict_or_p_value_is_produced`). Adding easy tasks
+purely to raise the cluster count would raise the count without adding
+evidence, and is deliberately not done.
+
+The canonical protocol measures the five search tasks the proposer
+optimised against; the holdout protocol is the separate generalisation
+measurement, and a smaller holdout delta is the expected shape of the
+result rather than a failure.
 
 ---
 
