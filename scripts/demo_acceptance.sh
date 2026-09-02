@@ -54,12 +54,95 @@ pass=0; fail=0; skipped=0
 declare -a FAILURES=()
 
 cleanup() {
-  if [[ -n "$SERVER_PID" ]]; then kill "$SERVER_PID" 2>/dev/null || true; fi
+  # stop_server is defined below; guard so an early exit still works.
+  if declare -f stop_server >/dev/null 2>&1; then
+    stop_server >/dev/null 2>&1 || true
+  elif [[ -n "$SERVER_PID" ]]; then
+    kill "$SERVER_PID" 2>/dev/null || true
+  fi
   rm -rf "runs/$RUN_NAME" 2>/dev/null || true
 }
 trap cleanup EXIT
 
 section() { printf '\n%b── %s %b\n' "$DIM" "$1" "$NC"; }
+
+# ── backend lifecycle ────────────────────────────────────────────────
+# `kill $SERVER_PID` reaps only the subshell. The real server is two
+# levels down (uv -> meta-harness -> python) and survives, still holding
+# the port. Two checks then quietly stopped meaning what they say:
+#
+#   - stage 5 verified whichever backend was already listening, which
+#     after a previous run is one built from an older checkout;
+#   - stage 5b's "survives a backend restart" never restarted anything —
+#     the replacement could not bind, so the readiness probe succeeded
+#     against the process the test believed it had killed.
+#
+# Terminating by *port* rather than by pid fixes both: it is what the
+# next start actually depends on, and it works with an MSYS bash pid,
+# which taskkill cannot use.
+
+port_pids() {
+  # Windows PIDs listening on $API_PORT, or POSIX pids, one per line.
+  if command -v netstat >/dev/null 2>&1 && [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* ]]; then
+    netstat -ano 2>/dev/null \
+      | tr -d '\r' \
+      | awk -v p=":$API_PORT" '$1 ~ /^TCP$/ && $2 ~ p"$" && $4 == "LISTENING" { print $5 }' \
+      | sort -u
+  elif command -v lsof >/dev/null 2>&1; then
+    lsof -ti "tcp:$API_PORT" -sTCP:LISTEN 2>/dev/null | sort -u
+  fi
+}
+
+# PowerShell rather than taskkill: this script runs with
+# MSYS_NO_PATHCONV=1, under which `taskkill //F` reaches the exe as the
+# literal "//F" and is rejected ("Invalid argument/option - '//F'"), so
+# the kill silently did nothing and the port stayed held.
+ps_run() {
+  command -v powershell >/dev/null 2>&1 || return 1
+  powershell -NoProfile -NonInteractive -Command "$1" >/dev/null 2>&1 || true
+}
+
+stop_server() {
+  for pid in $(port_pids); do
+    ps_run "Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue" \
+      || kill -9 "$pid" 2>/dev/null || true
+  done
+  # The uv / meta-harness wrappers do not hold the port but do pin the
+  # virtualenv, and `kill $SERVER_PID` reaches only the subshell above them.
+  ps_run "Get-CimInstance Win32_Process |
+          Where-Object { \$_.CommandLine -like '*serve --port $API_PORT*' } |
+          ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }"
+  if [[ -n "$SERVER_PID" ]]; then
+    kill "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+  fi
+  SERVER_PID=""
+  # The port being free is the property the next start depends on.
+  for _ in $(seq 1 30); do
+    [[ -z "$(port_pids)" ]] && return 0
+    sleep 1
+  done
+  return 1
+}
+
+start_server() {
+  # A port already in use means an earlier run leaked its backend, and
+  # every check below would silently test that one instead. Refuse.
+  if [[ -n "$(port_pids)" ]]; then
+    printf '  %bport %s is already in use; refusing to test someone else'"'"'s backend%b\n' \
+      "$RED" "$API_PORT" "$NC"
+    printf '  %bstop it, or re-run with API_PORT=<free port>%b\n' "$DIM" "$NC"
+    exit 1
+  fi
+  (cd backend && uv run meta-harness serve --port "$API_PORT" >"$LOG_DIR/$1" 2>&1) &
+  SERVER_PID=$!
+  for _ in $(seq 1 60); do
+    api "$API_URL/health" >/dev/null 2>&1 && return 0
+    sleep 1
+  done
+  return 1
+}
+
 
 check() {
   local label="$1"; shift
@@ -165,12 +248,7 @@ for c in fr['candidates']:
 
 # ── 5. Live API ──────────────────────────────────────────────────────
 section "5. Live API + SSE + fork"
-(cd backend && uv run meta-harness serve --port "$API_PORT" >"$LOG_DIR/server.log" 2>&1) &
-SERVER_PID=$!
-for _ in $(seq 1 60); do
-  api "$API_URL/health" >/dev/null 2>&1 && break
-  sleep 1
-done
+start_server server.log || true
 
 check "health endpoint"         bash -c "curl -sS --max-time 10 $API_URL/health | grep -q '\"status\":\"ok\"'"
 check "persistence is postgres" bash -c "
@@ -198,10 +276,14 @@ fi
 if [[ -z "$RECOVER_RUN" ]]; then
   skip "restart trajectory recovery" "could not create a run to recover"
 else
-  kill "$SERVER_PID" 2>/dev/null || true
-  wait "$SERVER_PID" 2>/dev/null || true
-  (cd backend && uv run meta-harness serve --port "$API_PORT" >"$LOG_DIR/server2.log" 2>&1) &
-  SERVER_PID=$!
+  # Must actually be down before the replacement starts, or this check
+  # queries the process it believed it had killed.
+  if ! stop_server; then
+    printf '  %bcould not stop the backend; restart recovery is unverifiable%b\n' \
+      "$RED" "$NC"
+    exit 1
+  fi
+  start_server server2.log || true
   for _ in $(seq 1 60); do
     api "$API_URL/health" >/dev/null 2>&1 && break
     sleep 1
