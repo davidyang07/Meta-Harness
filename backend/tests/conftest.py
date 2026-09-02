@@ -88,3 +88,35 @@ def workspace_outside_git():
         yield workspace
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
+
+
+def _pin_autocrlf(monkeypatch: "pytest.MonkeyPatch", value: str) -> None:
+    """Force ``core.autocrlf`` for every git subprocess a test starts.
+
+    ``GIT_CONFIG_COUNT``/``KEY``/``VALUE`` inject configuration at higher
+    precedence than the system and global files, and are inherited by
+    subprocesses — which is what ``tools.apply_patch`` starts. Using them
+    rather than writing a config file means the pin works identically
+    outside a repository, where there is no local config to write to.
+
+    This matters because ``core.autocrlf`` is not the same everywhere:
+    Git for Windows ships ``true`` in its *system* config, while a Linux
+    runner leaves it unset. A test that reads line endings back and does
+    not pin it asserts one thing on a developer's machine and a different
+    thing in CI.
+    """
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.autocrlf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", value)
+
+
+@pytest.fixture
+def autocrlf_true(monkeypatch: "pytest.MonkeyPatch") -> None:
+    """The Git-for-Windows default: reconcile CRLF working files."""
+    _pin_autocrlf(monkeypatch, "true")
+
+
+@pytest.fixture
+def autocrlf_false(monkeypatch: "pytest.MonkeyPatch") -> None:
+    """The Linux default: no line-ending reconciliation at all."""
+    _pin_autocrlf(monkeypatch, "false")

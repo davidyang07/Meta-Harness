@@ -368,21 +368,37 @@ def test_the_patch_file_handed_to_git_is_not_newline_translated(tmp_path: Path):
 
 def test_an_lf_patch_applies_to_a_crlf_file_and_keeps_its_line_endings(
     workspace_outside_git: Path,
+    autocrlf_true: None,
 ):
     """A model writes LF diffs; a Windows checkout may hold CRLF files.
 
     ``git apply`` reconciles the two itself and preserves the file's own
     endings, so the tool must not get in its way. This is exactly the
-    case the old text-mode temp write broke — and it is the normal case
-    on Windows, failing silently rather than loudly.
+    case the old text-mode temp write broke, and it is the normal case on
+    Windows, failing silently rather than loudly.
 
-    This one needs ``workspace_outside_git`` rather than ``tmp_path``:
-    "preserve the file's own endings" is git's behaviour only when no
-    repository sits above the workspace. Inside a working tree git
-    converts on write and the attributes merely pick the ending, so the
-    property under test would be unobservable. Real task workspaces live
-    under ``sandbox.sandbox_root()``, outside this checkout, which is
-    exactly what the fixture reproduces.
+    Both fixtures are load-bearing, because "preserve the file's own
+    endings" is not unconditional git behaviour — it is what git does
+    under one specific configuration, and this test pins that
+    configuration instead of inheriting whatever the host happens to have:
+
+    - ``autocrlf_true`` pins ``core.autocrlf=true``. That is the
+      Git-for-Windows *system* default, which is why this passes on a
+      Windows box and why it does not on a Linux runner, where autocrlf
+      is unset: with ``autocrlf=false`` the LF patch simply does not match
+      the CRLF file and git reports ``context_mismatch``. Leaving it
+      implicit made the test assert one thing on the developer's machine
+      and another in CI.
+    - ``workspace_outside_git`` keeps the workspace out of any working
+      tree. A repository's ``.gitattributes`` overrides ``autocrlf``, and
+      this one pins ``eol=lf``, so inside the checkout git would apply the
+      patch and rewrite the file to LF. Real task workspaces live under
+      ``sandbox.sandbox_root()``, outside this checkout, which is what the
+      fixture reproduces.
+
+    So the claim under test is precise: *given the git configuration a
+    Windows checkout has by default, and a workspace outside any
+    repository, ``apply_patch`` does not get in git's way.*
     """
     workspace = workspace_outside_git
     before = "def add(a, b):\n    return a - b\n\n\ndef sub(a, b):\n    return a - b\n"
@@ -397,3 +413,28 @@ def test_an_lf_patch_applies_to_a_crlf_file_and_keeps_its_line_endings(
     raw = (workspace / "calculator.py").read_bytes()
     assert b"\r\n" in raw, "the file's own line endings must survive the patch"
     assert b"return a + b" in raw
+
+
+def test_without_autocrlf_an_lf_patch_does_not_match_a_crlf_file(
+    workspace_outside_git: Path,
+    autocrlf_false: None,
+):
+    """The other half of the same fact, so neither result looks universal.
+
+    This is not a bug in ``apply_patch`` — it is git declining to
+    reconcile line endings it was not configured to reconcile, and it is
+    what a Linux runner does by default. Recording it here stops the
+    CRLF-preservation test above from being read as a platform-independent
+    guarantee.
+    """
+    workspace = workspace_outside_git
+    before = "def add(a, b):\n    return a - b\n\n\ndef sub(a, b):\n    return a - b\n"
+    after = before.replace("    return a - b\n\n", "    return a + b\n\n", 1)
+    (workspace / "calculator.py").write_bytes(before.replace("\n", "\r\n").encode())
+
+    result = apply_patch(
+        workspace, "calculator.py", _unified_diff(before, after, "calculator.py")
+    )
+
+    assert result["status"] == "error"
+    assert result["error_type"] == "context_mismatch"
