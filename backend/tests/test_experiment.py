@@ -806,3 +806,70 @@ def test_hash_task_is_sensitive_to_line_endings(tmp_path: Path):
     (crlf / "workspace" / "a.py").write_bytes(b"x = 1\r\ny = 2\r\n")
 
     assert exp.hash_task(lf)["task_sha256"] != exp.hash_task(crlf)["task_sha256"]
+
+
+# ── the task set carries no expected outcome ──────────────────────────
+
+#: Fields that state, in the task definition itself, how well a harness
+#: is supposed to do on it. None of these is read by any code path — that
+#: is exactly the problem. An unread expected-outcome field is a target
+#: sitting inside the measuring instrument, and the way a task set gets
+#: quietly tuned until the number it produces is the number that was
+#: wanted. The rates that used to live here were written to make a
+#: baseline land near a chosen figure so an improvement story would have
+#: room to run.
+FORBIDDEN_TASK_FIELDS = (
+    "baseline_pass_rate",
+    "best_known_pass_rate",
+    "calibration_note",
+    "expected_pass_rate",
+    "target_pass_rate",
+)
+
+
+def _committed_task_specs() -> list[Path]:
+    specs: list[Path] = []
+    for parent in ("tasks", "holdout"):
+        specs.extend(sorted((REPO_ROOT / "eval" / parent).glob("*/task.json")))
+    assert specs, "no committed task specs found"
+    return specs
+
+
+def test_no_eval_task_declares_an_expected_outcome():
+    """A task says what to do, never how well anything should do on it."""
+    offenders: dict[str, list[str]] = {}
+    for spec in _committed_task_specs():
+        data = json.loads(spec.read_text(encoding="utf-8"))
+        present = [field for field in FORBIDDEN_TASK_FIELDS if field in data]
+        if present:
+            offenders[spec.parent.name] = present
+    assert offenders == {}, f"expected-outcome fields in task specs: {offenders}"
+
+
+def test_every_committed_task_still_declares_what_it_needs():
+    """Removing the targets must not have removed the contract with it."""
+    for spec in _committed_task_specs():
+        data = json.loads(spec.read_text(encoding="utf-8"))
+        for required in ("id", "instruction", "test_command"):
+            assert data.get(required), f"{spec}: missing {required}"
+        assert data["id"] == spec.parent.name
+
+
+def test_no_target_shaped_field_is_read_anywhere_in_the_backend():
+    """And nothing may start reading one back in.
+
+    ``baseline_pass_rate`` is excluded from this scan on purpose: as a
+    *measured* baseline it is a legitimate name for a computed result,
+    and it appears as such in the evidence document's row keys. What may
+    not exist anywhere is a field naming an outcome a task is expected or
+    intended to produce.
+    """
+    banned = tuple(f for f in FORBIDDEN_TASK_FIELDS if f != "baseline_pass_rate")
+    sources = list((REPO_ROOT / "backend" / "app").rglob("*.py"))
+    sources.append(REPO_ROOT / "eval" / "score.py")
+    for path in sources:
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for field in banned:
+            assert field not in text, f"{path} reads {field}"
