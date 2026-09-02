@@ -1,6 +1,6 @@
 # Evidence artifacts
 
-Machine-written inputs to [`../RESUME_EVIDENCE.md`](../RESUME_EVIDENCE.md).
+Machine-written inputs to [`../CAPABILITY_EVIDENCE.md`](../CAPABILITY_EVIDENCE.md).
 Every file here is produced by a command, not by hand, and the evidence
 document reads them rather than describing them.
 
@@ -10,7 +10,7 @@ document reads them rather than describing them.
 | `version-graph.json` | `uv run meta-harness report version-graph <run-name>` | the checkpoint DAG, branch refs, immutability |
 | `wandb-offline.json` | `uv run meta-harness report wandb-check` | the W&B adapter works offline, and without W&B |
 
-A missing file is not a soft pass. `RESUME_EVIDENCE.md` reports the
+A missing file is not a soft pass. `CAPABILITY_EVIDENCE.md` reports the
 corresponding claim as `UNSUPPORTED` and names the command that would
 produce it.
 
@@ -37,7 +37,7 @@ scripts only the model's side of the conversation — because this
 environment has no provider credentials. That demonstrates the replay
 machinery, which is what the claim is about. It is not a stand-in for the
 pass-rate measurement, which stays `UNSUPPORTED` until a provider run
-happens. `meta-harness resume-experiment --record-trials N` overwrites
+happens. `meta-harness canonical-experiment --record-trials N` overwrites
 this artifact with recordings of real provider calls.
 
 **`version-graph.json`** — `immutable: true`, plus the checkpoint DAG,
@@ -79,8 +79,8 @@ uv run meta-harness fork vg --checkpoint <id>          # twice, from the same ch
 uv run meta-harness report version-graph vg
 
 uv run meta-harness report wandb-check
-uv run meta-harness report resume-evidence
+uv run meta-harness report capability-evidence
 ```
 
-`uv run meta-harness resume-experiment` does all of this as part of the
+`uv run meta-harness canonical-experiment` does all of this as part of the
 full measurement pipeline.

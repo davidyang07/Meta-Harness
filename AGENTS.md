@@ -13,12 +13,13 @@ Use `uv` for all Python workflows.
 - `uv run meta-harness benchmark --candidate baseline --trials 5`: benchmark a candidate across the eval set.
 - `uv run meta-harness loop --proposer mock --mock-bench --budget 2 --fresh`: exercise the outer loop without live LLM calls.
 - `uv run meta-harness serve --port 8000`: serve the API. Use this rather than a bare `uvicorn app.main:app` — uvicorn picks Windows' ProactorEventLoop, which psycopg cannot use, and the backend would come up with checkpointing silently degraded to in-memory.
+- `make verify` (or `bash scripts/verify.sh`): everything provable without credentials — the suite, real Postgres, replay, branches, benchmark integrity, W&B offline, evidence freshness, the Docker image, hygiene, the dashboard build. `ONLY=<stage>` runs one stage.
 - `bash scripts/demo_acceptance.sh`: LEVEL 1 acceptance, no API key required.
 - `bash scripts/live_smoke.sh`: LEVEL 2 acceptance, needs credentials; prints SKIPPED without them.
 - `uv run meta-harness experiment --candidate <name>`: the canonical 200-trial pass-rate experiment (real cost).
-- `uv run meta-harness resume-experiment --dry-run`: print the measurement plan and a cost estimate; spends nothing. Drop `--dry-run` to evolve, select, measure, verify replay and regenerate the evidence document (real cost).
+- `uv run meta-harness canonical-experiment --dry-run`: print the measurement plan and a cost estimate; spends nothing. Drop `--dry-run` to evolve, select, measure, verify replay and regenerate the evidence document (real cost).
 - `uv run meta-harness verify-replay <recordings-dir>`: re-execute recorded trials against their tapes and fail loudly on any divergence. No model calls.
-- `uv run meta-harness report resume-evidence --check`: what CI runs; non-zero if `docs/RESUME_EVIDENCE.md` disagrees with the artifacts it is derived from.
+- `uv run meta-harness report capability-evidence --check`: what CI runs; non-zero if `docs/CAPABILITY_EVIDENCE.md` disagrees with the artifacts it is derived from.
 
 ## Invariants That Must Not Regress
 
@@ -69,9 +70,16 @@ weakening one of those tests, fix the root cause instead.
     `benchmarks/**` and `agents/**` to LF; without it a Windows checkout
     hashes every frozen task differently from a Linux one.
     (`tests/test_experiment.py`)
-14. **Resume evidence is derived, never written.** A claim with no
+14. **Capability evidence is derived, never written.** A claim with no
     supporting artifact reports `UNSUPPORTED`; no pass rate or delta is
-    hard-coded. (`tests/test_resume_evidence.py`)
+    hard-coded. (`tests/test_capability_evidence.py`)
+15. **Nothing anywhere states a target.** `summarize()` takes no target
+    parameter, `evidence.py` holds no threshold constant, no evidence row
+    grades a number against a bar, and no committed task spec declares an
+    expected pass rate. An unread expected-outcome field is the most
+    dangerous kind: nothing catches a task set being tuned until it
+    produces the number that was wanted. (`tests/test_experiment.py`,
+    `tests/test_capability_evidence.py`)
 
 ## Capabilities and evidence
 
@@ -81,8 +89,8 @@ capability entry depends on, update that document in the same change. Do
 not report a quantitative result without a committed artifact under
 `benchmarks/results/` that reproduces it.
 
-`docs/RESUME_EVIDENCE.md` is **generated** by
-`uv run meta-harness report resume-evidence` and must never be edited by
+`docs/CAPABILITY_EVIDENCE.md` is **generated** by
+`uv run meta-harness report capability-evidence` and must never be edited by
 hand: CI regenerates it and fails on any disagreement. Its inputs are the
 machine-written artifacts in `docs/evidence/` — also never hand-edited.
 

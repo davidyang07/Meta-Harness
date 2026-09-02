@@ -34,13 +34,13 @@ could reach the proposer is closed and tested
 - the prompt and appended system prompt mention no holdout task.
 
 `experiment.check_task_set_isolation` re-checks disjointness at run time,
-and `meta-harness resume-experiment` refuses to start on overlap.
+and `meta-harness canonical-experiment` refuses to start on overlap.
 
 ## Running it
 
 ```bash
 # as part of the full pipeline (this is the default)
-uv run meta-harness resume-experiment
+uv run meta-harness canonical-experiment
 
 # on its own, against an already-evolved candidate
 uv run meta-harness experiment --config benchmarks/holdout/config.json \

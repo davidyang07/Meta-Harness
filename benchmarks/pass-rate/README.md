@@ -8,7 +8,7 @@ Published results live in `benchmarks/results/<experiment-id>/`.
 
 | | |
 |---|---|
-| Task set | `eval/tasks/` — the 5 frozen calibration tasks |
+| Task set | `eval/tasks/` — the 5 frozen search tasks |
 | Trials per task per arm | 20, independent |
 | Arms | `baseline` (control) vs an evolved candidate |
 | Total | 5 × 20 × 2 = **200 task trials** |
@@ -25,8 +25,8 @@ One command runs the whole sequence — evolve, select, measure, verify,
 report — and is the supported way to produce a publishable result:
 
 ```bash
-uv run meta-harness resume-experiment --dry-run   # plan + cost estimate, spends nothing
-uv run meta-harness resume-experiment             # THIS COSTS MONEY
+uv run meta-harness canonical-experiment --dry-run   # plan + cost estimate, spends nothing
+uv run meta-harness canonical-experiment             # THIS COSTS MONEY
 ```
 
 The stages, and why they are in this order:
@@ -40,7 +40,7 @@ The stages, and why they are in this order:
 3. **Measure** this protocol: fresh, independent trials for both arms.
 4. **Generalise** on [`../holdout/`](../holdout/README.md).
 5. **Verify** that a recorded trial replays exactly.
-6. **Report** — regenerate `docs/RESUME_EVIDENCE.md` from the artifacts.
+6. **Report** — regenerate `docs/CAPABILITY_EVIDENCE.md` from the artifacts.
 
 The two halves can still be run separately:
 
@@ -138,12 +138,12 @@ asserts that by signature inspection. The runner prints exactly what the
 trials say:
 
 ```
-Baseline  (baseline): 63/100 = 63.0%
-Candidate (evolved):  75/100 = 75.0%
-Absolute improvement: +12.0 percentage points
-95% CI on the difference: [-1.0, +25.0] pp (wald-95; assumes independent trials)
-95% CI, clustering by task: [-4.0, +23.0] pp (task-cluster-bootstrap-percentile,
-                                              10000 resamples, seed 20260901)
+Baseline  (baseline): NN/100 = NN.N%
+Candidate (evolved):  NN/100 = NN.N%
+Absolute improvement: +N.N percentage points
+95% CI on the difference: [-N.N, +N.N] pp (wald-95; assumes independent trials)
+95% CI, clustering by task: [-N.N, +N.N] pp (task-cluster-bootstrap-percentile,
+                                             10000 resamples, seed 20260901)
 Total trials: 200
 Distinct evaluation tasks (clusters): 5
 
@@ -153,7 +153,10 @@ tasks in hand, and should not be read as an estimate for coding tasks in
 general.
 ```
 
-*(Illustrative formatting only — the numbers above are not a measurement.
+*(Shape of the output only. The values are deliberately left as `N` —
+an earlier revision of this file used a worked example whose delta
+happened to be the figure the project once claimed, and a reader is
+entitled to assume a concrete number in a README came from somewhere.
 The published measurement, once run, lives in
 `benchmarks/results/<experiment-id>/summary.json`.)*
 
@@ -205,8 +208,9 @@ false, `REPORT.md` says so above the number and the CLI exits non-zero.
   raise the cluster count would raise the count without adding evidence,
   and is not done.
 - **Search-set, not holdout.** This measures the five tasks the proposer
-  optimised against, and the resume claim it supports is a search-set
-  claim. Generalisation is a separate, separately-reported measurement:
+  optimised against, so whatever it reports is a search-set number and
+  must be described as one. Generalisation to unseen tasks is a separate,
+  separately-reported measurement:
   [`benchmarks/holdout/`](../holdout/README.md).
 - **Selection is upstream of measurement, not downstream.** The candidate
   is chosen on validation numbers before this protocol runs. Choosing it

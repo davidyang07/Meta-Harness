@@ -1,8 +1,26 @@
-# DEFINITION_OF_DONE.md — the demo arc as the formal acceptance test
+# DEFINITION_OF_DONE.md — the original acceptance script
 
-*A run that satisfies every binary check below is what "done" means.
-This is the authoritative acceptance contract; if the implementation
-disagrees, the implementation is wrong.*
+> **Superseded as the acceptance gate, and partly retracted.** The
+> authoritative gate is now `make verify` (everything provable without
+> credentials, described in the README) and `bash scripts/live_smoke.sh`
+> for the credentialed half. This document is kept because its
+> *structural* checklist is still a good list of things that must work,
+> and because the demo script below records what the system was built to
+> show.
+>
+> **What was removed, and why.** Two of the original criteria required
+> the system to produce specific accuracy values — a "score arc landing
+> within ±5% of expected: 0.62 → 0.70 → 0.66 → 0.74 → 0.80", and a forked
+> branch reaching "≥ 0.83". An acceptance contract that names the numbers
+> the measurement must produce is not an acceptance contract; it is a
+> target, and the natural way to satisfy it is to adjust the eval set
+> until it is met — which is what happened, and has since been undone
+> (see `PROJECT_KNOWLEDGE_BASE.md` §27). Those two bullets are struck
+> below. The illustrative scores in the demo script are left in place as
+> a record of the intended narrative, and are **not** measurements: no
+> pass-rate number has been measured in this repository at all.
+
+*Structural criteria below remain binary and are worth keeping green.*
 
 ---
 
@@ -216,9 +234,16 @@ That's Meta-Harness. One spark."
 The run is "done" iff every box ticks:
 
 - [ ] Every BUILD_ORDER.md DoD command (steps 1–13) exits 0.
-- [ ] Linear score arc lands within ±5% of expected at every iteration:
-      0.62 → 0.70 → 0.66 (rejected) → 0.74 → 0.80.
-- [ ] Forked branch reaches **≥ 0.83** by iter 3′ (target 0.85).
+- ~~Linear score arc lands within ±5% of expected at every iteration:
+      0.62 → 0.70 → 0.66 (rejected) → 0.74 → 0.80.~~ **Struck.** A
+      required score arc is a target; see the note at the top of this
+      file. What replaces it: the run completes, every artifact below is
+      well-formed, and whatever accuracies result are reported as they
+      are.
+- ~~Forked branch reaches **≥ 0.83** by iter 3′ (target 0.85).~~
+      **Struck**, same reason. What replaces it: the fork runs
+      concurrently, in isolation, and produces its own frontier — which
+      is the property the fork feature actually claims.
 - [ ] All **11** SSE event types from `INTERFACES.md` §7.2 fire at
       least once during the run.
 - [ ] The candidate trajectory tree visibly branches when the fork is

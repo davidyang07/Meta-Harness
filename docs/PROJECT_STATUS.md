@@ -5,8 +5,7 @@
 > capability is validated, read [`CAPABILITIES.md`](CAPABILITIES.md); for the
 > current cross-boundary contracts read
 > [`INTERFACES.md`](INTERFACES.md) starting at §0 Amendments. To check
-> the system yourself rather than read about it:
-> `bash scripts/demo_acceptance.sh`.
+> the system yourself rather than read about it: `make verify`.
 
 
 > Last updated: 2026-04-26
@@ -193,9 +192,11 @@ under `eval/holdout/`; CLI coverage lives in `backend/tests/test_cli.py`.
 > **Priority: HIGH** — this is the final acceptance gate.
 
 **What's missing:**
-- [ ] `scripts/demo_acceptance.sh` — exercises the full demo command from `DEFINITION_OF_DONE.md`
-- [ ] Score arc calibration: accuracy should land within ±5% of expected
-- [ ] Fork branches should reach ≥0.83 accuracy
+- [x] `scripts/demo_acceptance.sh` — the LEVEL 1 ladder; `make verify` is
+      the broader gate that supersedes this step
+- ~~Score arc calibration: accuracy should land within ±5% of expected~~
+      — struck; a required score is a target (see DEFINITION_OF_DONE.md)
+- ~~Fork branches should reach ≥0.83 accuracy~~ — struck, same reason
 - [ ] Total runtime < 8 min, cost < $5
 - [ ] Requires `ANTHROPIC_API_KEY` for real Claude proposer runs
 

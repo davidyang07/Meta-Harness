@@ -326,12 +326,15 @@ uv run meta-harness loop --proposer claude --budget 5 --fresh \
 
 ## (13) End-to-end demo dry-run (acceptance)
 
-**Goal.** Pass DEFINITION_OF_DONE.md verbatim. Score arc lands within
-±5% of expected; fork branches reach ≥0.83; total runtime <8 min;
-cost <$5.
+**Goal.** Pass the structural checklist in DEFINITION_OF_DONE.md; total
+runtime <8 min; cost <$5. The original goal also required a specific
+score arc and a forked branch reaching >=0.83 — both struck, because a
+required score is a target and the way to satisfy it is to adjust the
+eval set. See the note at the top of DEFINITION_OF_DONE.md.
 
-**Files.** none new; exercises everything above. Optional: tighten
-calibration on the 5 eval tasks if the score arc drifts.
+**Files.** none new; exercises everything above. Do **not** retune the
+eval tasks to move a score: a task spec may not carry an expected
+outcome, and a test enforces that.
 
 **Done when.**
 ```bash

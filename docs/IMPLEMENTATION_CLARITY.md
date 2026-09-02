@@ -5,8 +5,7 @@
 > capability is validated, read [`CAPABILITIES.md`](CAPABILITIES.md); for the
 > current cross-boundary contracts read
 > [`INTERFACES.md`](INTERFACES.md) starting at §0 Amendments. To check
-> the system yourself rather than read about it:
-> `bash scripts/demo_acceptance.sh`.
+> the system yourself rather than read about it: `make verify`.
 
 
 Purpose: provide one fast, accurate map of what is implemented now, where

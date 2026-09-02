@@ -5,8 +5,7 @@
 > capability is validated, read [`CAPABILITIES.md`](CAPABILITIES.md); for the
 > current cross-boundary contracts read
 > [`INTERFACES.md`](INTERFACES.md) starting at §0 Amendments. To check
-> the system yourself rather than read about it:
-> `bash scripts/demo_acceptance.sh`.
+> the system yourself rather than read about it: `make verify`.
 
 
 *Historical 4-person hackathon coordination plan. This file is useful for
@@ -14,6 +13,20 @@ understanding how work was split during the build, but it is no longer the
 source of truth for current repository status. Use `README.md`,
 `docs/PROJECT_STATUS.md`, `docs/PROJECT_LAYOUT.md`, and
 `docs/INTERFACES.md` for the live contract.*
+
+> **One workstream in here was abandoned deliberately: do not follow it.**
+> Several sections plan an "eval recalibration" — hardening or weakening
+> the five eval tasks until the baseline lands in a chosen band "so the
+> demo arc has headroom", with fallbacks listed for when it does not.
+> That is tuning the measuring instrument until it produces the wanted
+> answer. It was carried out at the time, and has since been reverted:
+> the per-task `baseline_pass_rate` / `best_known_pass_rate` fields are
+> gone from every `task.json`, and
+> `tests/test_experiment.py::test_no_eval_task_declares_an_expected_outcome`
+> fails if any comes back. `docs/PROJECT_KNOWLEDGE_BASE.md` §27 records
+> what happened. The task set is now left where it is and its
+> limitations are stated instead — see
+> `benchmarks/pass-rate/README.md`.
 
 ---
 
