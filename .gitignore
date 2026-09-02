@@ -264,9 +264,11 @@ CLAUDE.md
 /frontend/dashboard/blob-report/
 /frontend/dashboard/.playwright/
 
-# pytest temp root. backend/conftest.py points --basetemp here so the
-# suite never depends on the machine's system temp directory; pytest
-# wipes and recreates it at session start.
+# pytest temp root, used only as a fallback: backend/conftest.py probes
+# candidate roots and prefers <system temp>/meta-harness-pytest, because
+# this checkout is OneDrive-synced and sync locks make atomic replaces
+# fail intermittently inside it. Set META_HARNESS_PYTEST_BASETEMP to
+# choose explicitly.
 /backend/.pytest-tmp/
 
 # Playwright/Next.js generated files that kept reappearing at the repo

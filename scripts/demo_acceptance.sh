@@ -26,7 +26,25 @@ cd "$ROOT"
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; DIM='\033[2m'; NC='\033[0m'
 
+# Exported, not just assigned. Most checks run their body through
+# `bash -c '...'` in single quotes, so $LOG_DIR is expanded by that inner
+# shell rather than this one — unexported it arrived empty, and the three
+# checks that build a path from it silently wrote to the filesystem root:
+#
+#   meta-harness report wandb-check --output /wandb.json
+#   meta-harness report resume-evidence --json > /evidence.json
+#
+# which on Windows hung the ladder at "W&B offline probe" and meant the
+# two evidence checks never read what they claimed to.
 LOG_DIR="$(mktemp -d)"
+# Git Bash's mktemp returns an MSYS path (/tmp/tmp.XXXX). Bash writes there
+# happily, but the Windows Python these checks invoke resolves /tmp/... to
+# C:\tmp\... and cannot find the file bash just wrote. Hand every
+# consumer a native path.
+if command -v cygpath >/dev/null 2>&1; then
+  LOG_DIR="$(cygpath -w "$LOG_DIR")"
+fi
+export LOG_DIR
 API_PORT="${API_PORT:-8765}"
 API_URL="http://127.0.0.1:${API_PORT}"
 RUN_NAME="acceptance-$(date +%s)"
