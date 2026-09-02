@@ -185,3 +185,72 @@ def test_holdout_task_files_well_formed() -> None:
         assert spec["id"] == task
         assert "instruction" in spec
         assert "test_command" in spec
+
+
+# ── the W&B probe may not downgrade committed evidence ────────────────
+
+
+def _probe_result(*, installed: bool) -> dict:
+    return {
+        "checked_at": "2026-01-01T00:00:00+00:00",
+        "mode": "offline",
+        "wandb_installed": installed,
+        "wandb_version": "0.29.0" if installed else None,
+        "ok": True,
+        "logged": 3 if installed else 0,
+        "run_url": None,
+        "detail": "probe",
+    }
+
+
+def test_wandb_check_refuses_to_downgrade_the_committed_artifact(monkeypatch):
+    """A probe from an env without the extra must not replace the evidence.
+
+    `docs/evidence/wandb-offline.json` records that an offline run was
+    really created. Running the probe in a base checkout produces
+    `logged: 0`, and writing that over the artifact would quietly swap a
+    supported claim for a weaker one, with the run that supported the
+    stronger one gone. This was not hypothetical -- it happened by simply
+    running the command.
+    """
+    from app.meta_harness import tracking as trk
+
+    artifact = REPO_ROOT / "docs" / "evidence" / "wandb-offline.json"
+    before = artifact.read_bytes()
+
+    monkeypatch.setattr(trk, "offline_probe", lambda: _probe_result(installed=False))
+    result = runner.invoke(app, ["report", "wandb-check"])
+
+    assert result.exit_code == 1, result.output
+    assert "Refusing to overwrite" in result.output
+    assert artifact.read_bytes() == before, "the committed artifact was modified"
+
+
+def test_wandb_check_writes_the_artifact_when_wandb_really_ran(
+    monkeypatch, tmp_path: Path
+):
+    """The guard is about provenance, not about blocking the command."""
+    from app.meta_harness import tracking as trk
+
+    monkeypatch.setattr(trk, "offline_probe", lambda: _probe_result(installed=True))
+    destination = tmp_path / "wandb.json"
+    result = runner.invoke(
+        app, ["report", "wandb-check", "--output", str(destination)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(destination.read_text())["logged"] == 3
+
+
+def test_wandb_check_can_always_record_elsewhere(monkeypatch, tmp_path: Path):
+    """--output is the documented way out, and must not be blocked."""
+    from app.meta_harness import tracking as trk
+
+    monkeypatch.setattr(trk, "offline_probe", lambda: _probe_result(installed=False))
+    destination = tmp_path / "probe.json"
+    result = runner.invoke(
+        app, ["report", "wandb-check", "--output", str(destination)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(destination.read_text())["wandb_installed"] is False

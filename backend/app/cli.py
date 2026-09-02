@@ -2028,10 +2028,15 @@ def report_version_graph(
         raise typer.Exit(1)
 
 
+#: The committed W&B evidence artifact. Only a probe that actually
+#: exercised wandb may replace it; see ``report_wandb_check``.
+DEFAULT_WANDB_EVIDENCE = "docs/evidence/wandb-offline.json"
+
+
 @report_app.command("wandb-check")
 def report_wandb_check(
     output: str = typer.Option(
-        "docs/evidence/wandb-offline.json",
+        DEFAULT_WANDB_EVIDENCE,
         "--output",
         help="Where to write the probe result.",
     ),
@@ -2043,12 +2048,39 @@ def report_wandb_check(
     records that plainly rather than failing — the integration is
     optional by design, and "the repository runs without it" is exactly
     what the row in the evidence document asserts.
+
+    Writing that result to the *committed* evidence artifact is a
+    different matter, and is refused. ``docs/evidence/wandb-offline.json``
+    records that an offline run was actually created (``logged: 3``); a
+    probe from an environment without the extra installed would replace
+    it with ``logged: 0`` and quietly downgrade committed evidence to a
+    weaker claim, with the run that supported the stronger one gone. Use
+    ``--output`` to record such a probe somewhere else, or install the
+    extra (``uv sync --extra wandb``) to refresh the artifact for real.
     """
     from app.meta_harness import runs as runs_mod
     from app.meta_harness import tracking as trk
 
     result = trk.offline_probe()
-    runs_mod.write_json_atomic(_abs(output), result)
+    destination = _abs(output)
+
+    if (
+        not result.get("wandb_installed")
+        and destination.resolve() == _abs(DEFAULT_WANDB_EVIDENCE).resolve()
+        and destination.exists()
+    ):
+        typer.echo(json.dumps(result, indent=2))
+        typer.secho(
+            f"Refusing to overwrite {DEFAULT_WANDB_EVIDENCE}: wandb is not "
+            "installed here, so this probe cannot support the claim the "
+            "committed artifact makes. Run `uv sync --extra wandb` to "
+            "refresh it, or pass --output to record this probe elsewhere.",
+            err=True,
+            fg=typer.colors.YELLOW,
+        )
+        raise typer.Exit(1)
+
+    runs_mod.write_json_atomic(destination, result)
     typer.echo(json.dumps(result, indent=2))
     if not result["ok"]:
         raise typer.Exit(1)
