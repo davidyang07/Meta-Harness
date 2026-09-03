@@ -18,10 +18,11 @@ The ordering is the methodology, and it is deliberate:
 5. **Verify** that a recorded trial replays exactly.
 6. **Report** — derive the evidence document from the artifacts.
 
-Nothing here compares a result to a target. If the measured delta is
-below the resume's claim, the pipeline records the measured delta and the
-evidence document marks the claim unsupported. There is no branch in this
-file that reruns, reselects, or filters on the final number.
+Nothing here compares a result to a target. The pipeline records
+whatever delta was measured; a capability claim with no artifact behind
+it is marked unsupported by the evidence document rather than softened
+here. There is no branch in this file that reruns, reselects, or filters
+on the final number.
 """
 
 from __future__ import annotations

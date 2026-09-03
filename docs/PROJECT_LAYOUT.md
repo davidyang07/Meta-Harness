@@ -6,7 +6,7 @@
 > current cross-boundary contracts read
 > [`INTERFACES.md`](INTERFACES.md) starting at §0 Amendments. To check
 > the system yourself rather than read about it:
-> `bash scripts/demo_acceptance.sh`.
+> `make verify`.
 
 
 The repo is a **uv workspace** with two Python packages (`sdk/`, `backend/`),
@@ -19,6 +19,7 @@ meta-harness/                                              # Repo root (uv works
 ├── README.md                                              # Setup + 60s pitch + prereq list
 ├── LICENSE
 ├── .gitignore
+├── Makefile                                               # `make verify` and the routine entry points
 ├── pyproject.toml                                         # uv workspace: members = [sdk, backend]
 ├── ARCHITECTURE_SECTION_1.md                              # Reference: locked architecture
 ├── relay_metaharness_v7.md                                # Reference: v7 canonical build doc
@@ -26,11 +27,14 @@ meta-harness/                                              # Repo root (uv works
 ├── relay_v7_appendix_b_metaharness_internals.md           # Reference: Stanford repo deep-dive
 ├── relay_v7_appendix_c_inner_loop.md                      # Reference: 5-phase coding agent
 │
-├── docs/                                                  # Phase-0 execution artifacts
+├── docs/
 │   ├── PROJECT_LAYOUT.md                                  # ← this file
 │   ├── INTERFACES.md                                      # All cross-component contracts
-│   ├── BUILD_ORDER.md                                     # Topological build steps + DoD
-│   └── DEFINITION_OF_DONE.md                              # Demo arc as acceptance test
+│   ├── CAPABILITIES.md                                    # Capability → code → validating command
+│   ├── CAPABILITY_EVIDENCE.md                             # GENERATED; PASS/FAIL/UNSUPPORTED per claim
+│   ├── evidence/                                          # GENERATED artifacts the above reads
+│   ├── BUILD_ORDER.md                                     # Topological build steps + DoD (historical)
+│   └── DEFINITION_OF_DONE.md                              # Original acceptance script (superseded)
 │
 ├── sdk/                                                   # User library: pip install meta_harness
 │   ├── pyproject.toml                                     # name="meta_harness"; library only, no CLI

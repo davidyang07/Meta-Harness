@@ -330,10 +330,12 @@ def test_the_bootstrap_takes_no_target_or_expected_improvement():
 
 
 def test_no_target_improvement_can_reach_the_statistics():
-    """12pp is a claim about the result, never an input to it.
+    """An improvement figure is an output of the statistics, never an input.
 
-    The statistics surface is searched for the resume's number so it
-    cannot be smuggled in as a default, a constant or a nudge.
+    The statistics surface is searched for any hard-coded improvement
+    literal so one cannot be smuggled in as a default, a constant or a
+    nudge. 12pp is used here as the representative example because it is
+    the figure this project has been tempted to assume.
     """
     statistics_source = "".join(
         inspect.getsource(fn)
