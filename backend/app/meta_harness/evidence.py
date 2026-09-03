@@ -630,6 +630,14 @@ def _branching_check(version_evidence: dict[str, Any] | None) -> Check:
     )
 
 
+#: Replay is only as sound as the boundary it replays through. The
+#: verification artifact shows that *the recorded graph* replayed
+#: exactly; it cannot show that a later edit kept every world-crossing
+#: behind ``effects``. This static check does, so it is cited with the
+#: artifact rather than in place of it.
+BOUNDARY_TEST = "backend/tests/test_effects_boundary.py"
+
+
 def _replay_check(repo_root: Path) -> Check:
     """Exact recorded-execution replay, from a verification artifact.
 
@@ -656,7 +664,7 @@ def _replay_check(repo_root: Path) -> Check:
                 "--record` then `meta-harness verify-replay <dir>`, or as "
                 "part of `meta-harness canonical-experiment`."
             ),
-            evidence=["backend/tests/test_exact_replay.py"],
+            evidence=["backend/tests/test_exact_replay.py", BOUNDARY_TEST],
         )
 
     from_checkpoint = int(report.get("replays_from_checkpoint") or 0)
@@ -714,7 +722,7 @@ def _replay_check(repo_root: Path) -> Check:
             + (f"(s): {', '.join(models)}" if models else ": unrecorded")
             + "."
         ),
-        evidence=[artifact],
+        evidence=[artifact, BOUNDARY_TEST],
     )
 
 

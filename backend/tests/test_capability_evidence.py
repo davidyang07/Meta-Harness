@@ -463,7 +463,12 @@ def test_a_missing_replay_artifact_points_at_the_command_that_makes_one():
     check = ev._replay_check(Path("/nonexistent-repo"))
     assert check.status == ev.UNSUPPORTED
     assert "verify-replay" in check.detail
-    assert check.evidence == ["backend/tests/test_exact_replay.py"]
+    # Both offline covers: the run-level replay test and the static guard
+    # that keeps every world-crossing behind the effects boundary.
+    assert check.evidence == [
+        "backend/tests/test_exact_replay.py",
+        ev.BOUNDARY_TEST,
+    ]
 
 
 def test_a_replay_report_with_only_whole_run_replays_is_not_a_pass(tmp_path: Path):
