@@ -409,7 +409,7 @@ decorator. The single live-model test skips itself without
 | Checkpointer | `AsyncPostgresSaver` (langgraph-checkpoint-postgres) |
 | Database | PostgreSQL 16 |
 | Containers | Docker + Compose — backend image (multi-stage, non-root, healthchecked) beside Postgres, built and smoke-tested in CI |
-| Backend API | FastAPI 0.115+ + Uvicorn, Pydantic 2 models on every request and response |
+| Backend API | FastAPI 0.115+ + Uvicorn; every request body is parsed and validated by a Pydantic 2 model (`CreateRunRequest`, `ForkRequest`, `MemorySearchRequest`). Read endpoints and the SSE stream return plain JSON |
 | Inner-loop LLM | Claude Haiku 4.5 by default — cheap and rate-limit-friendly; override with `META_HARNESS_INNER_MODEL` |
 | Proposer | Claude Code CLI subprocess (subscription auth), primed with `SKILL.md` via `--append-system-prompt` |
 | Experiment tracking | Weights & Biases, optional — disabled, offline and online modes; `tracking.py` is the only module allowed to import it |
