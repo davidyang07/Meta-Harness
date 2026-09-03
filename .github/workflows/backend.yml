@@ -116,6 +116,7 @@ jobs:
           uv run pytest -q --no-header \
             tests/test_recording.py \
             tests/test_exact_replay.py \
+            tests/test_effects_boundary.py \
             tests/test_inner_messages.py \
             tests/test_tracking.py \
             tests/test_pipeline.py \
