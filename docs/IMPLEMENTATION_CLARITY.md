@@ -61,13 +61,28 @@ Key files:
 - `backend/app/api/forks.py`
 - `backend/app/meta_harness/branches.py`
 
-## Intentional placeholders still present
+## Data surfaces are backed by real endpoints
 
-- Diff and test-output fetch helpers in frontend return `null` when no backend
-  endpoint is available.
-- Some UI panels can show empty-state placeholders during real-run warmup.
-- Real token/cost aggregation for benchmark summaries remains limited in parts
-  of the backend path (see corresponding notes in project docs).
+Every panel in the dashboard reads from a backend route; none renders
+fabricated content.
+
+- Candidate diff is served by
+  `GET /runs/{run_id}/candidates/{candidate_name}/diff`
+  (`backend/app/api/runs.py`), computed against the candidate's own source
+  snapshot.
+- Candidate test output is served by
+  `GET /runs/{run_id}/candidates/{candidate_name}/test-output`, read from the
+  candidate's trial artifacts.
+- Token and cost accounting is computed in
+  `backend/app/meta_harness/metrics.py` and carried on every trial row.
+  Unmeasured is `null`, never `0`, so an unmeasured candidate cannot be
+  mistaken for a free one.
+- `mode` in the dashboard is transport ("is a backend answering"), not
+  provenance. Provenance lives on `run.metricsSource` and is surfaced in the
+  status bar, so a live mock-bench run is never rendered as measured.
+
+A panel with no data yet renders its empty state. That is the absence of a
+result, not a stand-in for one.
 
 ## Quick verification checklist
 
