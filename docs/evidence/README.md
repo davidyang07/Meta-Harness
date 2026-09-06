@@ -1,8 +1,9 @@
 # Evidence artifacts
 
-Machine-written inputs to [`../CAPABILITY_EVIDENCE.md`](../CAPABILITY_EVIDENCE.md).
-Every file here is produced by a command, not by hand, and the evidence
-document reads them rather than describing them.
+Machine-written inputs to the capability-evidence derivation
+(`uv run meta-harness report capability-evidence`). Every file here is
+produced by a command, not by hand, and the derivation reads them rather
+than describing them.
 
 | File | Written by | Settles |
 |---|---|---|
@@ -10,9 +11,8 @@ document reads them rather than describing them.
 | `version-graph.json` | `uv run meta-harness report version-graph <run-name>` | the checkpoint DAG, branch refs, immutability |
 | `wandb-offline.json` | `uv run meta-harness report wandb-check` | the W&B adapter works offline, and without W&B |
 
-A missing file is not a soft pass. `CAPABILITY_EVIDENCE.md` reports the
-corresponding claim as `UNSUPPORTED` and names the command that would
-produce it.
+A missing file is not a soft pass: the corresponding claim reports
+`UNSUPPORTED` and names the command that would produce it.
 
 ## What each one has to say to count
 
@@ -29,16 +29,13 @@ than passing on the easier half. Every replay reports its five checks:
 `tape_fully_consumed`.
 
 `recorded_models` says what produced the model turns on the tape, and it
-is reproduced in the evidence document's row. The committed artifact
-currently reads `scripted-offline`: it was produced by
-`scripts/record_replay_evidence.py`, which runs the real inner graph, the
-real six tools, the real pytest verify and real Postgres checkpoints, and
-scripts only the model's side of the conversation — because this
-environment has no provider credentials. That demonstrates the replay
-machinery, which is what the claim is about. It is not a stand-in for the
-pass-rate measurement, which stays `UNSUPPORTED` until a provider run
-happens. `meta-harness canonical-experiment --record-trials N` overwrites
-this artifact with recordings of real provider calls.
+is reproduced in the derived row. A tape produced by
+`scripts/record_replay_evidence.py` reads `scripted-offline`: that script
+runs the real inner graph, the real six tools, the real pytest verify and
+real Postgres checkpoints, and scripts only the model's side of the
+conversation, which is what the replay claim is about.
+`meta-harness canonical-experiment --record-trials N` overwrites this
+artifact with recordings of real provider calls.
 
 **`version-graph.json`** — `immutable: true`, plus the checkpoint DAG,
 the branch registry with each branch's fork point, and each branch's

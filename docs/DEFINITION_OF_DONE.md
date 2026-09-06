@@ -136,8 +136,7 @@ overfitting; the proposer never sees holdout tasks during search.
 
 ### Cost & runtime
 
-Not asserted here, because nothing has been measured. Every real run
-records what it actually spent:
+Every real run records what it actually spent:
 
 - per trial: `llm_calls`, `input_tokens`, `output_tokens`,
   `total_tokens`, `cost_usd`, `wall_time_s` in the trace's

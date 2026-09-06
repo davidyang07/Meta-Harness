@@ -9,10 +9,9 @@
 > original build as a single deep walkthrough of every layer, and most of
 > it still describes the code accurately. It is *not* the authority on
 > current behaviour. For that, read — in this order —
-> [`INTERFACES.md`](INTERFACES.md) (§0 Amendments first),
-> [`CAPABILITIES.md`](CAPABILITIES.md), and the generated
-> [`CAPABILITY_EVIDENCE.md`](CAPABILITY_EVIDENCE.md). Where this document
-> and those disagree, they are right. §27 has been rewritten; the rest
+> [`INTERFACES.md`](INTERFACES.md) (§0 Amendments first) and
+> [`CAPABILITIES.md`](CAPABILITIES.md). Where this document and those
+> disagree, they are right. §27 has been rewritten; the rest
 > retains its original build-time voice, including numbers that were
 > observed once during development and have never been published as
 > measurements.
@@ -3380,7 +3379,7 @@ curl -s -XPOST http://localhost:8000/memory/coding-agent/search \
 
 ---
 
-## 27. Real, mocked, and unmeasured — the honest accounting
+## 27. How real, mocked and measured are kept apart
 
 *Rewritten. The two sections that used to sit here (a real-vs-mock table
 written during the build, and a per-task "adversarial-test design log")
@@ -3426,16 +3425,14 @@ rejected by `experiment.check_protocol_equality`, and
 `experiment.cluster_bootstrap_diff_ci` raises rather than bootstrap one
 into an interval.
 
-### 27.3 Unmeasured, and named as such
+### 27.3 Measurement and capability are different claims
 
-No pass-rate number has been measured in this repository. The runner, both
-committed protocols and the whole evidence pipeline exist and are tested;
-the experiment needs provider credentials and has not been run.
-`docs/CAPABILITY_EVIDENCE.md` reports those rows as `UNSUPPORTED`.
-
-That is a missing *measurement*, not a missing *capability*, and the two
-are not interchangeable — see `docs/CAPABILITIES.md`, which separates
+An implemented measurement pipeline is not a measurement, and the two are
+not interchangeable — see `docs/CAPABILITIES.md`, which separates
 "implemented", "needs an external runtime dependency" and "measured".
+The runner, both committed protocols and the whole evidence pipeline
+exist and are tested; `meta-harness canonical-experiment` produces the
+number.
 
 ---
 
@@ -3454,7 +3451,6 @@ Canonical sources, in order of authority:
 
 - `docs/INTERFACES.md` — every cross-boundary contract (§0 Amendments first)
 - `docs/CAPABILITIES.md` — capability → code → test → evidence
-- `docs/CAPABILITY_EVIDENCE.md` — generated; the current PASS/FAIL/UNSUPPORTED state
 - `ARCHITECTURE_SECTION_1.md` — the locked architecture
 - `relay_metaharness_v7.md` + appendices — historical design records
 - This document — the synthesis, historical in tone, current in the

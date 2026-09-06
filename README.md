@@ -42,8 +42,13 @@ tree live.
 
 ## Architecture
 
-Two nested state machines. The outer one evolves the inner one's source
-code; the inner one is a coding agent that runs per candidate.
+Two nested state machines. The **outer** one
+([`outer.py`](backend/app/meta_harness/outer.py)) evolves the inner one's
+source code, its `propose` node spawning a `claude` CLI subprocess that
+reads the branch's own traces, evolution log and Pareto frontier before
+writing a new `agents/<name>.py`. The **inner** one
+([`inner.py`](backend/app/meta_harness/inner.py)) is one coding-agent run
+per candidate.
 
 ```mermaid
 flowchart TB
@@ -81,37 +86,21 @@ flowchart TB
     API --> DASH["Next.js dashboard"]
 ```
 
-**Outer machine** (`backend/app/meta_harness/outer.py`) — `propose →
-validate → benchmark → update_frontier`, looping while budget remains.
-`propose` spawns a `claude` CLI subprocess that reads the branch's own
-traces, evolution log and Pareto frontier, then writes a new
-`agents/<name>.py`.
-
-**Inner machine** (`backend/app/meta_harness/inner.py`) — `orient → plan →
-act → verify → submit`, with a conditional edge from `verify` back to
-`act`.
-
-**A fixed contract and an evolvable shape.** The six tools in `tools.py`
+**A fixed contract, an evolvable shape.** The six tools in `tools.py`
 (`read_file`, `apply_patch`, `write_file`, `run_bash`, `grep_search`,
 `task_complete`) are the contract with the evaluator and cannot be
 modified by candidates. The search space is the **11 override points** on
 `CodingAgentHarness` — turn budget, retry policy, system prompt, plan
-template, tool-result formatting, the `verify → act` loop-back predicate,
-and so on. A candidate subclasses `CodingAgentHarness` and overrides a
-subset.
+template, tool-result formatting, the `verify → act` loop-back predicate.
+A candidate subclasses it and overrides a subset.
 
-**Everything that touches the world goes through `effects.py`.** Model
-calls, tool dispatch, the workspace scan, the verify subprocess, the
-final-file snapshot and every trace write. That single boundary is what
-makes recording and exact replay possible.
-
-### Recorded replay
-
-When a run is started with `--record`, every crossing of the `effects.py`
-boundary is appended to a tape. Replaying that run re-executes the real
-graph, the real nodes and the real tools, but each effect is served from
-the tape instead of the world. The replay fails loudly unless all five
-hold: `no_divergence` · `node_sequence_identical` ·
+**Every crossing into the world goes through `effects.py`** — model calls,
+tool dispatch, the workspace scan, the verify subprocess, the final-file
+snapshot, every trace write. That single boundary is what makes exact
+replay possible: under `--record` each crossing is appended to a tape, and
+replay re-executes the real graph, nodes and tools with every effect
+served from the tape instead of the world. It fails loudly unless all five
+hold — `no_divergence` · `node_sequence_identical` ·
 `per_step_state_hashes_identical` · `final_state_byte_identical` ·
 `tape_fully_consumed`.
 
@@ -148,8 +137,8 @@ Four operations are called "replay"; only one earns the unqualified phrase
 
 ## Run it locally
 
-**Prerequisites** — Python 3.11+ and [uv](https://github.com/astral-sh/uv);
-Docker (for Postgres); Node.js 20+ for the dashboard. For live model runs:
+**Prerequisites** — Python 3.11+ and [uv](https://github.com/astral-sh/uv),
+Docker (for Postgres), Node.js 20+ (for the dashboard). Live runs also need
 an `ANTHROPIC_API_KEY` and the
 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/overview)
 (`claude`) for the real proposer.
@@ -157,65 +146,56 @@ an `ANTHROPIC_API_KEY` and the
 ```bash
 git clone https://github.com/davidyang07/Meta-Harness.git
 cd Meta-Harness
-cp .env.example .env                                        # Include API Keys
+cp .env.example .env                                 # ANTHROPIC_API_KEY for live runs
 uv sync
 docker compose -f infra/docker-compose.yml up -d postgres
 
-make verify                                                 # everything provable without credentials
+make verify                                          # everything provable without credentials
 ```
 
-### Deterministic demo — no API key, no cost
-
-Mock proposer, mock benchmark. Every synthetic score is labelled
-`metrics_source: "mock"` in artifacts, the API and the dashboard status bar.
+The loop and the dashboard run with no API key and no cost — synthetic
+scores are labelled `metrics_source: "mock"` everywhere they surface:
 
 ```bash
 uv run meta-harness loop --proposer mock --mock-bench --budget 2 --fresh
 
-uv run meta-harness serve --port 8000                       # terminal 1
-cd frontend/dashboard && npm install && npm run dev         # terminal 2
+uv run meta-harness serve --port 8000                # terminal 1
+cd frontend/dashboard && npm install && npm run dev  # terminal 2
 ```
 
 > Start the backend with `meta-harness serve`, never a bare
-> `uvicorn app.main:app`. uvicorn selects Windows' `ProactorEventLoop`,
+> `uvicorn app.main:app`: uvicorn selects Windows' `ProactorEventLoop`,
 > which psycopg cannot use. `GET /health` reports `persistence` and
-> `persistence_error` so a degraded backend is never silent.
+> `persistence_error`, so a degraded backend is never silent.
 
-### Live model demo — needs credentials, small cost
+With credentials, the same loop runs against live models, and the whole
+stack runs in Docker:
 
 ```bash
 uv run meta-harness inner --task task-001-fix-typo --candidate baseline
 uv run meta-harness loop --proposer claude --budget 1 --fresh --mock-bench
-```
 
-### The whole stack in Docker
-
-```bash
 docker compose -f infra/docker-compose.yml up -d --build    # postgres + backend
-curl localhost:8000/health
-docker compose -f infra/docker-compose.yml down             # stop (add -v to wipe data)
 ```
 
 ### Other commands worth knowing
 
 ```bash
-uv run meta-harness checkpoints <run-name>
-uv run meta-harness fork <run-name> --checkpoint <id> --mod proposer_prior="try X"
-uv run meta-harness resume <run-name>            # FRESH model calls; not a replay
+uv run meta-harness checkpoints <run>             # checkpoint history
+uv run meta-harness fork <run> --checkpoint <id> --mod proposer_prior="try X"
+uv run meta-harness resume <run>                  # FRESH model calls; not a replay
 
 uv run meta-harness inner --task task-001-fix-typo --candidate baseline --record
-uv run meta-harness replay <run-name> --checkpoint <id> --verify
-uv run meta-harness verify-replay runs/<run-name>
+uv run meta-harness replay <run> --checkpoint <id> --verify    # exact replay
+uv run meta-harness verify-replay runs/<run>
 
 uv run meta-harness benchmark --candidate <name> --trials 5
-uv run meta-harness canonical-experiment --dry-run   
-uv run meta-harness canonical-experiment             
+uv run meta-harness canonical-experiment --dry-run  # plan + cost, spends nothing
+uv run meta-harness canonical-experiment            # evolve → select → measure → report
+uv run meta-harness report version-graph <run>      # the checkpoint DAG as evidence
+uv run meta-harness memory list                     # cross-run patterns
 
-uv run meta-harness report capability-evidence
-uv run meta-harness report version-graph <run-name>
-uv run meta-harness memory list                      # cross-run patterns
-
-uv sync --extra wandb                                # optional tracking, off by default
+uv sync --extra wandb                               # optional W&B tracking, off by default
 WANDB_MODE=offline uv run meta-harness loop --wandb --proposer mock --mock-bench --budget 2
 ```
 
@@ -225,36 +205,33 @@ WANDB_MODE=offline uv run meta-harness loop --wandb --proposer mock --mock-bench
 make verify                                # the full credential-free ladder
 make verify-fast                           # skips the Docker and dashboard builds
 ONLY=postgres bash scripts/verify.sh       # one stage
-
 cd backend && uv run pytest tests/ -q      # the suite alone
 ```
 
-`make verify` runs the backend suite, the Postgres-backed suites, replay,
-branching, benchmark protocol validity, W&B offline, capability evidence,
-the Docker image, repository hygiene and the dashboard build. CI runs the
-same ladder on every push with `ANTHROPIC_API_KEY` deliberately empty,
-plus Playwright end-to-end projects against fixtures and a live backend.
+`make verify` covers the backend suite, the Postgres-backed suites, replay,
+branching, benchmark protocol validity, W&B offline, the Docker image,
+repository hygiene and the dashboard build. CI runs the same ladder on
+every push with `ANTHROPIC_API_KEY` deliberately empty, plus Playwright
+end-to-end projects against fixtures and a live backend.
 
 ---
 
 ## Evaluation
 
-The canonical protocol is committed at
-[`benchmarks/pass-rate/`](benchmarks/pass-rate/): 5 frozen search tasks ×
-20 independent trials × 2 arms. A separate generalisation protocol
-([`benchmarks/holdout/`](benchmarks/holdout/)) runs 2 unseen tasks × 20
-trials × 2 arms. Candidate selection uses only the validation accuracy
-measured *during* evolution; the canonical experiment then runs afterwards
-with fresh independent trials.
+Two committed protocols: [`benchmarks/pass-rate/`](benchmarks/pass-rate/)
+runs 5 frozen search tasks × 20 independent trials × 2 arms, and
+[`benchmarks/holdout/`](benchmarks/holdout/) runs 2 unseen tasks × 20
+trials × 2 arms for generalisation. Candidate selection uses only the
+validation accuracy measured *during* evolution, so the final experiment's
+trials cannot influence which candidate they measure.
 
 Every reported field is derived from the raw `*-results.jsonl` rows by
-`experiment.summarize()` — pass rates with pass and trial counts, the
+`experiment.summarize()`: pass rates with pass and trial counts, the
 absolute percentage-point delta, per-task outcomes, a task-cluster
 bootstrap 95% interval under a deterministic seed, and tokens, cost and
-wall time. The guards are tests, not conventions: no target can reach the
-computation, mock rows cannot become results, held-out tasks cannot
-influence selection, both arms must have run one protocol, and CI
-re-derives every published summary from its committed rows.
+wall time. The guards are tests, not conventions — no target can reach the
+computation, mock rows cannot become results, and CI re-derives every
+published summary from its committed rows.
 
 ---
 
@@ -272,7 +249,7 @@ meta-harness/
 │       ├── experiment.py · pipeline.py        # two-arm protocols, evolve → measure → report
 │       ├── effects.py · recording.py · replay.py
 │       ├── branches.py · versioning.py · persistence.py · runs.py
-│       └── frontier.py · memory.py · tracking.py · evidence.py · sandbox.py
+│       └── frontier.py · memory.py · tracking.py · sandbox.py
 ├── frontend/dashboard/                        # Next.js 16 dashboard (+ e2e/)
 ├── benchmarks/                                # committed protocols + published results
 ├── eval/tasks/ · eval/holdout/                # 5 frozen search tasks, 2 unseen tasks
@@ -304,30 +281,12 @@ runs/<run_id>/
 
 Sandboxing is **process isolation only**: a fresh temp-directory workspace
 per trial, a wall-clock timeout, and — on Unix — `RLIMIT_CPU` /
-`RLIMIT_AS`. There is no container, network restriction or binary
-allowlist. Eval `test_command`s run with `shell=True` as trusted
+`RLIMIT_AS`. Eval `test_command`s run with `shell=True` as trusted
 repository content, and the proposer runs with
-`--dangerously-skip-permissions` in the repository working directory —
+`--dangerously-skip-permissions` in the repository working directory, so
 treat a run as "this repo executes model-written code". Path inputs
-arriving over HTTP are pattern-checked and containment-checked before
-being joined to a path.
-
----
-
-## Documentation
-
-| Doc | When to read |
-|---|---|
-| [`docs/INTERFACES.md`](docs/INTERFACES.md) | **Always** — every cross-boundary contract. Start at §0 Amendments |
-| [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) | Capability → code → the command that validates it |
-| [`docs/CAPABILITY_EVIDENCE.md`](docs/CAPABILITY_EVIDENCE.md) | Generated — the current state of every claim |
-| [`benchmarks/pass-rate/README.md`](benchmarks/pass-rate/README.md) | Before running or citing a benchmark |
-| [`ARCHITECTURE_SECTION_1.md`](ARCHITECTURE_SECTION_1.md) · [`docs/PROJECT_LAYOUT.md`](docs/PROJECT_LAYOUT.md) | Orientation |
-| [`skills/meta-harness-coding-agent/SKILL.md`](skills/meta-harness-coding-agent/SKILL.md) | What the proposer actually reads |
-
-**`docs/INTERFACES.md` is the contract.** Any change touching a state
-schema, JSON shape, REST endpoint, SSE event, tool I/O or override point
-updates that document in the same change.
+arriving over HTTP are pattern- and containment-checked before being
+joined to a path.
 
 ---
 
@@ -338,12 +297,6 @@ updates that document in the same change.
   Harnesses*, [project page](https://yoonholee.com/meta-harness/), and
   the reference framework at
   [stanford-iris-lab/meta-harness](https://github.com/stanford-iris-lab/meta-harness).
-- The LangChain team, for LangGraph's time-travel primitives — they make
-  the linear-to-tree mapping possible without a bespoke orchestration
-  layer.
-- Anthropic, for the Claude Code CLI's `--append-system-prompt` and
-  stream-json output, which let the filesystem-mediated proposer pattern
-  be reproduced directly.
 
 ## License
 

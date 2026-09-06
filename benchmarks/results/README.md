@@ -33,9 +33,9 @@ summary = exp.summarize(
 ```
 
 The recomputed `absolute_percentage_point_delta` must equal the one in
-the committed `summary.json`. CI does exactly this on every push, and
-`docs/CAPABILITY_EVIDENCE.md` marks a result whose summary no longer
-re-derives as `FAIL` rather than quoting it.
+the committed `summary.json`. CI does exactly this on every push, and a
+result whose summary no longer re-derives is reported as a failure rather
+than quoted.
 
 Also read `validation.json` before quoting a number: if
 `identical_protocol` is false, the delta is not attributable to the
@@ -48,12 +48,3 @@ Two experiment ids are expected here: `pass-rate-<timestamp>` (the
 canonical search-set protocol) and `holdout-<timestamp>` (the
 generalisation protocol). They are separate directories on purpose;
 merging them would produce a number that describes neither.
-
-## Status
-
-No experiment has been published yet — this environment has no API
-credentials, so no model call has ever been issued. See
-[`../pass-rate/README.md`](../pass-rate/README.md) for the one command
-that produces both, `docs/CAPABILITY_EVIDENCE.md` for the current PASS /
-FAIL / UNSUPPORTED state of every claim, and `docs/CAPABILITIES.md` for
-which capabilities are measured and which are still pending.

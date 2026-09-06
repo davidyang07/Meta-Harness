@@ -1,8 +1,8 @@
 """The measurement pipeline, end to end, without a provider.
 
 ``meta-harness canonical-experiment`` is the command that produces every
-number in `docs/CAPABILITY_EVIDENCE.md`, and it will be run once, blind, on a
-machine with credentials and a real bill. So the parts that do not need a
+number this project reports, and it will be run once, blind, on a machine
+with credentials and a real bill. So the parts that do not need a
 provider — config loading, protocol matching, running both arms, the
 methodology checks, the artifact layout, the tracker wiring, and the
 evidence derivation that reads the result back — are exercised here with

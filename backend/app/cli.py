@@ -1580,7 +1580,7 @@ def canonical_experiment(
 ) -> None:
     """Evolve, select on validation only, measure, verify replay, report.
 
-    The one command behind every number in `docs/CAPABILITY_EVIDENCE.md`:
+    The one command behind every number this project reports:
 
     1. evolve candidate harnesses on the search set with the real proposer;
     2. select the best candidate using ONLY the validation accuracy the
@@ -1589,7 +1589,7 @@ def canonical_experiment(
     3. run the canonical two-arm experiment (5 tasks x 20 trials x 2 arms);
     4. run the two-arm holdout experiment on tasks the proposer never saw;
     5. verify a recorded trial replays exactly;
-    6. regenerate the capability-evidence document from the artifacts.
+    6. derive the capability-evidence document from the artifacts.
 
     THIS ISSUES REAL LLM CALLS AND COSTS MONEY. Use ``--dry-run`` first.
 
@@ -1900,7 +1900,7 @@ def report_capability_evidence(
     output: str = typer.Option(
         None,
         "--output",
-        help="Where to write the document. Defaults to docs/CAPABILITY_EVIDENCE.md.",
+        help="Where to write the document. Defaults to evidence.DOCUMENT_PATH.",
     ),
     check: bool = typer.Option(
         False,

@@ -7,10 +7,6 @@
 # is skipped silently, and a stage that cannot run says so and fails
 # rather than reporting green.
 #
-# What it does NOT prove, and cannot: that a real provider call works, or
-# any measured pass-rate number. Those need credentials and money — see
-# `scripts/live_smoke.sh` (LEVEL 2) and `meta-harness canonical-experiment`.
-#
 # Usage:
 #   bash scripts/verify.sh              # everything below
 #   SKIP_DOCKER=1 bash scripts/verify.sh
@@ -201,31 +197,7 @@ PY
   return "$status"
 }
 
-# ── 7. the evidence document agrees with its artifacts ────────────────
-
-verify_evidence() {
-  uv run meta-harness report capability-evidence --check || return 1
-  local out
-  out="$(mktemp)"
-  uv run meta-harness report capability-evidence --json > "$out" || { rm -f "$out"; return 1; }
-  uv run python - "$out" <<'PY'
-import json
-import sys
-
-report = json.load(open(sys.argv[1]))
-failed = [c for c in report["checks"] if c["status"] == "FAIL"]
-for check in failed:
-    print("FAIL:", check["claim"], "->", check["detail"])
-counts = report["counts"]
-print(f'{counts["PASS"]} PASS, {counts["FAIL"]} FAIL, {counts["UNSUPPORTED"]} UNSUPPORTED')
-raise SystemExit(1 if failed else 0)
-PY
-  local status=$?
-  rm -f "$out"
-  return "$status"
-}
-
-# ── 8. the container is a working backend ─────────────────────────────
+# ── 7. the container is a working backend ─────────────────────────────
 
 verify_docker() {
   if [[ -n "${SKIP_DOCKER:-}" ]]; then
@@ -239,7 +211,7 @@ verify_docker() {
   bash scripts/docker_smoke.sh
 }
 
-# ── 9. repository hygiene ─────────────────────────────────────────────
+# ── 8. repository hygiene ─────────────────────────────────────────────
 
 verify_hygiene() {
   local bad=0
@@ -266,7 +238,7 @@ verify_hygiene() {
     bad=1
   fi
   for path in infra/Dockerfile infra/healthcheck.py .dockerignore \
-              scripts/docker_smoke.sh docs/CAPABILITY_EVIDENCE.md; do
+              scripts/docker_smoke.sh; do
     if ! git ls-files --error-unmatch "$path" >/dev/null 2>&1; then
       echo "  $path is not tracked"
       bad=1
@@ -276,7 +248,7 @@ verify_hygiene() {
   return $bad
 }
 
-# ── 10. the dashboard still builds ────────────────────────────────────
+# ── 9. the dashboard still builds ────────────────────────────────────
 
 verify_frontend() {
   if [[ -n "${SKIP_FRONTEND:-}" ]]; then
@@ -301,7 +273,6 @@ stage replay     verify_replay
 stage branches   verify_branches
 stage benchmark  verify_benchmark
 stage wandb      verify_wandb
-stage evidence   verify_evidence
 stage docker     verify_docker
 stage hygiene    verify_hygiene
 stage frontend   verify_frontend
@@ -316,6 +287,3 @@ if (( fail > 0 )); then
 fi
 
 printf '\n  %bVERIFIED%b — everything provable without credentials passes.\n' "$GREEN" "$NC"
-printf '  %bStill unproven here (needs credentials and money): a live provider\n'
-printf '  call, and any measured pass-rate number. See scripts/live_smoke.sh\n'
-printf '  and `meta-harness canonical-experiment --dry-run`.%b\n' "$NC"

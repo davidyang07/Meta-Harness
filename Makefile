@@ -41,7 +41,7 @@ test-postgres: ## Only the suites that require a real Postgres
 replay: ## Recording + exact recorded-execution replay
 	ONLY=replay bash scripts/verify.sh
 
-evidence: ## Regenerate docs/CAPABILITY_EVIDENCE.md from the artifacts
+evidence: ## Derive the capability-evidence document from the artifacts
 	uv run meta-harness report capability-evidence
 
 wandb: ## Probe the optional W&B adapter offline

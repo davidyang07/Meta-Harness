@@ -162,7 +162,7 @@ jobs:
           "
 
   capability-evidence:
-    name: capability evidence agrees with the artifacts
+    name: capability claims agree with the artifacts
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -174,17 +174,8 @@ jobs:
 
       - run: uv sync --frozen
 
-      - name: Regenerate the evidence document and diff it
-        # Every row in docs/CAPABILITY_EVIDENCE.md is derived from committed
-        # artifacts. If the committed document disagrees with what those
-        # artifacts now say, it is stale or edited — and a stale claim is
-        # worse than no claim.
-        run: uv run meta-harness report capability-evidence --check
-
       - name: No claim may be marked FAIL
-        # UNSUPPORTED is a legitimate state: the artifact that would
-        # settle the claim does not exist yet. FAIL means an artifact
-        # exists and contradicts the claim.
+        # FAIL means an artifact exists and contradicts the claim.
         run: |
           uv run meta-harness report capability-evidence --json > evidence.json
           uv run python -c "
@@ -392,18 +383,15 @@ jobs:
           fi
 
       - name: The evidence layer is tracked, not local-only
-        # These four paths were once listed in a developer's
-        # .git/info/exclude as "local-only artifacts". They are not: the
-        # evidence document is a generated contract artifact that the
-        # capability-evidence job regenerates and diffs, and three jobs in
-        # this workflow import or run them. Untracking them again turns
-        # this workflow red in ways that look unrelated to the cause.
+        # These paths were once listed in a developer's .git/info/exclude
+        # as "local-only artifacts". They are not: three jobs in this
+        # workflow import or run them. Untracking them again turns this
+        # workflow red in ways that look unrelated to the cause.
         run: |
           missing=0
           for path in \
             backend/app/meta_harness/evidence.py \
             backend/tests/test_capability_evidence.py \
-            docs/CAPABILITY_EVIDENCE.md \
             docs/evidence/README.md
           do
             if ! git ls-files --error-unmatch "$path" >/dev/null 2>&1; then

@@ -31,8 +31,7 @@ meta-harness/                                              # Repo root (uv works
 │   ├── PROJECT_LAYOUT.md                                  # ← this file
 │   ├── INTERFACES.md                                      # All cross-component contracts
 │   ├── CAPABILITIES.md                                    # Capability → code → validating command
-│   ├── CAPABILITY_EVIDENCE.md                             # GENERATED; PASS/FAIL/UNSUPPORTED per claim
-│   ├── evidence/                                          # GENERATED artifacts the above reads
+│   ├── evidence/                                          # GENERATED artifacts the claim derivation reads
 │   ├── BUILD_ORDER.md                                     # Topological build steps + DoD (historical)
 │   └── DEFINITION_OF_DONE.md                              # Original acceptance script (superseded)
 │

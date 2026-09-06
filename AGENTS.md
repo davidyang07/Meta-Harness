@@ -17,9 +17,9 @@ Use `uv` for all Python workflows.
 - `bash scripts/demo_acceptance.sh`: LEVEL 1 acceptance, no API key required.
 - `bash scripts/live_smoke.sh`: LEVEL 2 acceptance, needs credentials; prints SKIPPED without them.
 - `uv run meta-harness experiment --candidate <name>`: the canonical 200-trial pass-rate experiment (real cost).
-- `uv run meta-harness canonical-experiment --dry-run`: print the measurement plan and a cost estimate; spends nothing. Drop `--dry-run` to evolve, select, measure, verify replay and regenerate the evidence document (real cost).
+- `uv run meta-harness canonical-experiment --dry-run`: print the measurement plan and a cost estimate; spends nothing. Drop `--dry-run` to evolve, select, measure, verify replay and derive the evidence document (real cost).
 - `uv run meta-harness verify-replay <recordings-dir>`: re-execute recorded trials against their tapes and fail loudly on any divergence. No model calls.
-- `uv run meta-harness report capability-evidence --check`: what CI runs; non-zero if `docs/CAPABILITY_EVIDENCE.md` disagrees with the artifacts it is derived from.
+- `uv run meta-harness report capability-evidence`: derive every capability claim from the committed artifacts. Generated output; not a committed source file.
 
 ## Invariants That Must Not Regress
 
@@ -89,10 +89,10 @@ capability entry depends on, update that document in the same change. Do
 not report a quantitative result without a committed artifact under
 `benchmarks/results/` that reproduces it.
 
-`docs/CAPABILITY_EVIDENCE.md` is **generated** by
-`uv run meta-harness report capability-evidence` and must never be edited by
-hand: CI regenerates it and fails on any disagreement. Its inputs are the
-machine-written artifacts in `docs/evidence/` — also never hand-edited.
+The capability-evidence document is **generated** by
+`uv run meta-harness report capability-evidence` and must never be edited
+by hand or committed. Its inputs are the machine-written artifacts in
+`docs/evidence/` — also never hand-edited.
 
 Say which "replay" you mean. `replay_recorded_execution` re-runs a
 recorded run against its tape and reproduces it exactly with zero model

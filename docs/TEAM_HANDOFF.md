@@ -117,15 +117,15 @@ meta-harness/
 ├── sdk/                                                 # `pip install meta_harness` (currently thin)
 │   ├── pyproject.toml
 │   └── meta_harness/
-│       └── __init__.py                                  # public-API stubs — flesh out at step 11+
+│       └── __init__.py                                  # public API surface
 │
 ├── backend/                                             # FastAPI + LangGraph implementation
 │   ├── pyproject.toml                                   # console_script: meta-harness = app.cli:main
 │   ├── conftest.py                                      # pytest_configure → load_dotenv()
 │   └── app/
 │       ├── __init__.py
-│       ├── main.py                                      # NOT YET WRITTEN (step 10)
-│       ├── streaming.py                                 # NOT YET WRITTEN (step 10)
+│       ├── main.py                                      # FastAPI app factory + lifespan
+│       ├── streaming.py                                 # SSE event stream
 │       ├── cli.py                                       # version / inner / benchmark / loop subcommands
 │       ├── meta_harness/                                # internal namespace (app.meta_harness)
 │       │   ├── __init__.py
@@ -138,19 +138,19 @@ meta-harness/
 │       │   ├── sandbox.py                               # /tmp/meta-harness-task-{uuid}/ process isolation
 │       │   ├── frontier.py                              # Pareto on (accuracy × tokens) + dominated_by_names
 │       │   ├── runs.py                                  # filesystem lifecycle (manifest/pending_eval/…)
-│       │   ├── persistence.py                           # NOT YET WRITTEN (step 7)
-│       │   ├── memory.py                                # NOT YET WRITTEN (step 8)
-│       │   └── branches.py                              # NOT YET WRITTEN (step 9)
-│       └── api/                                         # NOT YET WRITTEN (step 10)
+│       │   ├── persistence.py                           # AsyncPostgresSaver wiring
+│       │   ├── memory.py                                # cross-run patterns (AsyncPostgresStore)
+│       │   └── branches.py                              # time-travel forks + durable branch metadata
+│       └── api/                                         # REST + SSE routers
 │           └── (events.py, runs.py, checkpoints.py, forks.py, memory.py)
 │
-├── frontend/                                            # NOT YET WRITTEN (step 11)
+├── frontend/                                            # Next.js 16 dashboard
 │
 ├── skills/
 │   └── meta-harness-coding-agent/
 │       └── SKILL.md                                     # ~150 lines — proposer's workflow contract
 │
-├── eval/                                                # frozen eval set (5 tasks, calibration WIP)
+├── eval/                                                # frozen eval set (5 search tasks + holdout)
 │   ├── score.py                                         # multi-task pytest scorer
 │   ├── tasks/
 │   │   ├── task-001-fix-typo/{task.json, workspace/}    # add(a,b) returns a-b — bug fix tier
@@ -158,7 +158,7 @@ meta-harness/
 │   │   ├── task-003-refactor/                           # 3 dup fns → shared helper (structural test)
 │   │   ├── task-004-handle-error/                       # parse_ages crashes on empty/invalid — robustness
 │   │   └── task-005-implement-spec/                     # implement Point + Line per README — multi-file
-│   └── holdout/                                         # NOT YET WRITTEN (step 12)
+│   └── holdout/                                         # 2 unseen tasks, disjoint from tasks/
 │
 ├── agents/                                              # immutable starting point + proposer outputs
 │   ├── __init__.py

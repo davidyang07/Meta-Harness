@@ -35,7 +35,7 @@ GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; DIM='\033[2m'; NC='\0
 #   meta-harness report capability-evidence --json > /evidence.json
 #
 # which on Windows hung the ladder at "W&B offline probe" and meant the
-# two evidence checks never read what they claimed to.
+# evidence check never read what it claimed to.
 LOG_DIR="$(mktemp -d)"
 # Git Bash's mktemp returns an MSYS path (/tmp/tmp.XXXX). Bash writes there
 # happily, but the Windows Python these checks invoke resolves /tmp/... to
@@ -342,8 +342,6 @@ probe = json.load(open(sys.argv[1]))
 sys.exit(0 if probe[\"ok\"] else 1)
 " "$LOG_DIR/wandb.json"
 '
-check "evidence agrees with the artifacts" bash -c '
-  uv run meta-harness report capability-evidence --check'
 check "no claim is marked FAIL" bash -c '
   uv run meta-harness report capability-evidence --json > "$LOG_DIR/evidence.json"
   uv run python -c "

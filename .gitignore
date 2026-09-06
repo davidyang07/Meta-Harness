@@ -277,3 +277,7 @@ CLAUDE.md
 /frontend/dashboard/.next/
 /frontend/dashboard/next-env.d.ts
 /frontend/dashboard/tsconfig.tsbuildinfo
+
+# Locally generated capability-evidence document. `meta-harness report
+# capability-evidence` derives it on demand from committed artifacts.
+/docs/CAPABILITY_EVIDENCE.md

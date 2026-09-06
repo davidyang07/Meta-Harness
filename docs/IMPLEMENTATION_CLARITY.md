@@ -8,8 +8,8 @@
 > the system yourself rather than read about it: `make verify`.
 
 
-Purpose: provide one fast, accurate map of what is implemented now, where
-contracts live, and what behavior is intentionally placeholder.
+Purpose: provide one fast, accurate map of what is implemented, where the
+contracts live, and which behaviours are deliberate design boundaries.
 
 ## Canonical contract order
 

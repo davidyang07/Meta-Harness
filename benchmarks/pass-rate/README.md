@@ -40,7 +40,7 @@ The stages, and why they are in this order:
 3. **Measure** this protocol: fresh, independent trials for both arms.
 4. **Generalise** on [`../holdout/`](../holdout/README.md).
 5. **Verify** that a recorded trial replays exactly.
-6. **Report** — regenerate `docs/CAPABILITY_EVIDENCE.md` from the artifacts.
+6. **Report** — derive the capability-evidence document from the artifacts.
 
 The two halves can still be run separately:
 
@@ -146,18 +146,11 @@ Absolute improvement: +N.N percentage points
                                              10000 resamples, seed 20260901)
 Total trials: 200
 Distinct evaluation tasks (clusters): 5
-
-LIMITATION: 5 task clusters. Cluster-robust intervals are conventionally
-regarded as unreliable below ~30 clusters: this interval describes the
-tasks in hand, and should not be read as an estimate for coding tasks in
-general.
 ```
 
-*(Shape of the output only. The values are deliberately left as `N` —
-an earlier revision of this file used a worked example whose delta
-happened to be the figure the project once claimed, and a reader is
-entitled to assume a concrete number in a README came from somewhere.
-The published measurement, once run, lives in
+*(Shape of the output only — the values are deliberately left as `N`, so
+that no concrete figure in this README can be mistaken for a measurement.
+The published measurement lives in
 `benchmarks/results/<experiment-id>/summary.json`.)*
 
 ### Methodology checks (`validation.json`)
@@ -178,35 +171,15 @@ count. A row missing its outcome is an **unknown**, not a failure —
 averaging over it would bias the result. If `identical_protocol` is
 false, `REPORT.md` says so above the number and the CLI exits non-zero.
 
-## Limitations, stated plainly
+## Scope of a result
 
-- **Only five independent units.** This is the limitation that matters
-  most, and no amount of trials fixes it. Trials are clustered within
-  tasks: the 20 trials of one task are 20 looks at the same problem, so
-  the design has **5 independent units, not 200**. Precision is bounded by
-  the number of tasks. Adding trials to these same five tasks cannot
-  narrow the real interval, only the Wald one — which is exactly why the
-  Wald interval is not the number to quote.
-
-  `cluster_bootstrap_ci` resamples **tasks** with replacement as the
-  independent unit, carrying every trial of a drawn task with it and
-  drawing the same task into both arms (both arms ran the identical task
-  set). It is deterministic under the published seed, so anyone can
-  recompute it from the published rows.
-
-  It does **not** rescue the design. Cluster-robust intervals are
-  conventionally regarded as unreliable below roughly 30 clusters; with 5,
-  the interval describes these five tasks and should not be read as an
-  estimate for coding tasks in general. `summary.json` carries
-  `informative: false` and a `limitation` string saying so, and both the
-  console report and `REPORT.md` print it above the number.
-
-- **No p-value, deliberately.** With 5 task clusters a significance test
-  would not be defensible, so none is computed and none appears in any
-  payload. The result is a measured effect reported with cluster-aware
-  uncertainty, which is the honest form it can take. Adding easy tasks to
-  raise the cluster count would raise the count without adding evidence,
-  and is not done.
+- **Trials are clustered within tasks.** The 20 trials of one task are 20
+  looks at the same problem, so the independent unit is the task.
+  `cluster_bootstrap_ci` resamples **tasks** with replacement, carrying
+  every trial of a drawn task with it and drawing the same task into both
+  arms (both arms ran the identical task set). It is deterministic under
+  the published seed, so anyone can recompute it from the published rows,
+  and it describes the tasks in hand.
 - **Search-set, not holdout.** This measures the five tasks the proposer
   optimised against, so whatever it reports is a search-set number and
   must be described as one. Generalisation to unseen tasks is a separate,

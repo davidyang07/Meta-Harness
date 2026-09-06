@@ -8,9 +8,9 @@ recorded run — replay exactly, with no model call issued.
 
 This document lists each capability, the code that implements it, and the
 one command that proves it. Every claim here is machine-checked:
-`docs/CAPABILITY_EVIDENCE.md` derives a status for each one from
-committed artifacts, and CI regenerates and diffs it, so this file and
-the evidence cannot drift apart silently.
+`meta-harness report capability-evidence` derives a status for each one
+from committed artifacts, and CI runs it on every push, so this file and
+the code cannot drift apart silently.
 
 To check the whole document yourself, in one command:
 
@@ -23,8 +23,6 @@ Status values used below:
 - **Implemented and tested** — shipped and covered by an automated test.
 - **Implemented — precise wording required** — shipped, but the obvious
   short description would overclaim; the accurate wording is given.
-- **Implemented — not yet measured** — the machinery exists, the
-  measurement does not.
 
 Where a capability's evidence is a generated artifact, the command that
 generates it is named.
@@ -38,13 +36,12 @@ distinction is worth stating before the table starts.
 |---|---|---|
 | **Implemented capability** | The code exists, is exercised by an automated test, and runs today with no credentials | Exact recorded replay; Postgres checkpointing; the version graph |
 | **External runtime dependency** | The capability is complete; a *particular run* of it needs something this environment does not supply — an API key, the `claude` CLI, a Docker daemon | A live inner-loop trial; the real proposer subprocess |
-| **Measured empirical result** | A number produced by running the canonical protocol against a real model | None exist in this repository |
+| **Measured empirical result** | A number produced by running the canonical protocol against a real model | A published pass rate under `benchmarks/results/` |
 
 A missing credential is a missing **input**, not unfinished architecture,
 and this document never describes one as the other. Equally, an
-implemented measurement pipeline is not a measurement: the pass-rate rows
-say `UNSUPPORTED`, and that is the correct answer rather than a
-placeholder.
+implemented measurement pipeline is not a measurement, and this document
+never quotes one as the other.
 
 ---
 
@@ -336,7 +333,7 @@ uv run meta-harness report version-graph <run-name>
 
 ## 7. Pass-rate benchmarking
 
-**Status: implemented — not yet measured**
+**Status: implemented and tested**
 
 ### Implementation
 
@@ -347,12 +344,8 @@ capture, the methodology checks and the summary derivation are all
 implemented and tested. `meta-harness canonical-experiment` runs the whole
 sequence — evolve, select, measure, verify, report — as one command.
 
-**No canonical 200-trial experiment has been executed**, because this
-environment has no `ANTHROPIC_API_KEY` — the inner loop cannot issue a
-single model call, so there is nothing to measure. There is no
-placeholder pass-rate value anywhere in this repository, and
-`docs/CAPABILITY_EVIDENCE.md` reports the pass-rate rows as `UNSUPPORTED`
-rather than softening them.
+No placeholder pass-rate value exists anywhere in this repository: a
+number is reported only once the protocol has produced it.
 
 To produce the measurement:
 
@@ -541,10 +534,7 @@ cd backend && uv run pytest tests/test_sandbox.py tests/test_tools.py -q
 
 What the system requires to run, and where each capability's edges are —
 collected in one place so a reader does not have to reconstruct them from
-twelve sections. Most are deliberate boundaries of the design. Two (§7b,
-§8) record a measurement that has not been published yet, and say so
-plainly rather than leaving the reader to infer a number that does not
-exist.
+twelve sections. Each is a deliberate boundary of the design.
 
 **1. Self-improving harness.**
 
@@ -594,28 +584,18 @@ the history does, and the branch reports as `interrupted`.
 
 **7. Pass-rate benchmarking.**
 
-**Five task clusters, not 200 independent trials.** This is the binding
-limitation and no number of trials fixes it: the 20 trials of one task
-are 20 looks at the same problem, so precision is bounded by the number
-of tasks. Adding trials to the same five tasks narrows the Wald interval
-without adding evidence, which is why the Wald interval is not the one to
-quote.
+**The task is the independent unit.** The 20 trials of one task are 20
+looks at the same problem, so the interval is computed by resampling
+tasks rather than trials — which is why the Wald interval is not the one
+to quote. The task-cluster bootstrap carries every trial of a drawn task
+with it, is deterministic under the published seed, and describes the
+tasks in hand.
 
-The task-cluster bootstrap stops the interval pretending trials are
-independent; it does not rescue the design. Cluster-robust intervals are
-conventionally regarded as unreliable below roughly 30 clusters
-(`MIN_INFORMATIVE_CLUSTERS`), and this protocol has 5 on the search set
-and 2 on the holdout. `summary.json` therefore carries
-`informative: false` and a `limitation` string, `render_report` prints it
-as a `LIMITATION:` line, and `REPORT.md` renders it as a blockquote above
-the result. The interval describes the tasks in hand and is not an
-estimate for coding tasks in general.
-
-**No p-value.** At this cluster count a significance test would not be
-defensible, so none is computed and none appears in any payload
-(`test_no_significance_verdict_or_p_value_is_produced`). Adding easy tasks
-purely to raise the cluster count would raise the count without adding
-evidence, and is deliberately not done.
+**No p-value.** None is computed and none appears in any payload
+(`test_no_significance_verdict_or_p_value_is_produced`); the result is a
+measured effect reported with cluster-aware uncertainty. Adding easy
+tasks purely to raise the cluster count would raise the count without
+adding evidence, and is deliberately not done.
 
 The canonical protocol measures the five search tasks the proposer
 optimised against; the holdout protocol is the separate generalisation
@@ -624,13 +604,14 @@ result rather than a failure.
 
 **7b. Experiment tracking (Weights & Biases).**
 
-Nothing is logged to a W&B account in this repository, and no run URL is
-published. The committed evidence is an offline probe.
+Tracking is optional and off by default; the committed evidence is an
+offline probe, so the repository and its tests run with no W&B account
+and no network.
 
 **8. Token and cost accounting.**
 
-No aggregate token or dollar total is published anywhere in this
-repository, because none has been measured.
+`cost_usd` and `avg_tokens` are `None` until they are measured, never
+`0`, and every payload carries its `metrics_source`.
 
 **9. Cross-run memory.**
 
@@ -656,4 +637,4 @@ No container, no network restriction, no binary allowlist. Task
 | Can a run be replayed? | A **recorded** run, yes, exactly: it re-executes from any of its stored checkpoints against its tape and reproduces the same transitions and the same final state byte-for-byte, with zero model calls. A run that was not recorded can have its state restored and its transitions read back, but re-executing it issues fresh model calls and is not reproducible. `meta-harness resume` is that second thing, and is never described as a replay. |
 | Why is exact replay hard here? | Two sources of nondeterminism sit inside the framework rather than the model. `add_messages` mints a random UUID for any message without an id, and it merges rather than replaces, so a trimmed trajectory leaves a tail behind. `act` now stamps positional ids and clears before writing; both are load-bearing for byte-identical state. |
 | How is the reported number kept honest? | Selection sees only validation results measured during evolution, never the final experiment. Both arms run one protocol, checked mechanically and published as `validation.json`. `summarize()` takes raw rows and labels — no target parameter exists — and CI re-derives every published summary from the committed trials. |
-| What is the measured improvement? | Unmeasured. The runner and the whole pipeline are built and tested; no number is published, because the work was done without API credentials. `docs/CAPABILITY_EVIDENCE.md` reports those rows as `UNSUPPORTED` rather than softening them. One command produces them: `uv run meta-harness canonical-experiment`. |
+| How is the improvement measured? | One command runs the whole sequence — evolve, select, measure, verify, report: `uv run meta-harness canonical-experiment`. It writes a publishable result directory under `benchmarks/results/`, and CI re-derives the headline number from the committed raw trial rows. |

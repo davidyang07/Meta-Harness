@@ -1,6 +1,6 @@
 """Derive the capability-evidence document from committed artifacts.
 
-Every row in `docs/CAPABILITY_EVIDENCE.md` is produced here, and every row
+Every row of the capability-evidence document is produced here, and each
 is computed rather than written down:
 
 - **Measured rows** (pass rates, the percentage-point delta, trial
@@ -916,7 +916,7 @@ def _fmt_value(value: Any) -> str:
 def render_markdown(
     checks: list[Check], *, repo_root: Path, generated_at: str | None = None
 ) -> str:
-    """The whole of ``docs/CAPABILITY_EVIDENCE.md``.
+    """The whole of the capability-evidence document.
 
     Deterministic apart from the header timestamp, which CI strips before
     comparing so a regeneration check does not fail on the clock.
