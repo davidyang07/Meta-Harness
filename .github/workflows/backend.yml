@@ -9,6 +9,13 @@ concurrency:
   group: backend-${{ github.ref }}
   cancel-in-progress: true
 
+# An explicit `shell: bash` runs every step as `bash -eo pipefail`. The
+# implicit default is `bash -e` without pipefail, under which
+# `pytest ... | tee log` reports tee's status and a failed pytest passes.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   pytest:
     name: pytest (Postgres)
@@ -62,25 +69,28 @@ jobs:
           PY
 
       - name: Run tests
-        run: cd backend && uv run pytest tests/ -q --junitxml=../pytest-report.xml
-
-      - name: Assert the Postgres integration tests ran
-        # Guards the same failure mode from the other side: these files
-        # exist to exercise persistence, forking, inner checkpointing,
-        # the version graph and exact replay against real Postgres. If
-        # they collectively report zero passes, the build is a lie.
+        # The whole suite rather than a list of files, so a test file
+        # added later runs without anyone remembering to list it. -rs
+        # prints every skip with its reason for the guard below.
         run: |
           cd backend
-          uv run pytest -q --no-header \
-            tests/test_persistence.py \
-            tests/test_branch_isolation.py \
-            tests/test_branch_persistence.py \
-            tests/test_inner_checkpoints.py \
-            tests/test_replay.py \
-            tests/test_versioning.py \
-            tests/test_exact_replay.py 2>&1 | tee pg.log
-          if grep -qE '[0-9]+ skipped' pg.log; then
+          uv run pytest tests/ -q -rs --junitxml=../pytest-report.xml 2>&1 | tee ../pytest.log
+
+      - name: Assert tests ran and the Postgres-backed ones did not skip
+        # Guards the same failure mode from the other side. Every
+        # Postgres-backed test skips with "Postgres not reachable" when
+        # the DSN is down, and a suite that skipped all of persistence,
+        # forking, inner checkpointing, the version graph and exact
+        # replay would otherwise still be green. Keyed on the skip reason,
+        # not on a list of files that a rename silently empties.
+        run: |
+          if ! grep -qE '(^|[^0-9])[1-9][0-9]* passed' pytest.log; then
+            echo "::error::no test passed; the suite verified nothing"
+            exit 1
+          fi
+          if grep -q 'Postgres not reachable' pytest.log; then
             echo "::error::Postgres-backed tests were skipped; persistence was not verified"
+            grep 'Postgres not reachable' pytest.log | head -20
             exit 1
           fi
 
@@ -110,17 +120,18 @@ jobs:
 
       - run: uv sync --frozen
 
-      - name: Exact replay, recording, tracking and evidence derivation
+      - name: The whole suite, offline
+        # Exact replay, recording, tracking and evidence derivation among
+        # it. Only the Postgres-backed tests may skip here; everything
+        # else, including test files added later, must pass with no
+        # database, no key and no network.
         run: |
           cd backend
-          uv run pytest -q --no-header \
-            tests/test_recording.py \
-            tests/test_exact_replay.py \
-            tests/test_effects_boundary.py \
-            tests/test_inner_messages.py \
-            tests/test_tracking.py \
-            tests/test_pipeline.py \
-            tests/test_capability_evidence.py
+          uv run pytest tests/ -q --no-header -rs 2>&1 | tee ../offline.log
+          if ! grep -qE '(^|[^0-9])[1-9][0-9]* passed' ../offline.log; then
+            echo "::error::no test passed offline; nothing was verified"
+            exit 1
+          fi
 
       - name: The W&B adapter degrades cleanly when wandb is absent
         run: |
@@ -207,6 +218,11 @@ jobs:
               print('::error::threshold-shaped claim: ' + claim)
           raise SystemExit(1 if bad else 0)
           "
+
+      - name: The evidence derives, and its artifacts carry no absolute paths
+        # docs/evidence/*.json is committed; a path like C:\Users\... or
+        # /home/... in it is the writing machine leaking into the record.
+        run: ONLY=evidence bash scripts/verify.sh
 
       - name: The documented command names still resolve
         # docs/, README and CI all name these. A rename that leaves a
@@ -334,12 +350,17 @@ jobs:
   hygiene:
     name: repository hygiene
     runs-on: ubuntu-latest
+    # Each check reads `git ls-files` into a variable and greps that.
+    # Under pipefail, `git ls-files | grep -q` fails whenever grep exits
+    # at the first match and git takes a SIGPIPE, turning a hit into a
+    # silent pass.
     steps:
       - uses: actions/checkout@v4
 
       - name: No committed .env
         run: |
-          if git ls-files | grep -qE '(^|/)\.env$'; then
+          files="$(git ls-files)"
+          if grep -qE '(^|/)\.env$' <<<"$files"; then
             echo "::error::a .env file is tracked"; exit 1
           fi
 
@@ -351,7 +372,8 @@ jobs:
 
       - name: No W&B run directories are tracked
         run: |
-          if git ls-files | grep -qE '(^|/)wandb/'; then
+          files="$(git ls-files)"
+          if grep -qE '(^|/)wandb/' <<<"$files"; then
             echo "::error::a local W&B run directory is tracked"; exit 1
           fi
 
@@ -359,26 +381,35 @@ jobs:
         # A tape holds every model response verbatim. It belongs under
         # runs/ or benchmark-results/, both of which are gitignored.
         run: |
-          if git ls-files | grep -qE '(^|/)tape\.jsonl$'; then
+          files="$(git ls-files)"
+          if grep -qE '(^|/)tape\.jsonl$' <<<"$files"; then
             echo "::error::an execution tape is tracked"; exit 1
           fi
 
       - name: No generated run or benchmark artifacts
         run: |
-          if git ls-files | grep -qE '^(runs|benchmark-results)/'; then
+          files="$(git ls-files)"
+          if grep -qE '^(runs|benchmark-results)/' <<<"$files"; then
             echo "::error::generated run artifacts are tracked"; exit 1
+          fi
+
+      - name: The derived capability-evidence document is not committed
+        run: |
+          if git ls-files --error-unmatch docs/CAPABILITY_EVIDENCE.md >/dev/null 2>&1; then
+            echo "::error::docs/CAPABILITY_EVIDENCE.md is generated and must not be committed"; exit 1
           fi
 
       - name: Only committed harnesses under agents/
         run: |
-          extra="$(git ls-files agents/ | grep -vE 'agents/(__init__|baseline)\.py' || true)"
+          extra="$(git ls-files agents/ | grep -vE '^agents/(__init__|baseline)\.py$' || true)"
           if [ -n "$extra" ]; then
             echo "::error::proposer-generated candidates are tracked: $extra"; exit 1
           fi
 
       - name: No tool caches or OS junk
         run: |
-          if git ls-files | grep -qE '(^|/)(\.DS_Store|Thumbs\.db|__pycache__|graphify-out|\.pytest_cache|\.pytest-tmp|node_modules|\.next)(/|$)'; then
+          files="$(git ls-files)"
+          if grep -qE '(^|/)(\.DS_Store|Thumbs\.db|__pycache__|graphify-out|\.pytest_cache|\.pytest-tmp|node_modules|\.next)(/|$)' <<<"$files"; then
             echo "::error::generated caches are tracked"; exit 1
           fi
 
@@ -417,4 +448,24 @@ jobs:
           bash -n scripts/verify.sh
           bash -n scripts/docker_smoke.sh
           bash -n scripts/demo_acceptance.sh
+          bash -n scripts/live_smoke.sh
           make -n verify >/dev/null
+
+      - name: verify.sh refuses an unknown stage instead of running nothing
+        # ONLY=<typo> once ran zero stages and printed VERIFIED.
+        run: |
+          rc=0
+          ONLY=no-such-stage bash scripts/verify.sh || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::ONLY=<unknown stage> exited 0"; exit 1
+          fi
+
+      - name: live_smoke.sh without credentials says SKIPPED and exits 0
+        # By design: no key means nothing was attempted, not a failure.
+        env:
+          ANTHROPIC_API_KEY: ""
+        run: |
+          out="$(bash scripts/live_smoke.sh)"
+          echo "$out"
+          grep -q 'SKIPPED' <<<"$out"
+          grep -q 'Nothing was verified' <<<"$out"
