@@ -19,7 +19,9 @@ import { defineConfig } from '@playwright/test';
  *
  * DASHBOARD_PORT moves the dev server off 3000. Because an existing
  * server on the port is reused, a second checkout must pick its own
- * port or it will test the other checkout's code.
+ * port or it will test the other checkout's code. Only the `mock`
+ * project can move: the backend's CORS policy admits the dashboard on
+ * port 3000 alone, so `live-backend` needs the default.
  */
 const PORT = Number(process.env.DASHBOARD_PORT ?? 3000);
 

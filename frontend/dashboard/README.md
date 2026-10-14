@@ -65,9 +65,11 @@ machines off the backend; it is not a user login.
 ## End-to-end tests
 
 Playwright starts `npm run dev` itself, or reuses a server already on the
-port. Set `DASHBOARD_PORT` to use a port other than 3000; do so whenever
-another checkout's dev server might be on 3000, or the tests will run
-against that checkout's code.
+port. Set `DASHBOARD_PORT` to use a port other than 3000 for the `mock`
+project; do so whenever another checkout's dev server might be on 3000,
+or the tests will run against that checkout's code. The `live-backend`
+project must stay on 3000: the backend's CORS policy admits the
+dashboard only from `localhost:3000` / `127.0.0.1:3000`.
 
 ```bash
 npx playwright install chromium                       # once
