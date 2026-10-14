@@ -22,6 +22,8 @@ iteration number, and run concurrently against a shared
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import sys
 import time
 from pathlib import Path
@@ -215,6 +217,23 @@ async def test_branch_candidate_source_is_never_overwritten(tmp_path: Path):
     # Distinct paths, and neither lives in the shared repo-root agents/.
     assert left_src.parent != right_src.parent
     assert (REPO_ROOT / "agents") not in left_src.parents
+
+    # Distinct paths are not enough: each snapshot must hold the bytes
+    # its OWN proposer authored, which that proposer's session recorded.
+    for branch, label, snapshot in (
+        (left, left_label, left_src),
+        (right, right_label, right_src),
+    ):
+        session = json.loads(
+            (
+                runs_mod.proposer_session_dir(run_dir, branch.thread_id, 2)
+                / "session.json"
+            ).read_text()
+        )
+        authored = session["files_written"][f"agents/{label}.py"]["sha256"]
+        assert hashlib.sha256(snapshot.read_bytes()).hexdigest() == authored
+        assert f"LABEL = {label!r}" in snapshot.read_text()
+    assert left_src.read_bytes() != right_src.read_bytes()
 
 
 async def test_branch_evolution_lineage_stays_attributable(tmp_path: Path):

@@ -1,19 +1,22 @@
 """Candidate source snapshotting + isolated harness loading.
 
-The proposer authors a candidate at ``agents/<label>.py`` in the repo
-root — that is what ``skills/meta-harness-coding-agent/SKILL.md`` tells
-it to do, and keeping the file there is what makes candidate diffs
-inspectable with ordinary tooling.
+The proposer authors a candidate at ``agents/<label>.py`` — that is what
+``skills/meta-harness-coding-agent/SKILL.md`` tells it to do. Where that
+``agents/`` directory is depends on the proposer:
 
-That shared location is not safe to *benchmark* from. Two branches
-forked from the same checkpoint reach the same iteration with the same
-default label, and whichever proposer finishes last wins the file. The
-loser would then be benchmarked against source it never wrote.
+- the real proposer runs in its own private staged copy of the
+  repository (see ``proposer.stage_repository``), so its file is
+  authored there and never touches the shared repository;
+- the mock proposer writes into the repository's ``agents/`` under a
+  branch-unique label.
 
-So: immediately after propose, snapshot the authored file into the
+Neither location is what gets *benchmarked*. Two branches forked from
+the same checkpoint reach the same iteration, often with the same label,
+and a shared file goes to whichever proposer finished last. So
+immediately after propose, the authored file is snapshotted into the
 branch's own ``runs/<run>/threads/<thread>/agents/<candidate>.py`` and
-load the harness class from *that* path. The snapshot is the branch's
-private, immutable record of what it actually evaluated.
+the harness class is loaded from *that* path. The snapshot is the
+branch's private, immutable record of what it actually evaluated.
 """
 
 from __future__ import annotations
@@ -85,8 +88,10 @@ def snapshot_candidate_source(
 ) -> Path:
     """Copy the authored candidate file into the branch's private dir.
 
-    Returns the snapshot path. Raises ``CandidateSourceError`` if the
-    proposer claimed a candidate it never wrote.
+    ``repo_root`` is the root the proposer authored into: the real
+    proposer's staged copy, or the repository for the mock. Returns the
+    snapshot path. Raises ``CandidateSourceError`` if the proposer
+    claimed a candidate it never wrote.
     """
     src = authored_source_path(repo_root, label)
     source = _read_authored_source(src, label)

@@ -7,8 +7,15 @@ Per Appendix B §B.6.1 / INTERFACES.md §1.1. **All nodes are async**
 The ``benchmark`` node uses ``asyncio.Semaphore`` for bounded
 concurrency over (task × trial) tuples — explicitly **not**
 ``asyncio.gather`` over branches that may interrupt (per Appendix A
-§A.4 Gotcha 2). Inner-loop trials don't use ``interrupt()``, so
-gather over them is safe.
+§A.4 Gotcha 2). Inner-loop trials don't use ``interrupt()``; a trial
+that raises becomes an error row rather than aborting its siblings
+(see ``benchmark.run_trial_specs``).
+
+The ``propose`` node accepts exactly one candidate per iteration, for
+that iteration, under a run-unique name, with a source file that
+exists (``proposer.accept_proposal``). The real proposer runs in a
+staged copy of the repository with its session audited for holdout
+access; cancelling the node stops its whole process tree.
 
 Two invariants this module enforces:
 
@@ -44,6 +51,12 @@ from app.meta_harness import runs as runs_mod
 from app.meta_harness import tracking as trk
 from app.meta_harness.state import BASELINE_CANDIDATE_NAME, MetaHarnessState
 from app.streaming import emit_run_event
+
+#: A candidate that failed to load or is not a harness. It was never
+#: benchmarked, so it has no accuracy, no delta, and no frontier point.
+SMOKE_FAILED = "smoke_failed"
+#: Statuses of candidates that went through the benchmark.
+SCORED_STATUSES = frozenset({"evaluated", "accepted", "rejected"})
 
 
 def _now() -> str:
@@ -117,6 +130,7 @@ class OuterLoopRunner:
       with or without a metrics backend configured.
     - ``recording_root``: when set, every inner-loop trial is taped for
       exact replay under ``<root>/<candidate>/<task>-trial-<n>/``.
+    - ``domain``: the cross-run memory namespace (and SKILL.md domain).
     """
 
     def __init__(
@@ -135,6 +149,7 @@ class OuterLoopRunner:
         checkpoint_inner: bool = True,
         tracker: trk.Tracker | None = None,
         recording_root: Path | None = None,
+        domain: str = mem.DEFAULT_DOMAIN,
     ) -> None:
         self.run_dir = run_dir
         self.repo_root = repo_root
@@ -149,8 +164,49 @@ class OuterLoopRunner:
         self.checkpoint_inner = checkpoint_inner
         self.tracker = tracker or trk.NullTracker()
         self.recording_root = recording_root
+        self.domain = domain
 
     # ── propose ───────────────────────────────────────────────────────
+
+    def _parent_source(
+        self, state: MetaHarnessState, parent_name: str | None
+    ) -> str:
+        """Repo-relative path of the source the parent was measured with."""
+        parent = next(
+            (c for c in state.get("candidates") or [] if c.get("name") == parent_name),
+            None,
+        )
+        return prp.resolve_parent_source(
+            run_dir=self.run_dir,
+            repo_root=self.repo_root,
+            parent_name=parent_name,
+            parent_candidate=parent,
+        )
+
+    async def _proposer_prior(self, state: MetaHarnessState) -> str:
+        """The branch's prior plus cross-run memory, measured patterns only.
+
+        A pattern learned from a mock-benchmarked run is a synthetic score
+        dressed as a lesson; ``patterns_for_proposer`` drops it, along
+        with any pattern that predates the ``metrics_source`` tag.
+        """
+        proposer_prior = state.get("proposer_prior", "")
+        if self.memory_store is None:
+            return proposer_prior
+        try:
+            patterns = await mem.patterns_for_proposer(
+                self.memory_store, domain=self.domain, limit=5
+            )
+        except Exception:  # noqa: BLE001 — memory is best-effort
+            return proposer_prior
+        memory_section = mem.format_patterns_for_prompt(patterns)
+        if not memory_section:
+            return proposer_prior
+        return (
+            (proposer_prior + "\n\n" + memory_section)
+            if proposer_prior
+            else memory_section
+        )
 
     async def propose(
         self,
@@ -160,8 +216,14 @@ class OuterLoopRunner:
         thread_id = _thread_id(state, config)
         iteration = state["iteration"] + 1
         parent_name = state.get("best_candidate")
+        existing_names = frozenset(
+            str(c["name"]) for c in state.get("candidates") or []
+        )
+        # A handoff left over from the previous iteration must never be
+        # mistaken for this one's.
+        prp.clear_pending_eval(self.run_dir, thread_id)
         if self.mock_proposer:
-            payload = await asyncio.to_thread(
+            raw = await asyncio.to_thread(
                 prp.mock_propose,
                 run_dir=self.run_dir,
                 thread_id=thread_id,
@@ -169,99 +231,77 @@ class OuterLoopRunner:
                 parent_name=parent_name,
                 repo_root=self.repo_root,
             )
+            payload = await asyncio.to_thread(
+                prp.accept_proposal,
+                raw,
+                iteration=iteration,
+                run_dir=self.run_dir,
+                thread_id=thread_id,
+                existing_names=existing_names,
+                source_root=self.repo_root,
+            )
         else:
             if self.skill_path is None:
                 raise ValueError("skill_path required for non-mock proposer")
-            # Inject cross-run memory patterns into the proposer prior
-            # (step 8). Patterns from prior runs are read from
-            # PostgresStore and rendered as a Markdown section.
-            proposer_prior = state.get("proposer_prior", "")
-            if self.memory_store is not None:
-                try:
-                    patterns = await mem.search_patterns(
-                        self.memory_store, limit=5,
-                    )
-                    memory_section = mem.format_patterns_for_prompt(patterns)
-                    if memory_section:
-                        proposer_prior = (
-                            (proposer_prior + "\n\n" + memory_section)
-                            if proposer_prior
-                            else memory_section
-                        )
-                except Exception:  # noqa: BLE001 — memory is best-effort
-                    pass
-            # claude_propose spawns a subprocess. Wrap in to_thread to
-            # avoid blocking the outer event loop while it runs.
-            payload = await asyncio.to_thread(
-                prp.claude_propose,
+            # The proposer runs in a staged copy of the repository, its
+            # session is audited, and cancelling this node stops its
+            # whole process tree (see proposer.py).
+            payload = await prp.run_claude_proposer(
                 run_dir=self.run_dir,
                 thread_id=thread_id,
                 iteration=iteration,
                 parent_name=parent_name,
+                parent_source=self._parent_source(state, parent_name),
                 repo_root=self.repo_root,
                 skill_path=self.skill_path,
-                proposer_prior=proposer_prior,
+                proposer_prior=await self._proposer_prior(state),
+                existing_names=existing_names,
             )
+
+        # ``accept_proposal`` guarantees exactly one candidate, for this
+        # iteration, under a run-unique name, already snapshotted into
+        # this branch's private directory — the bytes this branch will
+        # benchmark, whatever a concurrent branch does to agents/.
+        c = payload["candidates"][0]
+        label = str(c["name"])
+        candidate_name = str(c["qualified_name"])
         new_candidates = list(state.get("candidates") or [])
-        for c in payload["candidates"]:
-            label = str(c["name"])
-            try:
-                runs_mod.validate_artifact_name(label, kind="candidate")
-                candidate_name = runs_mod.qualify_candidate_name(
-                    label, thread_id, state["run_id"]
-                )
-            except ValueError as exc:
-                raise ValueError(f"invalid proposer candidate: {exc}") from exc
-
-            # Snapshot the authored source into this branch's private
-            # directory before anything benchmarks it. A concurrently
-            # running fork can rewrite agents/<label>.py at any moment;
-            # the snapshot is what this branch actually evaluates.
-            source_path = await asyncio.to_thread(
-                cand_mod.snapshot_candidate_source,
-                repo_root=self.repo_root,
-                run_dir=self.run_dir,
-                thread_id=thread_id,
-                candidate_name=candidate_name,
-                label=label,
-            )
-
-            new_candidates.append(
-                {
-                    "name": candidate_name,
-                    "label": label,
-                    "import_path": c["import_path"],
-                    "source_path": str(source_path),
-                    "source_sha256": cand_mod.source_sha256(source_path),
-                    "parent": c.get("parent"),
-                    "hypothesis": c.get("hypothesis", ""),
-                    "axis": c.get("axis", "exploitation"),
-                    "expected_score_delta": c.get("expected_score_delta"),
-                    "iteration": iteration,
-                    "status": "pending",
-                    "scores": None,
-                    "delta": None,
-                    "cost_usd": None,
-                }
-            )
-            _emit(
-                state,
-                config,
-                "candidate-created",
-                {
-                    "candidate": candidate_name,
-                    "label": label,
-                    "parent_candidate_name": c.get("parent"),
-                    "import_path": c["import_path"],
-                    "parent": c.get("parent"),
-                    "iteration": iteration,
-                    "status": "seed",
-                    "scores": {"accuracy": 0.0},
-                    "delta": None,
-                    "hypothesis": c.get("hypothesis", ""),
-                    "axis": c.get("axis", "exploitation"),
-                },
-            )
+        new_candidates.append(
+            {
+                "name": candidate_name,
+                "label": label,
+                "import_path": c["import_path"],
+                "source_path": c["source_path"],
+                "source_sha256": c["source_sha256"],
+                "parent": c.get("parent"),
+                "hypothesis": c.get("hypothesis", ""),
+                "axis": c.get("axis", "exploitation"),
+                "expected_score_delta": c.get("expected_score_delta"),
+                "iteration": iteration,
+                "status": "pending",
+                "scores": None,
+                "delta": None,
+                "cost_usd": None,
+            }
+        )
+        _emit(
+            state,
+            config,
+            "candidate-created",
+            {
+                "candidate": candidate_name,
+                "label": label,
+                "parent_candidate_name": c.get("parent"),
+                "import_path": c["import_path"],
+                "parent": c.get("parent"),
+                "iteration": iteration,
+                "status": "seed",
+                "scores": {"accuracy": 0.0},
+                "delta": None,
+                "hypothesis": c.get("hypothesis", ""),
+                "axis": c.get("axis", "exploitation"),
+            },
+        )
         _emit(
             state,
             config,
@@ -295,7 +335,7 @@ class OuterLoopRunner:
             candidate["status"] = "pending"
             valid = True
         except Exception as exc:  # noqa: BLE001 — record any error
-            candidate["status"] = "smoke_failed"
+            candidate["status"] = SMOKE_FAILED
             candidate["scores"] = {"error": str(exc)}
             error = str(exc)
             valid = False
@@ -461,7 +501,7 @@ class OuterLoopRunner:
     ) -> dict[str, Any]:
         thread_id = _thread_id(state, config)
         candidate = state["candidates"][-1]
-        if candidate["status"] == "smoke_failed":
+        if candidate["status"] == SMOKE_FAILED:
             _emit(
                 state,
                 config,
@@ -526,16 +566,16 @@ class OuterLoopRunner:
     ) -> dict[str, Any]:
         thread_id = _thread_id(state, config)
         candidate = state["candidates"][-1]
-        scored_statuses = {"evaluated", "accepted", "rejected"}
-        evaluated = [
-            fr.frontier_entry(c["name"], c["scores"] or {})
-            for c in state["candidates"]
-            if c["status"] in scored_statuses and c.get("scores")
-        ]
+        smoke_failed = candidate["status"] == SMOKE_FAILED
+
+        # Only candidates that were actually benchmarked are on the
+        # frontier. A candidate that failed validation has no accuracy:
+        # projecting its missing score as 0.0 put an unmeasured point on
+        # the Pareto front (AGENTS.md invariant 4).
+        measured = [c for c in state["candidates"] if _is_measured(c)]
+        evaluated = [fr.frontier_entry(c["name"], c["scores"]) for c in measured]
         per_task_bests: dict[str, dict[str, Any]] = {}
-        for c in state["candidates"]:
-            if c["status"] not in scored_statuses or not c.get("scores"):
-                continue
+        for c in measured:
             for task_id, info in (c["scores"] or {}).get("per_task", {}).items():
                 cur = per_task_bests.get(task_id)
                 if cur is None or info["pass_rate"] > cur["pass_rate"]:
@@ -550,21 +590,34 @@ class OuterLoopRunner:
 
         # Deltas compare against the *measured* accuracy of the prior
         # best candidate — which, on iteration 1, is the benchmarked
-        # baseline rather than an implicit zero.
+        # baseline rather than an implicit zero. With nothing measured to
+        # compare against, the delta is unknown, not "everything".
         prev_best = state.get("best_candidate")
         prev_best_acc: float | None = None
         for c in state["candidates"]:
             if c["name"] == prev_best:
                 prev_best_acc = (c["scores"] or {}).get("accuracy")
                 break
-        cand_acc = (candidate["scores"] or {}).get("accuracy", 0.0)
-        baseline_acc = prev_best_acc if prev_best_acc is not None else 0.0
-        delta = cand_acc - baseline_acc
-        candidate["delta"] = round(delta, 4)
-        accepted = candidate["status"] == "evaluated" and (
-            prev_best_acc is None or cand_acc > prev_best_acc
-        )
-        candidate["status"] = "accepted" if accepted else "rejected"
+        scores = candidate["scores"] or {}
+        if smoke_failed:
+            cand_acc: float | None = None
+            candidate["delta"] = None
+            accepted = False
+            reason = "smoke_failed"
+        else:
+            cand_acc = scores.get("accuracy")
+            candidate["delta"] = (
+                round(cand_acc - prev_best_acc, 4)
+                if cand_acc is not None and prev_best_acc is not None
+                else None
+            )
+            accepted = (
+                candidate["status"] == "evaluated"
+                and cand_acc is not None
+                and (prev_best_acc is None or cand_acc > prev_best_acc)
+            )
+            candidate["status"] = "accepted" if accepted else "rejected"
+            reason = "accepted" if accepted else "regression"
 
         runs_mod.write_status(
             self.run_dir,
@@ -573,19 +626,28 @@ class OuterLoopRunner:
             {
                 "candidate": candidate["name"],
                 "thread_id": thread_id,
+                "status": candidate["status"],
                 "accepted": accepted,
                 "parent": candidate.get("parent"),
                 "compared_against": prev_best,
                 "compared_against_accuracy": prev_best_acc,
                 "delta": candidate["delta"],
-                "reason": "accepted" if accepted else "regression",
+                "reason": reason,
+                **({"error": scores.get("error")} if smoke_failed else {}),
             },
         )
 
-        # Step 8: write cross-run memory pattern on accepted candidate.
-        if accepted and self.memory_store is not None:
+        # Cross-run memory: only a measured, accepted improvement becomes
+        # a pattern. A mock score is not evidence, and a pattern built on
+        # one would reach a real proposer's prompt as if it were.
+        if (
+            accepted
+            and self.memory_store is not None
+            and scores.get("metrics_source") == met.MEASURED
+            and candidate["delta"] is not None
+        ):
             try:
-                await mem.add_pattern(
+                key = await mem.add_pattern(
                     self.memory_store,
                     pattern=(
                         f"{candidate.get('hypothesis', 'unknown hypothesis')} "
@@ -594,14 +656,19 @@ class OuterLoopRunner:
                     mechanism_axis=candidate.get("axis", "unknown"),
                     score_delta=candidate["delta"],
                     run_id=state["run_id"],
+                    thread_id=thread_id,
+                    candidate=candidate["name"],
+                    metrics_source=met.MEASURED,
+                    domain=self.domain,
                 )
                 _emit(
                     state,
                     config,
                     "memory-pattern-stored",
                     {
-                        "namespace": ["learned_patterns", "coding-agent"],
-                        "key": candidate["name"],
+                        "namespace": ["learned_patterns", self.domain],
+                        "key": key,
+                        "candidate": candidate["name"],
                         "score_delta": candidate["delta"],
                     },
                 )
@@ -614,12 +681,11 @@ class OuterLoopRunner:
             _evolution_row(candidate, iteration=state["iteration"]),
         )
 
-        scores = candidate["scores"] or {}
         trk.log_iteration(
             self.tracker,
             iteration=state["iteration"],
             candidate=candidate["name"],
-            accuracy=scores.get("accuracy"),
+            accuracy=cand_acc,
             delta=candidate["delta"],
             accepted=accepted,
             axis=candidate.get("axis"),
@@ -650,13 +716,15 @@ class OuterLoopRunner:
                 "status": (
                     "best"
                     if accepted and new_best == candidate["name"]
+                    else SMOKE_FAILED
+                    if smoke_failed
                     else "rejected"
                 ),
                 "accepted": accepted,
                 "delta": candidate["delta"],
                 "scores": {
                     "accuracy": cand_acc,
-                    "per_task": (candidate["scores"] or {}).get("per_task", {}),
+                    "per_task": scores.get("per_task", {}),
                 },
                 "hypothesis": candidate.get("hypothesis", ""),
                 "axis": candidate.get("axis"),
@@ -729,6 +797,19 @@ class OuterLoopRunner:
         eval_result = await self.evaluate_candidate(
             candidate, thread_id=run_id, run_id=run_id
         )
+        total = int(eval_result.get("total_trials") or 0)
+        if total and int(eval_result.get("errored_trials") or 0) == total:
+            # Not a measurement of the baseline but of a broken setup (no
+            # credentials, provider down). Every delta would be measured
+            # against it, so stop before the proposer spends anything.
+            first = next(
+                (r.get("error") for r in eval_result.get("trials") or [] if r.get("error")),
+                None,
+            )
+            raise RuntimeError(
+                f"every baseline trial raised ({total} of {total}); the run has "
+                f"no baseline to compare against. First error: {first}"
+            )
         candidate["scores"] = eval_result
         candidate["status"] = "evaluated"
         candidate["delta"] = 0.0
@@ -755,12 +836,36 @@ class OuterLoopRunner:
         return candidate
 
 
+def _is_measured(candidate: dict[str, Any]) -> bool:
+    """Whether a candidate carries a benchmark measurement.
+
+    ``smoke_failed`` candidates never do: they failed to load, so there
+    is no accuracy to report, and treating the gap as 0.0 is exactly the
+    unknown-as-zero bug invariant 4 forbids.
+    """
+    return (
+        candidate.get("status") in SCORED_STATUSES
+        and (candidate.get("scores") or {}).get("accuracy") is not None
+    )
+
+
 def _evolution_row(candidate: dict[str, Any], *, iteration: int) -> dict[str, Any]:
     """Project a candidate into one ``evolution_summary.jsonl`` row."""
     scores = candidate.get("scores") or {}
-    acc = scores.get("accuracy", 0.0)
+    status = candidate.get("status")
+    smoke_failed = status == SMOKE_FAILED
+    acc = None if smoke_failed else scores.get("accuracy")
     delta = candidate.get("delta")
-    return {
+    if smoke_failed:
+        error = str(scores.get("error") or "candidate did not load")
+        outcome = f"smoke_failed: {error[:200]}"
+    elif acc is None:
+        outcome = "not measured"
+    elif delta is None:
+        outcome = f"{acc:.1%}"
+    else:
+        outcome = f"{acc:.1%} ({delta:+.1%})"
+    row = {
         "iteration": iteration,
         "candidate": candidate["name"],
         "label": candidate.get("label", candidate["name"]),
@@ -769,18 +874,21 @@ def _evolution_row(candidate: dict[str, Any], *, iteration: int) -> dict[str, An
         "parent_candidate_name": candidate.get("parent"),
         "axis": candidate.get("axis"),
         "hypothesis": candidate.get("hypothesis", ""),
+        "status": status,
         "scores": {
             "accuracy": acc,
-            "per_task": scores.get("per_task", {}),
+            "per_task": {} if smoke_failed else scores.get("per_task", {}),
         },
         "delta": delta,
-        "outcome": (
-            f"{acc:.1%} ({delta:+.1%})" if delta is not None else f"{acc:.1%}"
-        ),
+        "outcome": outcome,
         "tokens": scores.get("mean_total_tokens_per_trial"),
         "cost_usd": scores.get("total_cost_usd"),
+        "errored_trials": scores.get("errored_trials"),
         "metrics_source": scores.get("metrics_source"),
     }
+    if smoke_failed:
+        row["error"] = scores.get("error")
+    return row
 
 
 def initial_state(
@@ -804,6 +912,28 @@ def initial_state(
     }
 
 
+def manifest_skill_path(skill_path: Path | None, repo_root: Path) -> str | None:
+    """``skill_path`` as the manifest stores it: repo-relative POSIX.
+
+    A skill outside the repository has no repo-relative form and is
+    stored as an absolute POSIX path instead.
+    """
+    if skill_path is None:
+        return None
+    try:
+        return skill_path.resolve().relative_to(repo_root.resolve()).as_posix()
+    except ValueError:
+        return skill_path.resolve().as_posix()
+
+
+def resolve_manifest_skill_path(value: Any, repo_root: Path) -> Path | None:
+    """Inverse of ``manifest_skill_path``."""
+    if not value:
+        return None
+    path = Path(str(value))
+    return path if path.is_absolute() else (repo_root / path)
+
+
 async def run_outer_loop(
     *,
     run_dir: Path,
@@ -820,8 +950,19 @@ async def run_outer_loop(
     evaluate_baseline: bool = True,
     tracker: Any = None,
     recording_root: Path | None = None,
+    domain: str = mem.DEFAULT_DOMAIN,
+    record: bool | None = None,
+    memory: bool | None = None,
 ) -> MetaHarnessState:
-    """Run the outer loop end-to-end (async). Returns the final state."""
+    """Run the outer loop end-to-end (async). Returns the final state.
+
+    Writes ``manifest.json`` first, with everything a resume needs to
+    continue under the same settings (the run-manifest contract): run_id,
+    thread_id, budget, trials, workers, mock_proposer, mock_bench,
+    metrics_source, domain, skill_path (repo-relative POSIX), record and
+    memory. ``record`` and ``memory`` default to whether a recording root
+    and a memory store were supplied.
+    """
     runner = OuterLoopRunner(
         run_dir=run_dir,
         repo_root=repo_root,
@@ -835,6 +976,7 @@ async def run_outer_loop(
         memory_store=memory_store,
         tracker=tracker,
         recording_root=recording_root,
+        domain=domain,
     )
     runs_mod.write_manifest(
         run_dir,
@@ -842,9 +984,14 @@ async def run_outer_loop(
         thread_id=run_dir.name,
         budget=budget,
         trials=trials,
+        workers=int(bench_workers),
         mock_proposer=mock_proposer,
         mock_bench=mock_bench,
-        metrics_source="mock" if mock_bench else "measured",
+        metrics_source=met.MOCK if mock_bench else met.MEASURED,
+        domain=domain,
+        skill_path=manifest_skill_path(skill_path, repo_root),
+        record=bool(recording_root is not None if record is None else record),
+        memory=bool(memory_store is not None if memory is None else memory),
     )
 
     seeds: list[dict[str, Any]] = []
@@ -859,6 +1006,11 @@ async def run_outer_loop(
     return final  # type: ignore[return-value]
 
 
+def default_recording_root(run_dir: Path) -> Path:
+    """Where a run's tapes live when the caller did not say: its root thread."""
+    return runs_mod.thread_dir(run_dir, run_dir.name) / "recordings"
+
+
 async def resume_outer_loop(
     *,
     run_dir: Path,
@@ -866,12 +1018,21 @@ async def resume_outer_loop(
     eval_tasks_dir: Path,
     checkpointer: Any,
     skill_path: Path | None = None,
+    memory_store: Any = None,
+    tracker: Any = None,
+    recording_root: Path | None = None,
 ) -> MetaHarnessState:
     """Resume an interrupted run from its last Postgres checkpoint.
 
-    Reads the run's manifest.json to recover the original config
-    (mock_proposer, mock_bench, trials, etc.) and resumes via
-    ``graph.ainvoke(None, config={"thread_id": run_dir.name})``.
+    Every setting comes from the run's ``manifest.json`` — the proposer
+    and bench modes, trials, ``workers``, ``skill_path`` and ``domain`` —
+    so a resumed run continues under the configuration it started with.
+    ``skill_path`` here is only a fallback for manifests written before
+    the field existed. A run that recorded keeps recording: with no
+    ``recording_root`` given, it records under its root thread's
+    ``recordings/`` directory, where ``meta-harness loop --record`` puts
+    them. ``memory_store`` and ``tracker`` are live connections the
+    manifest cannot hold, so the caller supplies them.
     """
     manifest_path = run_dir / "manifest.json"
     if not manifest_path.exists():
@@ -879,16 +1040,28 @@ async def resume_outer_loop(
             f"manifest.json missing in {run_dir}; cannot resume without run config"
         )
     manifest = json.loads(manifest_path.read_text())
+    if "skill_path" in manifest:
+        resolved_skill = resolve_manifest_skill_path(manifest.get("skill_path"), repo_root)
+        if resolved_skill is None and not manifest.get("mock_proposer", False):
+            resolved_skill = skill_path
+    else:
+        resolved_skill = skill_path
+    if recording_root is None and manifest.get("record"):
+        recording_root = default_recording_root(run_dir)
     runner = OuterLoopRunner(
         run_dir=run_dir,
         repo_root=repo_root,
         eval_tasks_dir=eval_tasks_dir,
         mock_proposer=manifest.get("mock_proposer", False),
         mock_bench=manifest.get("mock_bench", False),
-        trials=manifest.get("trials", 5),
-        bench_workers=3,
-        skill_path=skill_path,
+        trials=int(manifest.get("trials", 5)),
+        bench_workers=int(manifest.get("workers") or 3),
+        skill_path=resolved_skill,
         checkpointer=checkpointer,
+        memory_store=memory_store,
+        tracker=tracker,
+        recording_root=recording_root,
+        domain=str(manifest.get("domain") or mem.DEFAULT_DOMAIN),
     )
     graph = runner.build()
     config = {"configurable": {"thread_id": run_dir.name}, "recursion_limit": 200}
@@ -911,7 +1084,10 @@ async def resume_outer_loop(
 __all__ = [
     "OuterLoopRunner",
     "baseline_candidate",
+    "default_recording_root",
     "initial_state",
+    "manifest_skill_path",
+    "resolve_manifest_skill_path",
     "resume_outer_loop",
     "run_outer_loop",
 ]

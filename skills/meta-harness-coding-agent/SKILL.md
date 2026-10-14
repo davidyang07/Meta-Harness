@@ -1,6 +1,6 @@
 ---
 name: meta-harness-coding-agent
-description: Evolve the coding-agent harness. Use this skill when invoked by `meta-harness loop` to propose a new candidate harness based on prior execution traces and scores. Read the filesystem first; form falsifiable hypotheses; produce ONE new agents/<name>.py file and register it in the run's pending_eval.json.
+description: Evolve the coding-agent harness. Use this skill when invoked by `meta-harness loop` to propose a new candidate harness based on prior execution traces and scores. Read the filesystem first; form falsifiable hypotheses; produce ONE new agents/<name>.py file and register it in your branch's pending_eval.json.
 ---
 
 # Meta-Harness Coding Agent Evolution
@@ -9,6 +9,25 @@ You are evolving the source code of a 5-phase coding-agent harness. Your
 job is to read the full history of prior candidate harnesses, identify a
 specific failure pattern, and write ONE new candidate harness file that
 addresses it.
+
+## Where you are
+
+Your working directory is a private copy of the repository made for this
+one iteration. Repo-relative paths work as usual. When you finish, exactly
+two things are kept:
+
+- the candidate file you write at `agents/<name>.py`, and
+- `<branch-dir>/pending_eval.json`.
+
+Every other change is discarded. Do not try to reach outside the copy:
+this session is audited, and a tool call that names a path outside it, or
+anything held out from you, voids the iteration.
+
+**`<branch-dir>`** is the directory the prompt names under "Your branch
+directory" — `runs/<run_id>/threads/<thread>/`. Every run artifact you read
+or write is under it. There is no run-level `pending_eval.json`,
+`frontier_val.json` or `evolution_summary.jsonl`: each branch of a run has
+its own, and another branch's are not yours to read.
 
 ## What gets evolved
 
@@ -64,13 +83,19 @@ those are the contract with the evaluator.
 
 Read these files in this order:
 
-1. `runs/{run_id}/evolution_summary.jsonl` — every prior candidate,
-   hypothesis, score.
-2. `runs/{run_id}/frontier_val.json` — current Pareto frontier (which
+1. `<branch-dir>/evolution_summary.jsonl` — every prior candidate on this
+   branch, its hypothesis and score. A row with `"status": "smoke_failed"`
+   is a candidate that never loaded; it has no score.
+2. `<branch-dir>/frontier_val.json` — current Pareto frontier (which
    candidates are non-dominated on accuracy × tokens).
-3. The 2-3 lowest-scoring candidates' `agents/<name>.py` source code AND
-   their `runs/{run_id}/candidates/<name>/traces/` execution traces.
-4. The current best candidate's source + traces.
+3. The parent candidate's source, at the path the prompt gives under
+   "Parent". That is the exact source that was benchmarked: for the
+   baseline it is `agents/baseline.py`; for an evolved parent it is the
+   snapshot under the `runs/.../threads/<thread>/agents/` directory of the
+   branch that measured it, which may be an ancestor of yours.
+4. The 2-3 lowest-scoring candidates' sources (their snapshots under
+   `<branch-dir>/agents/` or an ancestor branch's `agents/`) AND their
+   `<branch-dir>/candidates/<name>/traces/` execution traces.
 
 Then form THREE falsifiable hypotheses about why the best candidate
 fails on specific tasks. Briefly note them in your reasoning.
@@ -87,18 +112,23 @@ mechanism does what you think it does before committing it to a candidate.
 
 ### Step 4 — Implement (write the candidate)
 
-1. Copy the current best candidate as `agents/<descriptive-snake-case-name>.py`.
+1. Copy the parent's source (the path from the prompt) to
+   `agents/<descriptive-snake-case-name>.py`. Pick a name no earlier
+   candidate of this run has used.
 2. Apply the targeted modification (override at most 2-3 of the 11
    search-space methods).
 3. Add the self-critique comment block at the top.
-4. Verify the file imports cleanly:
+4. Verify the file imports cleanly, from the working directory:
    ```bash
-   uv run python -c "from agents.<name> import *; print('OK')"
+   python -c "from agents.<name> import *; print('OK')"
    ```
+   Use `python` directly. `uv run`/`uv sync` would try to build a fresh
+   environment inside the copy.
 
 ### Step 5 — Register (write pending_eval.json)
 
-Write to `runs/{run_id}/pending_eval.json`:
+Write to `<branch-dir>/pending_eval.json` (the exact path is in the
+prompt):
 
 ```json
 {
@@ -116,8 +146,14 @@ Write to `runs/{run_id}/pending_eval.json`:
 }
 ```
 
-The class name in `import_path` must match the class you defined in
-`agents/<name>.py` (a subclass of `CodingAgentHarness`).
+The handoff is checked before anything is benchmarked, and the iteration
+fails if any of these does not hold:
+
+- `iteration` is the iteration number in the prompt;
+- `candidates` holds exactly one entry;
+- `name` is new in this run, and `agents/<name>.py` exists;
+- `import_path` is `agents.<name>:<ClassName>`, and the class in that file
+  is a subclass of `CodingAgentHarness`.
 
 ## Interface contract
 
@@ -133,17 +169,19 @@ class YourCandidateName(CodingAgentHarness):
     # ... overrides ...
 ```
 
-The candidate will be loaded by the outer state machine via
-`importlib.import_module("agents.<name>")` and instantiated with
-`YourCandidateName()`. The `__init__` must accept no required args
-(it inherits from `CodingAgentHarness.__init__` which reads the
-Anthropic API key from the env).
+The candidate is loaded from its branch snapshot of `agents/<name>.py`
+and instantiated with `YourCandidateName()`. The `__init__` must accept
+no required args (it inherits from `CodingAgentHarness.__init__` which
+reads the Anthropic API key from the env).
 
 ## What you may NOT do
 
-- Modify files outside `agents/` and `/tmp/` (and the run-specific
-  `runs/{run_id}/pending_eval.json`).
-- Modify the eval tasks in `eval/`.
+- Write anything you expect to keep outside `agents/<name>.py` and
+  `<branch-dir>/pending_eval.json` (scratch work belongs in `/tmp/`).
+- Modify the eval tasks in `eval/` or anything in `benchmarks/`.
 - Modify any baseline file (`agents/baseline.py`).
-- Read `eval/holdout/` — it is held out from the proposer.
-- Propose more than ONE candidate per iteration (we keep the demo loop tight).
+- Look for, or refer to, evaluation tasks or results that are not in your
+  copy. They are held out from you on purpose, and a search for them —
+  including a path, a task id, or a string in the candidate's own code —
+  fails the iteration.
+- Propose more than ONE candidate per iteration.
