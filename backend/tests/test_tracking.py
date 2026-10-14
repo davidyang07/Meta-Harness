@@ -93,9 +93,21 @@ def test_the_null_tracker_accepts_the_whole_interface():
 
 
 class FakeRun:
-    def __init__(self) -> None:
+    """The run object ``wandb.init`` returns. Every call lands here."""
+
+    def __init__(self, owner: "FakeWandb") -> None:
+        self._owner = owner
         self.summary: dict[str, Any] = {}
         self.url = "https://wandb.example/offline"
+
+    def log(self, payload: dict[str, Any], step: int | None = None) -> None:
+        self._owner.logged.append((payload, step))
+
+    def log_artifact(self, artifact: "FakeArtifact") -> None:
+        self._owner.artifacts.append(artifact)
+
+    def finish(self) -> None:
+        self._owner.finished = True
 
 
 class FakeTable:
@@ -120,7 +132,12 @@ class FakeArtifact:
 
 
 class FakeWandb:
-    """Records the calls a real ``wandb`` would have received."""
+    """Records the calls a real ``wandb`` would have received.
+
+    The module-level ``log``/``log_artifact``/``finish`` raise: with
+    ``reinit=True`` they act on whichever run is current, which need not
+    be this tracker's, so the adapter must never call them.
+    """
 
     Table = FakeTable
     Artifact = FakeArtifact
@@ -130,20 +147,20 @@ class FakeWandb:
         self.logged: list[tuple[dict[str, Any], int | None]] = []
         self.artifacts: list[FakeArtifact] = []
         self.finished = False
-        self.run = FakeRun()
+        self.run = FakeRun(self)
 
     def init(self, **kwargs: Any) -> FakeRun:
         self.init_kwargs = kwargs
         return self.run
 
     def log(self, payload: dict[str, Any], step: int | None = None) -> None:
-        self.logged.append((payload, step))
+        raise AssertionError("module-level wandb.log targets the current run")
 
     def log_artifact(self, artifact: FakeArtifact) -> None:
-        self.artifacts.append(artifact)
+        raise AssertionError("module-level wandb.log_artifact targets the current run")
 
     def finish(self) -> None:
-        self.finished = True
+        raise AssertionError("module-level wandb.finish targets the current run")
 
 
 def test_wandb_adapter_translates_the_interface():
@@ -203,6 +220,89 @@ def test_wandb_adapter_attaches_files_and_directories(tmp_path: Path):
     assert fake.artifacts[0].files == [str(a_file)]
     assert fake.artifacts[0].type == "benchmark-results"
     assert fake.artifacts[1].dirs == [str(a_dir)]
+
+
+class _ExplodingRun:
+    """A run whose every method fails, the way a dropped backend does."""
+
+    url = None
+
+    class _Summary:
+        def __setitem__(self, key: str, value: Any) -> None:
+            raise ConnectionError("summary upload failed")
+
+    summary = _Summary()
+
+    def log(self, *args: Any, **kwargs: Any) -> None:
+        raise ConnectionError("wandb backend unreachable")
+
+    def log_artifact(self, *args: Any, **kwargs: Any) -> None:
+        raise OSError("artifact staging failed")
+
+    def finish(self, *args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("finish timed out")
+
+
+class _ExplodingWandb(FakeWandb):
+    def __init__(self) -> None:
+        super().__init__()
+        self.run = _ExplodingRun()  # type: ignore[assignment]
+
+    class Table:  # noqa: D106 — mirrors wandb.Table
+        def __init__(self, **kwargs: Any) -> None:
+            raise ValueError("unserialisable cell")
+
+
+def test_a_failing_backend_never_raises_into_the_caller(tmp_path: Path):
+    """Every adapter call is guarded, and the failure is kept for inspection."""
+    tracker = trk.WandbTracker(
+        project="p", run_name="r", config={}, wandb_module=_ExplodingWandb()
+    )
+    artifact = tmp_path / "summary.json"
+    artifact.write_text("{}")
+
+    tracker.log({"a": 1})
+    tracker.log({"a": 1}, step=3)
+    tracker.log_table("t", ["a"], [[1]])
+    tracker.log_artifact("n", artifact)
+    tracker.set_summary({"a": 1})
+    tracker.finish()
+
+    assert len(tracker.errors) == 6
+    assert any("unreachable" in e for e in tracker.errors)
+    assert any("unserialisable" in e for e in tracker.errors)
+
+
+def test_the_vocabulary_never_raises_even_for_a_broken_tracker():
+    """Core logic calls these unconditionally; a broken sink must not matter."""
+
+    class _Broken(trk.Tracker):
+        enabled = True
+
+        def log(self, metrics: dict[str, Any], *, step: int | None = None) -> None:
+            raise RuntimeError("boom")
+
+        def log_table(self, *args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("boom")
+
+        def set_summary(self, values: dict[str, Any]) -> None:
+            raise RuntimeError("boom")
+
+    tracker = _Broken()
+    trk.log_trial(tracker, {"passed": True})
+    trk.log_iteration(
+        tracker,
+        iteration=1,
+        candidate="c",
+        accuracy=None,
+        delta=None,
+        accepted=False,
+        axis=None,
+        metrics_source="measured",
+        per_task={"t": {"pass_rate": 1.0}},
+    )
+    trk.log_frontier(tracker, {"iteration": 1, "candidates": [{"name": "c"}]})
+    trk.log_experiment(tracker, summary={"per_task": {"t": {}}})
 
 
 def test_wandb_project_falls_back_to_the_env_var(monkeypatch):
