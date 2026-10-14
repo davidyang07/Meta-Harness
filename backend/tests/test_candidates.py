@@ -169,3 +169,67 @@ def test_non_harness_class_is_rejected():
 
     with pytest.raises(TypeError, match="not a CodingAgentHarness"):
         cand.assert_is_harness(NotAHarness, import_path="x:NotAHarness")
+
+
+# ── the candidate contract is enforced, not just documented ───────────
+
+_LEGIT_CANDIDATE = '''
+import json
+import os
+
+from agents.baseline import BaselineHarness
+
+
+class Careful(BaselineHarness):
+    MAX_ACT_TURNS = 30
+    SYSTEM_PROMPT = os.environ.get("NOT_SET", "Read before you patch.")
+
+    def _summarize_for_overflow(self, messages):
+        messages = [dict(m) for m in messages]
+        messages[0]["content"] = json.dumps({"note": "trimmed"})
+        return messages
+
+    def _format_tool_result(self, name, result):
+        setattr(self, "last_tool", name)
+        return super()._format_tool_result(name, result)
+'''
+
+
+def test_a_candidate_that_only_overrides_the_harness_loads(tmp_path: Path) -> None:
+    cand.check_candidate_source(_LEGIT_CANDIDATE, origin="careful.py")
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from app.meta_harness import tools\ntools.execute_tool = lambda *a, **k: {}\n",
+        "import app.meta_harness.grading as g\n",
+        "from app.meta_harness.grading import grade\n",
+        "from app.meta_harness import inner\n",
+        "import sys\n",
+        "import importlib\nimportlib.import_module('app.meta_harness.tools')\n",
+        "import os\nos.environ['ANTHROPIC_API_KEY'] = 'x'\n",
+        "from app.meta_harness import harness\nsetattr(harness, 'MAX', 1)\n",
+        "exec('import app.meta_harness.tools')\n",
+        "__import__('app.meta_harness.sandbox')\n",
+    ],
+)
+def test_a_candidate_that_reaches_past_its_override_points_is_rejected(
+    source: str,
+) -> None:
+    with pytest.raises(cand.CandidateContractError):
+        cand.check_candidate_source(source, origin="bad.py")
+
+
+def test_loading_a_monkeypatching_candidate_never_executes_it(tmp_path: Path) -> None:
+    marker = tmp_path / "executed"
+    source = tmp_path / "patcher.py"
+    source.write_text(
+        "from app.meta_harness import tools\n"
+        f"open({str(marker)!r}, 'w').close()\n"
+        "tools.execute_tool = None\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(cand.CandidateContractError):
+        cand.load_harness_from_source(source, "Anything")
+    assert not marker.exists(), "the check must run before the module does"

@@ -58,7 +58,13 @@ the grade, so a harness that steers the agent toward them gains nothing.
 You may **NOT** override the 6 fixed inner-loop tools (`read_file`,
 `apply_patch`, `write_file`, `run_bash`, `grep_search`, `task_complete`)
 or the phase boundaries (`orient`, `plan`, `act`, `verify`, `submit`) —
-those are the contract with the evaluator.
+those are the contract with the evaluator. This is checked before your
+file is executed: a candidate that imports any `app.meta_harness` module
+other than `app.meta_harness.harness`, imports `sys`, `importlib`,
+`builtins`, `ctypes` or `gc`, assigns into an imported module (including
+`os.environ`), calls `setattr`/`delattr` on anything but `self`/`cls`, or
+calls `exec`, `eval`, `compile` or `__import__` is rejected as
+`smoke_failed` and wastes the iteration.
 
 ## Hard rules (Anti-Overfitting)
 
