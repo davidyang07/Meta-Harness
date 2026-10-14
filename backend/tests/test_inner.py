@@ -24,12 +24,25 @@ requires_anthropic = pytest.mark.skipif(
 
 
 def test_route_after_verify_uses_harness_retry_budget():
-    from app.meta_harness.inner import _route_after_verify  # noqa: PLC0415
+    from app.meta_harness.harness import CodingAgentHarness  # noqa: PLC0415
+    from app.meta_harness.inner import _route_after_verify_for_harness  # noqa: PLC0415
+
+    class _Harness(CodingAgentHarness):
+        def __init__(self, retries: int) -> None:
+            self.MAX_VERIFY_RETRIES = retries
 
     state = {"verify_result": {"tests_pass": False}, "verify_attempts": 4}
-    assert _route_after_verify(state, max_verify_retries=5) == "act"
-    assert _route_after_verify(state, max_verify_retries=4) == "submit"
-    assert _route_after_verify({"verify_result": {"tests_pass": True}}, 5) == "submit"
+    assert _route_after_verify_for_harness(state, _Harness(5)) == "act"
+    assert _route_after_verify_for_harness(state, _Harness(4)) == "submit"
+    passed = {"verify_result": {"tests_pass": True}, "verify_attempts": 1}
+    assert _route_after_verify_for_harness(passed, _Harness(5)) == "submit"
+
+
+def test_the_dead_router_is_gone():
+    """``_route_after_verify`` ignored the harness policy and nothing used it."""
+    from app.meta_harness import inner  # noqa: PLC0415
+
+    assert not hasattr(inner, "_route_after_verify")
 
 
 def test_route_after_verify_delegates_harness_policy():
@@ -94,6 +107,101 @@ async def test_plan_uses_initial_context_and_harness_llm_call():
     assert "raw-tree" not in harness.seen_messages[0]["content"]
     assert harness.seen_tools[0]["name"] == "submit_plan"
     assert harness.seen_tool_choice == {"type": "tool", "name": "submit_plan"}
+
+
+# ── the recursion limit follows the harness' budgets ──────────────────
+
+
+def test_recursion_limit_is_derived_from_the_harness_budgets():
+    from app.meta_harness.harness import CodingAgentHarness  # noqa: PLC0415
+    from app.meta_harness.inner import recursion_limit_for  # noqa: PLC0415
+
+    class _Budget(CodingAgentHarness):
+        def __init__(self, turns: int, retries: int) -> None:
+            self.MAX_ACT_TURNS = turns
+            self.MAX_VERIFY_RETRIES = retries
+
+    default = recursion_limit_for(_Budget(25, 3))
+    assert default > 3 + 2 * 3  # orient, plan, submit + act/verify per attempt
+    assert recursion_limit_for(_Budget(50, 3)) > default
+    assert recursion_limit_for(_Budget(25, 6)) > default
+    # A harness-like object without the attributes gets the defaults.
+    assert recursion_limit_for(object()) == default
+
+
+async def test_a_long_retry_loop_stays_under_the_derived_limit(tmp_path: Path):
+    """60 act/verify rounds need ~123 super-steps; the old fixed limit of
+    100 raised GraphRecursionError. The limit now grows with the budget."""
+    from app.meta_harness.inner import run_inner_loop  # noqa: PLC0415
+    from tests.harness_doubles import FailingHarness  # noqa: PLC0415
+
+    class ManyRetries(FailingHarness):
+        MAX_VERIFY_RETRIES = 60
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "calculator.py").write_text("x = 1\n", encoding="utf-8")
+    task = {"id": "fast-fail", "instruction": "never passes", "test_command": "exit 1"}
+    final = await run_inner_loop(
+        ManyRetries(), task_dict=task, workspace=workspace, source_workspace=workspace
+    )
+    assert final["verify_attempts"] == 60
+    assert final["score"] == 0.0
+
+
+# ── override 11: the wiring of the five fixed phases ──────────────────
+
+
+async def test_a_candidate_can_rewire_the_phases(tmp_path: Path):
+    """Override 11 is reachable: a harness that skips ``plan``."""
+    import shutil  # noqa: PLC0415
+
+    from langgraph.graph import END, START  # noqa: PLC0415
+
+    from app.meta_harness.inner import run_inner_loop  # noqa: PLC0415
+    from tests.harness_doubles import (  # noqa: PLC0415
+        FixTypoHarness,
+        load_task,
+        task_workspace,
+    )
+
+    class SkipPlan(FixTypoHarness):
+        def _wire_inner_graph(self, graph, *, route_after_verify):
+            graph.add_edge(START, "orient")
+            graph.add_edge("orient", "act")
+            graph.add_edge("act", "verify")
+            graph.add_conditional_edges(
+                "verify", route_after_verify, {"act": "act", "submit": "submit"}
+            )
+            graph.add_edge("submit", END)
+
+    harness = SkipPlan()
+    workspace = tmp_path / "ws"
+    shutil.copytree(task_workspace(REPO_ROOT, "task-001-fix-typo"), workspace)
+    final = await run_inner_loop(
+        harness,
+        task_dict=load_task(REPO_ROOT, "task-001-fix-typo"),
+        workspace=workspace,
+    )
+
+    assert final["plan"] is None
+    assert all("submit_plan" not in str(call) for call in harness.calls)
+    assert final["score"] == 1.0
+
+
+def test_a_harness_without_the_wiring_hook_gets_the_default_graph():
+    """``evidence.graph_node_sets`` compiles the graph from a bare stub."""
+    from app.meta_harness.inner import build_inner_graph  # noqa: PLC0415
+
+    class _Stub:
+        MAX_VERIFY_RETRIES = 3
+
+        def should_loop_back_to_act(self, verify_result: dict) -> bool:
+            return False
+
+    graph = build_inner_graph(_Stub())  # type: ignore[arg-type]
+    nodes = {n for n in graph.nodes if not n.startswith("__")}
+    assert nodes == {"orient", "plan", "act", "verify", "submit"}
 
 
 @requires_anthropic

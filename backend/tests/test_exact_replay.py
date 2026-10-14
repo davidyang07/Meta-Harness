@@ -19,7 +19,10 @@ the pytest subprocess, the workspace — is the real implementation.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -37,10 +40,12 @@ from app.meta_harness.inner import build_inner_graph  # noqa: E402
 from app.meta_harness.persistence import healthcheck, persistence_layer  # noqa: E402
 from tests.conftest import unique_name as unique  # noqa: E402
 from tests.harness_doubles import (  # noqa: E402
+    CachingHarness,
     DifferentPromptHarness,
     FailingHarness,
     FixTypoHarness,
     NoRetryHarness,
+    ThinkingHarness,
     load_task,
     task_workspace,
 )
@@ -454,6 +459,293 @@ async def test_replay_does_not_mutate_the_recorded_thread(tmp_path: Path):
 
     assert [s.checkpoint_id for s in before] == [s.checkpoint_id for s in after]
     assert [s.state_hash for s in before] == [s.state_hash for s in after]
+
+
+# ── the passing route, through the grader ─────────────────────────────
+
+
+async def test_a_passing_trial_replays_exactly_through_the_grader(tmp_path: Path):
+    """The scripted fix used to be rejected, so no tape covered a pass."""
+    recording, recorded = await _record(tmp_path, InMemorySaver())
+
+    final = recorded["final_state"]
+    assert final["score"] == 1.0, final["grade_result"]["output"]
+    assert final["grade_result"]["passed"] is True
+    assert final["grade_result"]["agent_verify_passed"] is True
+    assert [e.kind for e in recording.entries].count(rec.KIND_GRADE) == 1
+
+    report = await replay_mod.replay_recorded_execution(
+        recording=recording,
+        harness_factory=FixTypoHarness,
+        checkpointer=InMemorySaver(),
+    )
+    assert report["verified"], report["checks"]
+
+
+async def test_replay_uses_no_machine_path_from_the_recording(tmp_path: Path):
+    """The grade is keyed on the task, not on where it ran.
+
+    A recording made on another machine carries that machine's sandbox
+    and checkout paths; rewriting them must not change any tape key.
+    """
+    recording, _ = await _record(tmp_path, InMemorySaver())
+    grade = [e for e in recording.entries if e.kind == rec.KIND_GRADE][0]
+    expected_key = rec.effect_key(
+        rec.KIND_GRADE,
+        {
+            "task_id": TASK_ID,
+            "test_command": recording.manifest["task"]["test_command"],
+            "expected_files_changed": ["calculator.py"],
+        },
+    )
+    assert grade.key == expected_key
+
+
+# ── a tape made under another configuration does not verify ───────────
+
+
+def test_the_llm_key_covers_the_whole_request_configuration():
+    base = dict(
+        messages=[{"role": "user", "content": "x"}],
+        tools=[{"name": "read_file", "input_schema": {"type": "object"}}],
+        tool_choice=None,
+        system="s",
+        model="m",
+        max_tokens=10,
+    )
+
+    def key(**changes):
+        args = {**base, **changes}
+        return rec.effect_key(
+            rec.KIND_LLM,
+            fx.llm_key(
+                args.pop("messages"), args.pop("tools"), args.pop("tool_choice"), **args
+            ),
+        )
+
+    reference = key()
+    assert key(system="other") != reference
+    assert key(model="other") != reference
+    assert key(max_tokens=11) != reference
+    assert key(
+        tools=[{"name": "read_file", "input_schema": {"type": "object", "x": 1}}]
+    ) != reference
+
+
+async def test_a_harness_with_another_configuration_fails_replay(tmp_path: Path):
+    recording, _ = await _record(tmp_path, InMemorySaver())
+
+    def other_budget() -> FixTypoHarness:
+        harness = FixTypoHarness()
+        harness.MAX_TOKENS = 1
+        return harness
+
+    report = await replay_mod.replay_recorded_execution(
+        recording=recording, harness_factory=other_budget, checkpointer=InMemorySaver()
+    )
+    assert report["verified"] is False
+    assert "max_tokens" in report["divergence"]
+
+    # The tape key catches it on its own, without the manifest's help.
+    stripped = rec.Recording(
+        manifest={k: v for k, v in recording.manifest.items() if k != "llm_config"},
+        entries=recording.entries,
+        steps=recording.steps,
+    )
+    report = await replay_mod.replay_recorded_execution(
+        recording=stripped, harness_factory=other_budget, checkpointer=InMemorySaver()
+    )
+    assert report["verified"] is False
+    assert "tape divergence" in report["divergence"]
+
+
+async def test_another_system_prompt_fails_replay(tmp_path: Path):
+    recording, _ = await _record(tmp_path, InMemorySaver())
+
+    def other_prompt() -> FixTypoHarness:
+        harness = FixTypoHarness()
+        harness.SYSTEM_PROMPT = "You are a totally different agent"
+        return harness
+
+    report = await replay_mod.replay_recorded_execution(
+        recording=recording, harness_factory=other_prompt, checkpointer=InMemorySaver()
+    )
+    assert report["verified"] is False
+    assert "system prompt" in report["divergence"]
+
+
+async def test_an_override_that_edits_its_request_replays_exactly(tmp_path: Path):
+    """The key is taken before the call, from a copy the call cannot touch."""
+    recording, recorded = await _record(
+        tmp_path, InMemorySaver(), harness=CachingHarness
+    )
+    assert "cache_control" not in str(recorded["final_state"]["messages"])
+
+    report = await replay_mod.replay_recorded_execution(
+        recording=recording,
+        harness_factory=CachingHarness,
+        checkpointer=InMemorySaver(),
+    )
+    assert report["verified"], report["checks"]
+
+
+async def test_recording_effects_key_the_request_before_producing(tmp_path: Path):
+    writer = rec.TapeWriter()
+    effects = fx.RecordingEffects(writer)
+    request = {"messages": [{"role": "user", "content": "x"}]}
+    pristine_key = rec.effect_key(rec.KIND_LLM, request)
+
+    async def _mutating_produce():
+        request["messages"][0]["content"] = "mutated by the producer"
+        return {"content": []}
+
+    await effects.observe(rec.KIND_LLM, request, _mutating_produce)
+    assert writer.entries[0].key == pristine_key
+
+
+async def test_thinking_blocks_round_trip_as_wire_blocks(tmp_path: Path):
+    recording, recorded = await _record(
+        tmp_path, InMemorySaver(), harness=ThinkingHarness
+    )
+
+    assistant = [
+        m.content for m in recorded["final_state"]["messages"] if m.type == "ai"
+    ][0]
+    assert assistant[0] == {
+        "type": "thinking",
+        "thinking": "considering turn 1",
+        "signature": "sig-1",
+    }
+    tape = (tmp_path / "recordings" / "r1" / rec.TAPE_FILENAME).read_text()
+    assert '"raw"' not in tape
+
+    report = await replay_mod.replay_recorded_execution(
+        recording=recording,
+        harness_factory=ThinkingHarness,
+        checkpointer=InMemorySaver(),
+    )
+    assert report["verified"], report["checks"]
+
+
+# ── provenance: which code made the tape ──────────────────────────────
+
+
+async def test_a_recording_names_its_harness_source(tmp_path: Path):
+    recording, _ = await _record(tmp_path, InMemorySaver())
+    manifest = recording.manifest
+    doubles = REPO_ROOT / "backend" / "tests" / "harness_doubles.py"
+
+    assert manifest["schema_version"] == rec.RECORDING_SCHEMA_VERSION
+    assert manifest["harness_class"] == "tests.harness_doubles:FixTypoHarness"
+    assert manifest["harness_source_path"] == "backend/tests/harness_doubles.py"
+    assert manifest["harness_source_sha256"] == hashlib.sha256(
+        doubles.read_bytes()
+    ).hexdigest()
+    assert manifest["candidate_source_path"] is None
+    assert manifest["llm_config"]["model"] == FixTypoHarness.MODEL
+
+
+async def test_replay_with_the_default_factory_rebuilds_the_recorded_class(
+    tmp_path: Path,
+):
+    recording, _ = await _record(tmp_path, InMemorySaver())
+    report = await replay_mod.replay_recorded_execution(
+        recording=recording, checkpointer=InMemorySaver()
+    )
+    assert report["verified"], report["checks"]
+    assert report["recorded_harness_source_path"] == "backend/tests/harness_doubles.py"
+    assert (
+        report["replayed_harness_source_sha256"]
+        == report["recorded_harness_source_sha256"]
+    )
+
+
+async def test_replay_refuses_a_harness_whose_source_changed(tmp_path: Path):
+    recording, _ = await _record(tmp_path, InMemorySaver())
+    altered = rec.Recording(
+        manifest={**recording.manifest, "harness_source_sha256": "0" * 64},
+        entries=recording.entries,
+        steps=recording.steps,
+    )
+    report = await replay_mod.replay_recorded_execution(
+        recording=altered, harness_factory=FixTypoHarness, checkpointer=InMemorySaver()
+    )
+    assert report["verified"] is False
+    assert "harness source differs" in report["divergence"]
+
+
+async def test_replay_refuses_a_tape_from_an_older_schema(tmp_path: Path):
+    recording, _ = await _record(tmp_path, InMemorySaver())
+    old = rec.Recording(
+        manifest={**recording.manifest, "schema_version": "1.0.0"},
+        entries=recording.entries,
+        steps=recording.steps,
+    )
+    report = await replay_mod.replay_recorded_execution(
+        recording=old, harness_factory=FixTypoHarness, checkpointer=InMemorySaver()
+    )
+    assert report["verified"] is False
+    assert "Re-record" in report["divergence"]
+
+
+_CANDIDATE_SOURCE = '''\
+from tests.harness_doubles import FixTypoHarness
+
+
+class SnapshotCandidate(FixTypoHarness):
+    """A proposer-style candidate, loaded from a branch snapshot."""
+
+    MAX_TOKENS = 2048
+'''
+
+_REPLAY_IN_A_NEW_PROCESS = '''\
+import asyncio, json, sys
+from pathlib import Path
+repo = Path(sys.argv[1])
+sys.path[:0] = [str(repo), str(repo / "backend")]
+from langgraph.checkpoint.memory import InMemorySaver
+from app.meta_harness import recording as rec, replay as replay_mod
+recording = rec.read_recording(Path(sys.argv[2]))
+report = asyncio.run(replay_mod.replay_recorded_execution(
+    recording=recording, checkpointer=InMemorySaver()))
+print(json.dumps({"verified": report["verified"], "divergence": report["divergence"]}))
+'''
+
+
+async def test_a_source_loaded_candidate_replays_in_a_fresh_process(tmp_path: Path):
+    """``_mh_candidate_<uuid>`` cannot be imported again; its file can."""
+    from app.meta_harness import candidates as cand_mod  # noqa: PLC0415
+
+    snapshot = tmp_path / "threads" / "t" / "agents" / "cand.py"
+    snapshot.parent.mkdir(parents=True)
+    snapshot.write_text(_CANDIDATE_SOURCE, encoding="utf-8")
+    cls = cand_mod.load_harness_from_source(snapshot, "SnapshotCandidate")
+    assert cls.__module__.startswith("_mh_candidate_")
+
+    recording, _ = await _record(tmp_path, InMemorySaver(), harness=cls)
+    assert recording.manifest["candidate_source_path"] == snapshot.resolve().as_posix()
+
+    script = tmp_path / "replay_child.py"
+    script.write_text(_REPLAY_IN_A_NEW_PROCESS, encoding="utf-8")
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            str(REPO_ROOT),
+            str(tmp_path / "recordings" / "r1"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert result == {"verified": True, "divergence": None}
+
+    # The recorded bytes are what replay loads; edited bytes are refused.
+    snapshot.write_text(_CANDIDATE_SOURCE + "\n# edited\n", encoding="utf-8")
+    with pytest.raises(rec.RecordingError, match="hashes to"):
+        replay_mod.load_recorded_harness_class(recording)
 
 
 # ── recording onto a used thread ──────────────────────────────────────

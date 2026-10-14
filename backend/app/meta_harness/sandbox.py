@@ -102,9 +102,8 @@ def populate_sandbox(
     if not source_workspace.is_dir():
         raise ValueError(f"source workspace is not a directory: {source_workspace}")
     entries = list(source_workspace.iterdir())
-    skipped = (
-        set(ignore(str(source_workspace), [e.name for e in entries])) if ignore else set()
-    )
+    names = [entry.name for entry in entries]
+    skipped = set(ignore(str(source_workspace), names)) if ignore else set()
     for entry in entries:
         if entry.name in skipped:
             continue
@@ -278,7 +277,7 @@ def run_in_sandbox(
     """
     args, shell = _popen_args(command, rlimits=rlimits)
     platform_kwargs: dict[str, object] = (
-        {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}  # type: ignore[attr-defined]
+        {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
         if _IS_WINDOWS
         else {"start_new_session": True}
     )

@@ -34,7 +34,10 @@ against its own tape.
 from __future__ import annotations
 
 import hashlib
+import importlib
+import inspect
 import json
+import sys
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -48,11 +51,31 @@ from app.meta_harness.branches import (
     get_checkpoint_state,
     get_state_history,
 )
-from app.meta_harness.inner import build_inner_graph, initial_inner_state
+from app.meta_harness.inner import (
+    build_inner_graph,
+    initial_inner_state,
+    recursion_limit_for,
+    with_source_workspace,
+)
 
 #: The inner graph's node names. Checkpoints produced by anything else
 #: (``__input__``, a fork's ``update`` write) are structural, not steps.
 INNER_NODES = ("orient", "plan", "act", "verify", "submit")
+
+#: The checkout this module belongs to. Recorded paths inside it are
+#: stored relative to it, so a recording and a replay report name the
+#: same file on every machine.
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+#: Module-name prefix ``candidates.load_harness_from_source`` gives every
+#: candidate it loads; such a module cannot be imported again by name.
+_SOURCE_LOADED_PREFIX = "_mh_candidate_"
+
+
+def _importable_by_name(module: str) -> bool:
+    """False for a module another process cannot import by this name: a
+    source-loaded candidate, or a script that ran as ``__main__``."""
+    return not module.startswith(_SOURCE_LOADED_PREFIX) and module != "__main__"
 
 
 def _json_default(value: Any) -> Any:
@@ -229,6 +252,212 @@ async def assert_thread_unused(graph: Any, *, thread_id: str) -> None:
         )
 
 
+# ── harness provenance ────────────────────────────────────────────────
+
+
+def portable_path(
+    path: Path | str | None, *, repo_root: Path | None = None
+) -> str | None:
+    """``path`` as repo-relative POSIX when inside the repo, else absolute POSIX."""
+    if path is None:
+        return None
+    root = (repo_root or REPO_ROOT).resolve()
+    resolved = Path(path).resolve()
+    try:
+        return resolved.relative_to(root).as_posix()
+    except ValueError:
+        return resolved.as_posix()
+
+
+def resolve_recorded_path(path: str, *, repo_root: Path | None = None) -> Path:
+    """Inverse of ``portable_path``: a relative path resolves under the repo."""
+    candidate = Path(path)
+    if candidate.is_absolute():
+        return candidate
+    return (repo_root or REPO_ROOT) / candidate
+
+
+def harness_provenance(
+    harness: Any, *, repo_root: Path | None = None
+) -> dict[str, Any]:
+    """Which code a recording ran: class, source file and its SHA-256.
+
+    The source file comes from ``inspect.getsourcefile`` on the harness
+    *class*, so a candidate loaded from a branch snapshot names that
+    snapshot rather than ``agents/<label>.py``, which a concurrent branch
+    may since have rewritten. ``candidate_source_path`` is set only for a
+    class whose module cannot be imported by name in another process — a
+    source-loaded candidate's synthetic module, or ``__main__`` — so
+    replay must load it from the file.
+    """
+    cls = harness if isinstance(harness, type) else type(harness)
+    try:
+        source = inspect.getsourcefile(cls)
+    except (TypeError, OSError):
+        source = None
+    sha: str | None = None
+    if source and Path(source).is_file():
+        sha = hashlib.sha256(Path(source).read_bytes()).hexdigest()
+    else:
+        source = None
+    portable = portable_path(source, repo_root=repo_root)
+    source_loaded = not _importable_by_name(cls.__module__)
+    return {
+        "harness_class": f"{cls.__module__}:{cls.__qualname__}",
+        "harness_source_path": portable,
+        "harness_source_sha256": sha,
+        "candidate_source_path": portable if source_loaded else None,
+        "candidate_source_sha256": sha if source_loaded else None,
+    }
+
+
+def _resolve_qualname(target: Any, qualname: str) -> Any:
+    for part in qualname.split("."):
+        target = getattr(target, part)
+    return target
+
+
+def load_recorded_harness_class(
+    recording: rec.Recording, *, repo_root: Path | None = None
+) -> type:
+    """The harness class a recording was made with, in this process.
+
+    An importable module is imported by name. A candidate loaded from a
+    source snapshot ran under a synthetic ``_mh_candidate_<uuid>`` module
+    that no other process can import (and a class defined in a script ran
+    under ``__main__``), so it is loaded from the recorded source file
+    instead — after checking that the file still hashes to the recorded
+    ``harness_source_sha256``.
+    """
+    root = repo_root or REPO_ROOT
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    manifest = recording.manifest
+    module_path, _, qualname = str(manifest.get("harness_class") or "").partition(
+        ":"
+    )
+    if not module_path or not qualname:
+        raise rec.RecordingError(
+            f"recording {recording.recording_id} names no harness class"
+        )
+    if _importable_by_name(module_path):
+        try:
+            return _resolve_qualname(importlib.import_module(module_path), qualname)
+        except (ImportError, AttributeError):
+            pass  # fall back to the recorded source file
+
+    source = manifest.get("candidate_source_path") or manifest.get(
+        "harness_source_path"
+    )
+    if not source:
+        raise rec.RecordingError(
+            f"recording {recording.recording_id}: {module_path!r} cannot be "
+            "imported and the recording names no harness source file"
+        )
+    path = resolve_recorded_path(str(source), repo_root=root)
+    if not path.is_file():
+        raise rec.RecordingError(
+            f"recording {recording.recording_id}: harness source {path} is missing"
+        )
+    expected = manifest.get("harness_source_sha256")
+    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    if expected and actual != expected:
+        raise rec.RecordingError(
+            f"recording {recording.recording_id}: harness source {path} hashes "
+            f"to {actual[:12]}, but the recording was made from {expected[:12]}"
+        )
+    from app.meta_harness import candidates as cand_mod  # noqa: PLC0415
+
+    top, _, rest = qualname.partition(".")
+    cls = cand_mod.load_harness_from_source(path, top)
+    return _resolve_qualname(cls, rest) if rest else cls
+
+
+def harness_factory_for_recording(
+    recording: rec.Recording, *, repo_root: Path | None = None
+) -> Callable[[], Any]:
+    """A factory for the recording's own harness class.
+
+    Replay never calls the model, so the harness needs no credentials —
+    but it must be the same class, because the non-model override points
+    (result formatting, retry policy, act prompt) are part of the state
+    machine being replayed.
+    """
+    loaded: list[type] = []
+
+    def _factory() -> Any:
+        if not loaded:
+            loaded.append(load_recorded_harness_class(recording, repo_root=repo_root))
+        cls = loaded[0]
+        try:
+            return cls()
+        except RuntimeError:
+            # The base harness refuses to construct without an API key. A
+            # replay issues no model call, so build the instance without
+            # running __init__ and give it the attributes the non-model
+            # code paths read.
+            instance = cls.__new__(cls)
+            instance.api_key = None
+            instance._client = None
+            return instance
+
+    return _factory
+
+
+def _schema_major(version: Any) -> str:
+    return str(version or "").split(".", 1)[0]
+
+
+def provenance_problems(recording: rec.Recording, harness: Any) -> list[str]:
+    """Why ``harness`` cannot reproduce ``recording``, if it cannot.
+
+    A replay is only exact if it runs the same code under the same
+    configuration as the recording. The tape keys catch most differences
+    one request at a time; these checks name the cause up front, and
+    catch a different class whose requests happen to key the same.
+    """
+    manifest = recording.manifest
+    problems: list[str] = []
+    recorded_version = manifest.get("schema_version")
+    if _schema_major(recorded_version) != _schema_major(rec.RECORDING_SCHEMA_VERSION):
+        problems.append(
+            f"the tape was written with schema {recorded_version!r}; this build "
+            f"replays {rec.RECORDING_SCHEMA_VERSION!r}. Re-record it."
+        )
+    now = harness_provenance(harness)
+    recorded_qualname = str(manifest.get("harness_class") or "").partition(":")[2]
+    replayed_qualname = now["harness_class"].partition(":")[2]
+    if recorded_qualname and recorded_qualname != replayed_qualname:
+        problems.append(
+            f"the recording was made with harness {recorded_qualname!r}, the "
+            f"replay runs {replayed_qualname!r}"
+        )
+    recorded_sha = manifest.get("harness_source_sha256")
+    if recorded_sha and recorded_sha != now["harness_source_sha256"]:
+        problems.append(
+            "the harness source differs from the recording's: recorded "
+            f"{manifest.get('harness_source_path')} @ {str(recorded_sha)[:12]}, "
+            f"replay {now['harness_source_path']} @ "
+            f"{str(now['harness_source_sha256'])[:12]}"
+        )
+    recorded_config = manifest.get("llm_config")
+    if isinstance(recorded_config, dict):
+        replayed_config = fx.llm_config(harness)
+        for key in sorted(set(recorded_config) | set(replayed_config)):
+            if recorded_config.get(key) == replayed_config.get(key):
+                continue
+            if key == "system":
+                problems.append(
+                    "the harness system prompt differs from the recording's"
+                )
+            else:
+                problems.append(
+                    f"harness {key} differs from the recording's: recorded "
+                    f"{recorded_config.get(key)!r}, replay {replayed_config.get(key)!r}"
+                )
+    return problems
+
+
 async def finalize_recording(
     graph: Any,
     *,
@@ -276,15 +505,21 @@ async def finalize_recording(
         )
         for step, mark in zip(steps, marks, strict=True)
     ]
+    provenance = harness_provenance(harness)
     manifest = rec.build_manifest(
         recording_id=recording_dir.name,
         thread_id=thread_id,
         task=task_dict,
         workspace_path=str(workspace),
         model=getattr(harness, "MODEL", None),
-        harness_class=f"{type(harness).__module__}:{type(harness).__qualname__}",
+        harness_class=provenance["harness_class"],
+        harness_source_path=provenance["harness_source_path"],
+        harness_source_sha256=provenance["harness_source_sha256"],
+        candidate_source_path=provenance["candidate_source_path"],
+        candidate_source_sha256=provenance["candidate_source_sha256"],
         extra={
             "task": task_dict,
+            "llm_config": fx.llm_config(harness),
             "final_state_sha256": state_hash(final_state),
             "usage": usage.totals(),
             **(manifest_extra or {}),
@@ -304,12 +539,17 @@ async def record_inner_execution(
     trace_dir: Path | None = None,
     manifest_extra: dict[str, Any] | None = None,
     usage: met.UsageRecorder | None = None,
+    source_workspace: Path | None = None,
 ) -> dict[str, Any]:
     """Run one inner-loop trial, recording every nondeterministic input.
 
     Requires a checkpointer: the tape alone is not enough, because
     "replay from checkpoint X" needs X to exist. The recording pairs each
     tape offset with the checkpoint the corresponding node produced.
+
+    ``source_workspace`` is the task's pristine ``workspace/`` directory,
+    which grading needs; it may instead already be in ``task_dict`` as
+    ``_source_workspace``.
 
     Returns the run's final state, its hash, and the recording directory.
     """
@@ -318,6 +558,7 @@ async def record_inner_execution(
             "record_inner_execution requires a checkpointer: an execution "
             "with no checkpoint history cannot be replayed from a checkpoint"
         )
+    task_dict = with_source_workspace(dict(task_dict), source_workspace)
 
     writer = rec.TapeWriter()
     effects = fx.RecordingEffects(writer)
@@ -339,7 +580,10 @@ async def record_inner_execution(
     await assert_thread_unused(graph, thread_id=thread_id)
     final_state = await graph.ainvoke(
         initial_inner_state(task_dict=task_dict, workspace=workspace),
-        config={"configurable": {"thread_id": thread_id}, "recursion_limit": 100},
+        config={
+            "configurable": {"thread_id": thread_id},
+            "recursion_limit": recursion_limit_for(harness),
+        },
     )
 
     await finalize_recording(
@@ -372,7 +616,7 @@ class ReplayVerificationError(AssertionError):
 async def replay_recorded_execution(
     *,
     recording: rec.Recording,
-    harness_factory: Callable[[], Any],
+    harness_factory: Callable[[], Any] | None = None,
     checkpointer: Any,
     source_graph: Any | None = None,
     from_checkpoint: str | None = None,
@@ -385,6 +629,13 @@ async def replay_recorded_execution(
     checkpoint must be one the recording knows about, and only the
     transitions after it are replayed.
 
+    ``harness_factory`` defaults to the recording's own harness class
+    (``harness_factory_for_recording``). Whatever it builds is checked
+    against the recording's provenance — class, source SHA-256, request
+    configuration, tape schema — and a difference fails the
+    ``no_divergence`` check: a different harness is not an exact replay,
+    even where its requests happen to key the same.
+
     Issues no model calls, runs no tools, and touches no workspace: every
     external input comes from ``recording``. Returns a verification
     report; the ``verified`` field is the whole point, and
@@ -394,7 +645,9 @@ async def replay_recorded_execution(
     reader = recording.reader_from_step(start_index)
     effects = fx.ReplayEffects(reader)
 
-    harness = harness_factory()
+    harness = (harness_factory or harness_factory_for_recording(recording))()
+    problems = provenance_problems(recording, harness)
+    replayed_provenance = harness_provenance(harness)
     fx.instrument_harness_for_effects(harness, effects)
     usage = met.UsageRecorder()
     met.instrument_harness(harness, usage)
@@ -405,7 +658,7 @@ async def replay_recorded_execution(
     )
     config = {
         "configurable": {"thread_id": thread_id},
-        "recursion_limit": 100,
+        "recursion_limit": recursion_limit_for(harness),
     }
 
     divergence: str | None = None
@@ -443,6 +696,11 @@ async def replay_recorded_execution(
         s for s in recording.steps if start_index is None or s.index > start_index
     ]
 
+    if problems:
+        divergence = "; ".join(
+            [f"harness divergence: {p}" for p in problems]
+            + ([divergence] if divergence else [])
+        )
     checks = _build_checks(
         recording=recording,
         expected=expected,
@@ -462,6 +720,16 @@ async def replay_recorded_execution(
         # provider or from a script.
         "recorded_model": recording.manifest.get("model"),
         "recorded_harness_class": recording.manifest.get("harness_class"),
+        "recorded_harness_source_path": recording.manifest.get(
+            "harness_source_path"
+        ),
+        "recorded_harness_source_sha256": recording.manifest.get(
+            "harness_source_sha256"
+        ),
+        "replayed_harness_source_path": replayed_provenance["harness_source_path"],
+        "replayed_harness_source_sha256": replayed_provenance[
+            "harness_source_sha256"
+        ],
         "recorded_task_id": recording.manifest.get("task_id"),
         "recorded_with": recording.manifest.get("recorded_with"),
         "replay_thread_id": thread_id,
@@ -599,6 +867,11 @@ __all__ = [
     "canonical_json",
     "collect_execution_steps",
     "finalize_recording",
+    "harness_factory_for_recording",
+    "harness_provenance",
+    "load_recorded_harness_class",
+    "portable_path",
+    "provenance_problems",
     "record_inner_execution",
     "render_verification",
     "replay_events",

@@ -57,7 +57,17 @@ def test_coding_agent_state_typed_dict_keys():
         "verify_attempts": 0,
         "verify_result": None,
         "final_files": None,
+        "grade_result": None,
         "score": None,
     }
     assert state["turn_count"] == 0
     assert state["score"] is None
+    assert set(state) == set(CodingAgentState.__annotations__)
+
+
+def test_the_inner_entry_state_fills_every_field():
+    from app.meta_harness.inner import initial_inner_state
+
+    state = initial_inner_state(task_dict={"id": "t"}, workspace=Path("/tmp/x"))
+    assert set(state) == set(CodingAgentState.__annotations__)
+    assert state["grade_result"] is None

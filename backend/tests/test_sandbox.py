@@ -139,7 +139,9 @@ def test_a_timeout_kills_the_whole_process_tree(sandbox_dir: Path):
     """``sleep 37 & echo started`` used to leave the sleep running."""
     with pytest.raises(subprocess.TimeoutExpired) as caught:
         run_in_sandbox(
-            sandbox_dir, "sleep 37 & echo $! > bg.pid; echo started; wait", timeout_sec=1
+            sandbox_dir,
+            "sleep 37 & echo $! > bg.pid; echo started; wait",
+            timeout_sec=1,
         )
     assert "started" in caught.value.stdout
     pid = int((sandbox_dir / "bg.pid").read_text())

@@ -2,20 +2,62 @@
 search space).
 
 Per Appendix C §C.9 / INTERFACES.md §4. The 6 fixed inner-loop tools
-and the 5 phase boundaries are NOT overridable; everything below is.
+and the 5 phase *nodes* (``orient``, ``plan``, ``act``, ``verify``,
+``submit``) are NOT overridable; everything below is.
 
 Candidates subclass ``CodingAgentHarness`` and override any subset of
-the 11 marked points. Override 11 (structural) is implemented by
-overriding ``build_inner_graph()`` in ``app.meta_harness.inner``.
+the 11 marked points. Override 11 (structural) is
+``_wire_inner_graph``: it decides how the five fixed phases are
+connected — skip ``plan``, loop ``verify`` back to ``plan`` — while the
+node bodies, and with them the effects boundary that exact replay rests
+on, stay fixed. ``inner.build_inner_graph`` calls it on the candidate's
+own harness, so a candidate reaches it by overriding the method.
 """
 
 from __future__ import annotations
 
 import json
 import os
-from typing import Any
+from typing import Any, Callable
 
 import anthropic
+from langgraph.graph import END, START
+
+#: Shown to the model in place of the turns override 10 dropped.
+ELIDED_NOTE = "[earlier turns elided to fit context]"
+
+#: Most messages the default overflow strategy keeps, the first included.
+_OVERFLOW_KEEP = 20
+
+
+def wire_default_inner_graph(
+    graph: Any, *, route_after_verify: Callable[[dict[str, Any]], str]
+) -> None:
+    """``orient → plan → act → verify → (act | submit)``, then END."""
+    graph.add_edge(START, "orient")
+    graph.add_edge("orient", "plan")
+    graph.add_edge("plan", "act")
+    graph.add_edge("act", "verify")
+    graph.add_conditional_edges(
+        "verify", route_after_verify, {"act": "act", "submit": "submit"}
+    )
+    graph.add_edge("submit", END)
+
+
+def _with_elided_note(message: dict[str, Any]) -> dict[str, Any]:
+    """``message`` with the elision note appended to its content, once."""
+    content = message.get("content")
+    if isinstance(content, str):
+        if content.endswith(ELIDED_NOTE):
+            return message
+        return {**message, "content": f"{content}\n\n{ELIDED_NOTE}"}
+    if isinstance(content, list):
+        last = content[-1] if content else None
+        if isinstance(last, dict) and last.get("text") == ELIDED_NOTE:
+            return message
+        note = {"type": "text", "text": ELIDED_NOTE}
+        return {**message, "content": [*content, note]}
+    return message
 
 
 _DEFAULT_SYSTEM_PROMPT = """\
@@ -194,21 +236,55 @@ class CodingAgentHarness:
     def _summarize_for_overflow(
         self, messages: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        """When messages would exceed model context, trim. Default: keep
-        the first 2 (system framing) and the last 18 messages."""
-        if len(messages) <= 20:
-            return messages
-        return (
-            messages[:2]
-            + [
-                {
-                    "role": "user",
-                    "content": "[earlier turns elided to fit context]",
-                }
-            ]
-            + messages[-18:]
-        )
+        """When messages would exceed model context, trim.
 
-    # Override 11 (structural) is implemented by overriding the
-    # build_inner_graph() function in app.meta_harness.inner; nothing to
-    # define on the class itself.
+        Default: keep the first message (the act prompt, with a note that
+        turns were elided) and the most recent whole turns, at most 20
+        messages in all. A cut is only ever made just before an
+        ``assistant`` message, which is what keeps the result a valid
+        request:
+
+        - every ``tool_use`` keeps the ``tool_result`` that answers it in
+          the next message, and no ``tool_result`` loses its ``tool_use``;
+        - roles still alternate, because the note is folded into the
+          first (user) message rather than sent as a second user turn.
+
+        The old default — first 2 + a separate note + last 18 — orphaned
+        the first turn's ``tool_use`` every time it fired (and, at even
+        lengths, the window's leading ``tool_result``), so every trial
+        that reached ~21 act turns got a 400 from the API.
+        """
+        if len(messages) <= _OVERFLOW_KEEP:
+            return messages
+        cuts = [
+            index
+            for index in range(1, len(messages))
+            if messages[index].get("role") == "assistant"
+            and messages[index - 1].get("role") == "user"
+        ]
+        if not cuts or messages[0].get("role") != "user":
+            return messages
+        fitting = [i for i in cuts if 1 + len(messages) - i <= _OVERFLOW_KEEP]
+        cut = fitting[0] if fitting else cuts[-1]
+        if cut == 1:
+            return messages
+        return [_with_elided_note(messages[0]), *messages[cut:]]
+
+    # Override 11 — structural: how the five fixed phases are connected
+    def _wire_inner_graph(
+        self,
+        graph: Any,
+        *,
+        route_after_verify: Callable[[dict[str, Any]], str],
+    ) -> None:
+        """Add the edges between the five phase nodes of ``graph``.
+
+        ``graph`` is a ``StateGraph`` that already holds the nodes
+        ``orient``, ``plan``, ``act``, ``verify`` and ``submit``; their
+        bodies are fixed. ``route_after_verify`` is the default retry
+        router (it honours ``MAX_VERIFY_RETRIES`` and override 9). A
+        candidate may wire them differently — skip ``plan``, or send a
+        failed verify back to ``plan`` — but only ``submit`` grades the
+        trial: a wiring that never reaches it scores nothing.
+        """
+        wire_default_inner_graph(graph, route_after_verify=route_after_verify)

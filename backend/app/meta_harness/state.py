@@ -67,4 +67,8 @@ class CodingAgentState(TypedDict):
     verify_attempts: int
     verify_result: dict[str, Any] | None
     final_files: dict[str, str] | None
+    #: Written by ``submit`` (``grading.py``): ``passed``, ``output``,
+    #: ``carried_files``, ``out_of_plan_changes``, ``agent_verify_passed``.
+    #: ``score`` is 1.0 iff ``grade_result["passed"]``.
+    grade_result: dict[str, Any] | None
     score: float | None
