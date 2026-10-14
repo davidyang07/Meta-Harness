@@ -81,11 +81,55 @@ def published_results(repo_root: Path) -> list[Path]:
     return sorted(d for d in root.iterdir() if (d / "summary.json").is_file())
 
 
-def load_experiment(directory: Path) -> dict[str, Any]:
+def declared_plan(repo_root: Path, experiment: str | None) -> dict[str, Any] | None:
+    """The trial plan the committed protocol declares for ``experiment``.
+
+    Read from ``benchmarks/<protocol>/config.json`` — whichever committed
+    config names this experiment — and computed as tasks x trials per
+    task x two arms. ``None`` when no committed config names it.
+
+    This is the protocol the result is checked *against* for
+    completeness. It is not a bar for the measurement: it says how many
+    trials were asked for, never what they should score.
+    """
+    root = repo_root / "benchmarks"
+    if experiment is None or not root.is_dir():
+        return None
+    for path in sorted(root.glob("*/config.json")):
+        try:
+            config = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if config.get("experiment") != experiment:
+            continue
+        tasks = list(config.get("tasks") or [])
+        if not tasks and config.get("task_set"):
+            tasks = [
+                d.name
+                for d in sorted((repo_root / str(config["task_set"])).glob("*"))
+                if (d / "task.json").is_file()
+            ]
+        trials_per_task = int(config.get("trials_per_task") or 0)
+        return {
+            "config": path.relative_to(repo_root).as_posix(),
+            "tasks": len(tasks),
+            "trials_per_task": trials_per_task,
+            "arms": 2,
+            "trials": len(tasks) * trials_per_task * 2,
+        }
+    return None
+
+
+def load_experiment(
+    directory: Path, *, repo_root: Path | None = None
+) -> dict[str, Any]:
     """Load a published experiment and recompute its summary from raw rows.
 
     The recomputation is the point: a published number is evidence only
-    while it still falls out of the trials it claims to summarise.
+    while it still falls out of the trials it claims to summarise. The
+    methodology checks are recomputed from the same rows too, rather than
+    read from the published ``validation.json``: a validation file is a
+    claim about the rows, and a claim is not evidence for itself.
     """
     summary = json.loads((directory / "summary.json").read_text())
     environment = json.loads((directory / "environment.json").read_text())
@@ -112,8 +156,20 @@ def load_experiment(directory: Path) -> dict[str, Any]:
         )
         if summary.get(key) != recomputed.get(key)
     ]
-    validation_path = directory / "validation.json"
+    task_ids = [t["task_id"] for t in environment.get("tasks", [])]
+    trials_per_task = config.get("trials_per_task")
     validation = (
+        exp.check_protocol_equality(
+            baseline_rows=baseline_rows,
+            candidate_rows=candidate_rows,
+            task_ids=task_ids,
+            trials_per_task=int(trials_per_task),
+        )
+        if trials_per_task
+        else None
+    )
+    validation_path = directory / "validation.json"
+    published_validation = (
         json.loads(validation_path.read_text()) if validation_path.is_file() else None
     )
     return {
@@ -124,6 +180,12 @@ def load_experiment(directory: Path) -> dict[str, Any]:
         "recomputed": recomputed,
         "environment": environment,
         "validation": validation,
+        "published_validation": published_validation,
+        "declared_plan": (
+            declared_plan(repo_root, config.get("experiment"))
+            if repo_root is not None
+            else None
+        ),
         "mismatched_keys": mismatches,
         "reproducible": not mismatches,
         "raw_rows": len(baseline_rows) + len(candidate_rows),
@@ -135,7 +197,7 @@ def latest_experiment(
 ) -> dict[str, Any] | None:
     """The newest published experiment of a given name, fully re-derived."""
     for directory in reversed(published_results(repo_root)):
-        loaded = load_experiment(directory)
+        loaded = load_experiment(directory, repo_root=repo_root)
         if loaded["experiment"] == experiment:
             return loaded
     return None
@@ -726,6 +788,66 @@ def _replay_check(repo_root: Path) -> Check:
     )
 
 
+#: Key and claim of the row that says whether the published experiment
+#: ran the whole protocol its committed config declares.
+PROTOCOL_ROW = ("canonical_protocol_trials", "Canonical protocol executed in full")
+
+
+def _protocol_fact(loaded: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
+    """Status, value and detail for "did this run do what its protocol said".
+
+    Three facts, all read from the artifacts: the summary re-derives from
+    the raw rows; the two arms ran an identical protocol (recomputed from
+    the rows, see ``load_experiment``); and the observed trial count is
+    the count the committed config declares. None of them compares a
+    measurement with a bar.
+    """
+    observed = loaded["recomputed"].get("total_trials") or 0
+    plan = loaded.get("declared_plan")
+    validation = loaded.get("validation") or {}
+    protocol_ok = bool(validation.get("identical_protocol"))
+    failed_checks = sorted(
+        name for name, ok in (validation.get("checks") or {}).items() if not ok
+    )
+    value = {
+        "observed_trials": observed,
+        "declared_trials": plan["trials"] if plan else None,
+    }
+
+    if plan is None:
+        status = UNSUPPORTED
+        plan_text = (
+            "no committed config under benchmarks/ declares this experiment, "
+            "so there is no plan to check the run against"
+        )
+    else:
+        plan_text = (
+            f"{observed} of the {plan['trials']} trials `{plan['config']}` "
+            f"declares ({plan['tasks']} tasks x {plan['trials_per_task']} trials "
+            f"x {plan['arms']} arms)"
+        )
+        status = (
+            PASS
+            if observed == plan["trials"] and loaded["reproducible"] and protocol_ok
+            else FAIL
+        )
+
+    parts = [
+        f"{loaded['raw_rows']} raw trial rows on disk; {plan_text}",
+        "the published summary re-derives from the rows exactly"
+        if loaded["reproducible"]
+        else f"summary disagrees with raw rows on {loaded['mismatched_keys']}",
+        "the two arms ran an identical protocol (recomputed from the rows)"
+        if protocol_ok
+        else "the two arms did NOT run an identical protocol (recomputed from "
+        f"the rows; failing checks: {failed_checks or ['no trials_per_task recorded']})",
+    ]
+    errored = validation.get("errored_trials") or {}
+    if any(errored.values()):
+        parts.append(f"trials that raised: {errored}")
+    return status, value, "; ".join(parts)
+
+
 def _measurement_checks(search: dict[str, Any] | None) -> list[Check]:
     """The measured rows, each re-derived from the raw trial rows.
 
@@ -749,10 +871,10 @@ def _measurement_checks(search: dict[str, Any] | None) -> list[Check]:
                 evidence=[],
             )
             for key, claim in (
-                ("canonical_200_trials", "Canonical 200 task trials executed"),
+                PROTOCOL_ROW,
                 ("baseline_pass_rate", "Baseline pass rate"),
                 ("evolved_pass_rate", "Evolved pass rate"),
-                ("absolute_improvement_pp", "Absolute percentage-point improvement"),
+                ("absolute_improvement_pp", "Absolute percentage-point change"),
             )
         ]
 
@@ -763,30 +885,17 @@ def _measurement_checks(search: dict[str, Any] | None) -> list[Check]:
         f"benchmarks/results/{directory}/baseline-results.jsonl",
         f"benchmarks/results/{directory}/candidate-results.jsonl",
     ]
-    validation = search.get("validation") or {}
-    protocol_ok = bool(validation.get("identical_protocol"))
-    total = summary.get("total_trials") or 0
     delta = summary.get("absolute_percentage_point_delta")
     ci = summary.get("difference_ci") or {}
+    protocol_status, protocol_value, protocol_detail = _protocol_fact(search)
 
     checks = [
         Check(
-            key="canonical_200_trials",
-            claim="Canonical 200 task trials executed",
-            status=PASS
-            if total >= 200 and search["reproducible"] and protocol_ok
-            else FAIL,
-            value=total,
-            detail=(
-                f"{search['raw_rows']} raw trial rows on disk; the published "
-                f"summary re-derives from them exactly"
-                + ("" if protocol_ok else "; the two arms did NOT run an identical protocol")
-                + (
-                    ""
-                    if search["reproducible"]
-                    else f"; summary disagrees with raw rows on {search['mismatched_keys']}"
-                )
-            ),
+            key=PROTOCOL_ROW[0],
+            claim=PROTOCOL_ROW[1],
+            status=protocol_status,
+            value=protocol_value,
+            detail=protocol_detail,
             evidence=evidence,
         ),
         Check(
@@ -813,7 +922,7 @@ def _measurement_checks(search: dict[str, Any] | None) -> list[Check]:
         ),
         Check(
             key="absolute_improvement_pp",
-            claim="Absolute percentage-point improvement",
+            claim="Absolute percentage-point change",
             status=PASS if delta is not None else UNSUPPORTED,
             value=delta,
             detail=(
@@ -829,20 +938,22 @@ def _measurement_checks(search: dict[str, Any] | None) -> list[Check]:
 
 def _delta_detail(
     delta: float,
-    wald: dict[str, Any],
+    trial_level: dict[str, Any],
     cluster: dict[str, Any] | None,
 ) -> str:
     """State the delta with the interval that describes its precision.
 
-    Both intervals are reported. The Wald one assumes 200 independent
-    Bernoulli trials, which the design does not have — trials are
-    clustered within tasks — so the cluster-aware interval is the one to
-    read, and its own limitation travels with it.
+    Both intervals are reported. The trial-level score interval assumes
+    every trial is an independent Bernoulli observation, which the design
+    does not have — trials are clustered within tasks — so the
+    cluster-aware interval is the one to read, and its own limitation
+    travels with it.
     """
+    method = trial_level.get("method") or "trial-level"
     parts = [
-        f"measured {delta:+.1f} pp; 95% Wald interval on the difference "
-        f"[{_pp(wald.get('lower'))}, {_pp(wald.get('upper'))}] pp, which "
-        f"assumes independent trials the design does not have"
+        f"measured {delta:+.1f} pp; 95% {method} interval on the difference "
+        f"[{_pp(trial_level.get('lower'))}, {_pp(trial_level.get('upper'))}] pp, "
+        f"which assumes independent trials the design does not have"
     ]
     if cluster and cluster.get("lower") is not None:
         parts.append(
@@ -877,19 +988,32 @@ def _holdout_checks(holdout: dict[str, Any] | None) -> list[Check]:
     summary = holdout["recomputed"]
     delta = summary.get("absolute_percentage_point_delta")
     directory = holdout["dir"].name
+    protocol_status, _, protocol_detail = _protocol_fact(holdout)
+    # A holdout number is a generalisation number only if it was measured
+    # the way it claims: re-derivable from its rows, both arms on one
+    # protocol, and the whole declared plan run. Anything less is
+    # reported as what it is and fails the row.
+    if delta is None:
+        status = UNSUPPORTED
+    else:
+        status = protocol_status
     return [
         Check(
             key="holdout_generalisation",
             claim="Generalisation on unseen holdout tasks",
-            status=PASS if delta is not None and holdout["reproducible"] else FAIL,
+            status=status,
             value=delta,
             detail=(
                 f"{summary.get('baseline_passes')}/{summary.get('baseline_trials')} "
                 f"baseline vs {summary.get('candidate_passes')}/"
                 f"{summary.get('candidate_trials')} evolved on tasks the "
-                f"proposer never saw"
+                f"proposer never saw; {protocol_detail}"
             ),
-            evidence=[f"benchmarks/results/{directory}/summary.json"],
+            evidence=[
+                f"benchmarks/results/{directory}/summary.json",
+                f"benchmarks/results/{directory}/baseline-results.jsonl",
+                f"benchmarks/results/{directory}/candidate-results.jsonl",
+            ],
         )
     ]
 
@@ -942,8 +1066,9 @@ def render_markdown(
         "no supporting artifact reports `UNSUPPORTED` rather than being",
         "softened. No row asserts that a measurement cleared a target.",
         "",
-        "CI regenerates this file and fails if it disagrees with the raw",
-        "results, so a stale or edited number cannot survive a push.",
+        "This file is generated and never committed. CI re-derives every row",
+        "from the committed artifacts and fails on any FAIL, so a stale or",
+        "edited number cannot survive a push.",
         "",
         "## Headline",
         "",
@@ -1034,6 +1159,7 @@ __all__ = [
     "build_report",
     "comparable",
     "declared_dependencies",
+    "declared_plan",
     "graph_node_sets",
     "latest_experiment",
     "load_experiment",
