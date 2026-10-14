@@ -33,9 +33,12 @@ export function ScoreChart() {
   const { tree, selectedNode } = useDashboard();
   const [hovered, setHovered] = useState<string | null>(null);
 
-  const mainNodes = tree.filter(n => !n.isForkBranch).sort((a, b) => a.iteration - b.iteration);
-  const forkNodes = tree.filter(n => n.isForkBranch).sort((a, b) => a.iteration - b.iteration);
-  const rejectedNodes = tree.filter(n => n.status === 'rejected');
+  // A smoke-failed candidate never ran: it has no accuracy to plot, and
+  // drawing it at 0 would read as a measured total failure.
+  const scored = tree.filter(n => n.status !== 'smoke_failed');
+  const mainNodes = scored.filter(n => !n.isForkBranch).sort((a, b) => a.iteration - b.iteration);
+  const forkNodes = scored.filter(n => n.isForkBranch).sort((a, b) => a.iteration - b.iteration);
+  const rejectedNodes = scored.filter(n => n.status === 'rejected');
   const bestNode = tree.find(n => n.status === 'best');
   const plottedNodes = useMemo(
     () => [...mainNodes, ...forkNodes, ...rejectedNodes],
@@ -110,6 +113,7 @@ export function ScoreChart() {
     : null;
   const acceptedCount = tree.filter(n => n.status === 'accepted' || n.status === 'best').length;
   const rejectedCount = tree.filter(n => n.status === 'rejected').length;
+  const smokeFailedCount = tree.filter(n => n.status === 'smoke_failed').length;
   const forkCount = tree.filter(n => n.isForkBranch).length;
   const latestDelta = latestNode?.delta ?? null;
 
@@ -136,7 +140,12 @@ export function ScoreChart() {
         </div>
         <div className="rounded border border-border bg-header/70 px-2 py-2">
           <div className="text-[8px] uppercase tracking-wide text-text-ghost">Accepted / Rejected</div>
-          <div className="text-[12px] text-text-hi font-semibold">{acceptedCount} / {rejectedCount}</div>
+          <div className="text-[12px] text-text-hi font-semibold">
+            {acceptedCount} / {rejectedCount}
+            {smokeFailedCount > 0 && (
+              <span className="ml-1 text-[9px] text-amber font-normal">+{smokeFailedCount} smoke failed</span>
+            )}
+          </div>
         </div>
         <div className="rounded border border-border bg-header/70 px-2 py-2">
           <div className="text-[8px] uppercase tracking-wide text-text-ghost">Fork branches</div>

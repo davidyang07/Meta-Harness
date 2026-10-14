@@ -3,7 +3,14 @@
 import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useRouter } from 'next/navigation';
-import { createRun, listRuns, isBackendAvailable, type RunListItem } from '@/lib/api';
+import {
+  ApiUnauthorizedError,
+  createRun,
+  listRuns,
+  isBackendAvailable,
+  type RunListItem,
+} from '@/lib/api';
+import { useAuthStatus } from '@/lib/auth-client';
 
 const TITLE = 'META-HARNESS';
 const SUBTITLE = 'autonomous agent evolution monitor';
@@ -191,12 +198,21 @@ export default function Home() {
   const [selectedPresetId, setSelectedPresetId] = useState<string>(PRESET_SUITES[1]?.id ?? PRESET_SUITES[0].id);
   const [mockModeEnabled, setMockModeEnabled] = useState(true);
   const [proposerMode, setProposerMode] = useState<'mock' | 'claude'>('mock');
+  const [authError, setAuthError] = useState<string | null>(null);
+  const { enabled: authEnabled, profile } = useAuthStatus();
 
   useEffect(() => {
     if (phase !== 'ready') return;
     isBackendAvailable().then(ok => {
       setLive(ok);
-      if (ok) listRuns().then(setRuns).catch(() => setRuns([]));
+      if (ok) {
+        listRuns()
+          .then(setRuns)
+          .catch(error => {
+            setRuns([]);
+            if (error instanceof ApiUnauthorizedError) setAuthError(error.message);
+          });
+      }
     });
   }, [phase]);
 
@@ -270,15 +286,25 @@ export default function Home() {
               >
                 {live === false ? 'Enter Mock Dashboard →' : 'Enter Dashboard →'}
               </motion.button>
-              <div className="flex items-center gap-3 text-[10px] uppercase tracking-[0.15em]">
-                <a href="/auth/login" className="text-cyan hover:text-text-hi transition-colors">
-                  Login
-                </a>
-                <span className="text-text-ghost">/</span>
-                <a href="/auth/logout" className="text-text-mid hover:text-text-hi transition-colors">
-                  Logout
-                </a>
-              </div>
+              {/* Without Auth0 there are no /auth routes; the links would 404. */}
+              {authEnabled && (
+                <div className="flex items-center gap-3 text-[10px] uppercase tracking-[0.15em]">
+                  {profile ? (
+                    <a href="/auth/logout" className="text-text-mid hover:text-text-hi transition-colors">
+                      Logout
+                    </a>
+                  ) : (
+                    <a href="/auth/login" className="text-cyan hover:text-text-hi transition-colors">
+                      Login
+                    </a>
+                  )}
+                </div>
+              )}
+              {authError && (
+                <div data-testid="auth-error" className="max-w-115 text-center text-[10px] text-red">
+                  {authError}
+                </div>
+              )}
               <div className="mt-2 w-full max-w-115 rounded border border-border bg-header/80 px-4 py-3">
                 <div className="text-[9px] uppercase tracking-wide text-text-mid mb-2">Preset test suites</div>
                 <div className="mb-3 grid grid-cols-1 md:grid-cols-2 gap-2">

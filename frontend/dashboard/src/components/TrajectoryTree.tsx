@@ -1,11 +1,11 @@
 'use client';
-import { useRef, useEffect, useState } from 'react';
+import { useCallback, useRef, useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import * as d3 from 'd3';
-import { useDashboard, useDashboardDispatch } from '@/lib/state';
+import { forkKey, useDashboard, useDashboardDispatch } from '@/lib/state';
 import { ForkModal } from './ForkModal';
 import { resolveCheckpointForNode } from '@/lib/api';
-import type { TreeNode } from '@/lib/types';
+import type { ForkEvent, TreeNode } from '@/lib/types';
 
 const STATUS_STYLES: Record<string, { border: string; bg: string; text: string }> = {
   seed: { border: '#32323e', bg: '#16161e', text: '#c8c8d0' },
@@ -13,7 +13,24 @@ const STATUS_STYLES: Record<string, { border: string; bg: string; text: string }
   rejected: { border: '#b06068', bg: '#181114', text: '#c8c8d0' },
   best: { border: '#7ab8ad', bg: '#111616', text: '#c8c8d0' },
   fork: { border: '#8878a8', bg: '#141218', text: '#c8c8d0' },
+  smoke_failed: { border: '#b09868', bg: '#17150f', text: '#c8c8d0' },
 };
+
+/** Did not win: drawn faded and placed after the live children. */
+function isDiscarded(node: TreeNode): boolean {
+  return node.status === 'rejected' || node.status === 'smoke_failed';
+}
+
+/** The first node of the branch a fork event created, if it has arrived. */
+function nodeForFork(tree: TreeNode[], fork: ForkEvent): TreeNode | undefined {
+  if (fork.threadId) return tree.find(node => node.threadId === fork.threadId);
+  const rawBranchId = fork.branchId.trim();
+  const normalizedBranchId = rawBranchId.replace(/^fork\./, '');
+  return tree.find(node => {
+    const threadId = node.threadId ?? '';
+    return threadId.includes(`.fork.${normalizedBranchId}`) || threadId.includes(rawBranchId);
+  });
+}
 
 const NODE_W = 200;
 const NODE_H = 72;
@@ -46,9 +63,9 @@ function layoutTree(nodes: TreeNode[]): LayoutNode[] {
     if (children.length === 1) {
       place(children[0].candidate, depth + 1, column);
     } else if (children.length > 1) {
-      const mainChildren = children.filter(c => !c.isForkBranch && c.status !== 'rejected');
+      const mainChildren = children.filter(c => !c.isForkBranch && !isDiscarded(c));
       const forkChildren = children.filter(c => c.isForkBranch);
-      const rejectedChildren = children.filter(c => c.status === 'rejected');
+      const rejectedChildren = children.filter(c => !c.isForkBranch && isDiscarded(c));
       const ordered = [...mainChildren, ...forkChildren, ...rejectedChildren];
 
       ordered.forEach((child, i) => {
@@ -67,22 +84,68 @@ export function TrajectoryTree() {
   const { tree, selectedNode, forkEvents, mode, run } = useDashboard();
   const dispatch = useDashboardDispatch();
   const [forkTarget, setForkTarget] = useState<{ candidate: string; checkpointId: string; parentThreadId?: string } | null>(null);
+  // The fork whose first node was already auto-selected. Without it the
+  // effect re-selected that node on every selection change, so after any
+  // fork the user could not select anything else.
+  const handledForkRef = useRef<string | null>(null);
 
   useEffect(() => {
     const latestFork = forkEvents.at(-1);
     if (!latestFork) return;
-    const rawBranchId = latestFork.branchId.trim();
-    const normalizedBranchId = rawBranchId.replace(/^fork\./, "");
-    const branchNode = tree.find((node) => {
-      const threadId = node.threadId ?? "";
-      return (
-        threadId.includes(`.fork.${normalizedBranchId}`) ||
-        threadId.includes(rawBranchId)
-      );
-    });
-    if (!branchNode || selectedNode === branchNode.candidate) return;
+    const key = forkKey(latestFork);
+    if (handledForkRef.current === key) return;
+    // The branch's first node may arrive after the fork event; the tree
+    // changing re-runs this until it does, then never again for this fork.
+    const branchNode = nodeForFork(tree, latestFork);
+    if (!branchNode) return;
+    handledForkRef.current = key;
     dispatch({ type: 'SELECT_NODE', payload: branchNode.candidate });
-  }, [tree, forkEvents, selectedNode, dispatch]);
+  }, [tree, forkEvents, dispatch]);
+
+  const openForkFor = useCallback(
+    async (node: TreeNode) => {
+      let checkpointId = node.checkpointId ?? undefined;
+      if (!checkpointId && mode === 'mock') {
+        checkpointId = run?.checkpointId ?? undefined;
+      }
+      if (!checkpointId && mode === 'live') {
+        // Resolved against the node's own thread: a fork-branch node's
+        // checkpoints are not in the root thread's history.
+        const resolvedCheckpointId = await resolveCheckpointForNode(params.run_id, {
+          candidate: node.candidate,
+          iteration: node.iteration,
+          threadId: node.threadId,
+        }).catch(() => null);
+        checkpointId = resolvedCheckpointId ?? undefined;
+        if (checkpointId) {
+          dispatch({
+            type: 'SET_CHECKPOINT_ID',
+            payload: { candidate: node.candidate, checkpointId },
+          });
+        }
+      }
+      if (!checkpointId) {
+        dispatch({
+          type: 'ADD_LOG_ENTRY',
+          payload: {
+            id: `fork-pending-${Date.now()}`,
+            timestamp: new Date().toISOString(),
+            tag: 'fork',
+            text: `${node.candidate} has no checkpoint yet; this candidate may not be persisted in checkpoints yet`,
+            candidateName: node.candidate,
+            threadId: node.threadId,
+          },
+        });
+        return;
+      }
+      setForkTarget({
+        candidate: node.candidate,
+        checkpointId,
+        parentThreadId: node.threadId,
+      });
+    },
+    [dispatch, mode, params.run_id, run?.checkpointId],
+  );
 
   useEffect(() => {
     if (!svgRef.current || tree.length === 0) return;
@@ -139,7 +202,11 @@ export function TrajectoryTree() {
       const parent = byName.get(node.parent_candidate_name);
       if (!parent) continue;
 
-      const color = node.isForkBranch ? '#8878a8' : node.status === 'rejected' ? '#b06068' : '#6a9e78';
+      const color = node.isForkBranch
+        ? '#8878a8'
+        : isDiscarded(node)
+          ? STATUS_STYLES[node.status].border
+          : '#6a9e78';
       g.append('line')
         .attr('x1', parent.x + NODE_W / 2)
         .attr('y1', parent.y + NODE_H)
@@ -147,7 +214,7 @@ export function TrajectoryTree() {
         .attr('y2', node.y)
         .attr('stroke', color)
         .attr('stroke-width', 1.5)
-        .attr('opacity', node.status === 'rejected' ? 0.35 : 0.6);
+        .attr('opacity', isDiscarded(node) ? 0.35 : 0.6);
     }
 
     // Fork zone
@@ -173,52 +240,19 @@ export function TrajectoryTree() {
     for (const node of laid) {
       const style = STATUS_STYLES[node.status] || STATUS_STYLES.seed;
       const isSelected = selectedNode === node.candidate;
-      const opacity = node.status === 'rejected' ? 0.35 : 1;
+      const opacity = node.status === 'rejected' ? 0.35 : node.status === 'smoke_failed' ? 0.6 : 1;
 
       const nodeG = g.append('g')
         .attr('transform', `translate(${node.x}, ${node.y})`)
         .attr('opacity', opacity)
         .attr('cursor', 'pointer')
         .attr('data-testid', 'trajectory-node')
+        .attr('data-candidate', node.candidate)
+        .attr('data-status', node.status)
         .on('click', () => dispatch({ type: 'SELECT_NODE', payload: node.candidate }))
-        .on('contextmenu', async (event: MouseEvent) => {
+        .on('contextmenu', (event: MouseEvent) => {
           event.preventDefault();
-          let checkpointId = node.checkpointId ?? undefined;
-          if (!checkpointId && mode === 'mock') {
-            checkpointId = run?.checkpointId ?? undefined;
-          }
-          if (!checkpointId && mode === 'live') {
-            const resolvedCheckpointId = await resolveCheckpointForNode(params.run_id, {
-              candidate: node.candidate,
-              iteration: node.iteration,
-              threadId: node.threadId,
-            }).catch(() => null);
-            checkpointId = resolvedCheckpointId ?? undefined;
-            if (checkpointId) {
-              dispatch({
-                type: 'SET_CHECKPOINT_ID',
-                payload: { candidate: node.candidate, checkpointId },
-              });
-            }
-          }
-          if (!checkpointId) {
-            dispatch({
-              type: 'ADD_LOG_ENTRY',
-              payload: {
-                id: `fork-pending-${Date.now()}`,
-                timestamp: new Date().toISOString(),
-                tag: 'fork',
-                text: `${node.candidate} has no checkpoint yet; this candidate may not be persisted in checkpoints yet`,
-                candidateName: node.candidate,
-              },
-            });
-            return;
-          }
-          setForkTarget({
-            candidate: node.candidate,
-            checkpointId,
-            parentThreadId: node.threadId,
-          });
+          void openForkFor(node);
         });
 
       // Best glow
@@ -251,16 +285,18 @@ export function TrajectoryTree() {
         .attr('font-weight', 500)
         .text(node.candidate.length > 22 ? node.candidate.slice(0, 22) + '…' : node.candidate);
 
-      // Score
+      // Score. A smoke-failed candidate never ran, so it has no score —
+      // drawing 0.00 would claim it was measured and scored nothing.
       nodeG.append('text')
         .attr('x', 10).attr('y', 56)
         .attr('fill', style.border).attr('font-size', 15)
         .attr('font-family', 'monospace')
         .attr('font-weight', 600)
-        .text(node.scores.accuracy.toFixed(2));
+        .attr('data-testid', 'trajectory-node-score')
+        .text(node.status === 'smoke_failed' ? '—' : node.scores.accuracy.toFixed(2));
 
       // Delta
-      if (node.delta !== null) {
+      if (node.delta !== null && node.status !== 'smoke_failed') {
         const deltaColor = node.delta >= 0 ? '#6a9e78' : '#b06068';
         const deltaText = node.delta >= 0 ? `+${node.delta.toFixed(2)}` : node.delta.toFixed(2);
         nodeG.append('text')
@@ -287,6 +323,14 @@ export function TrajectoryTree() {
           .attr('font-family', 'monospace')
           .attr('font-weight', 600)
           .text('REJECTED');
+      } else if (node.status === 'smoke_failed') {
+        nodeG.append('text')
+          .attr('x', NODE_W - 10).attr('y', 16)
+          .attr('text-anchor', 'end')
+          .attr('fill', STATUS_STYLES.smoke_failed.border).attr('font-size', 8)
+          .attr('font-family', 'monospace')
+          .attr('font-weight', 600)
+          .text('SMOKE FAILED');
       } else if (node.status === 'accepted') {
         nodeG.append('text')
           .attr('x', NODE_W - 10).attr('y', 16)
@@ -302,44 +346,9 @@ export function TrajectoryTree() {
         .attr('transform', `translate(${NODE_W - 28}, ${NODE_H - 22})`)
         .attr('opacity', 0)
         .attr('cursor', 'pointer')
-        .on('click', async (event: MouseEvent) => {
+        .on('click', (event: MouseEvent) => {
           event.stopPropagation();
-          let checkpointId = node.checkpointId ?? undefined;
-          if (!checkpointId && mode === 'mock') {
-            checkpointId = run?.checkpointId ?? undefined;
-          }
-          if (!checkpointId && mode === 'live') {
-            const resolvedCheckpointId = await resolveCheckpointForNode(params.run_id, {
-              candidate: node.candidate,
-              iteration: node.iteration,
-              threadId: node.threadId,
-            }).catch(() => null);
-            checkpointId = resolvedCheckpointId ?? undefined;
-            if (checkpointId) {
-              dispatch({
-                type: 'SET_CHECKPOINT_ID',
-                payload: { candidate: node.candidate, checkpointId },
-              });
-            }
-          }
-          if (!checkpointId) {
-            dispatch({
-              type: 'ADD_LOG_ENTRY',
-              payload: {
-                id: `fork-pending-${Date.now()}`,
-                timestamp: new Date().toISOString(),
-                tag: 'fork',
-                text: `${node.candidate} has no checkpoint yet; this candidate may not be persisted in checkpoints yet`,
-                candidateName: node.candidate,
-              },
-            });
-            return;
-          }
-          setForkTarget({
-            candidate: node.candidate,
-            checkpointId,
-            parentThreadId: node.threadId,
-          });
+          void openForkFor(node);
         });
 
       forkBtn.append('rect')
@@ -363,7 +372,7 @@ export function TrajectoryTree() {
           forkBtn.transition().duration(150).attr('opacity', 0);
         });
     }
-  }, [tree, selectedNode, forkEvents, mode, run?.checkpointId, dispatch, params.run_id]);
+  }, [tree, selectedNode, forkEvents, dispatch, openForkFor]);
 
   return (
     <>

@@ -9,10 +9,68 @@ import type {
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
+// Must be read as a literal `process.env.NEXT_PUBLIC_…` so Next inlines it
+// into the client bundle. It is a shared secret for a backend started
+// with META_HARNESS_API_TOKEN; it is visible to anyone who can load the
+// dashboard, so it gates the API, not the dashboard itself.
+const API_TOKEN = (process.env.NEXT_PUBLIC_META_HARNESS_API_TOKEN ?? "").trim();
+
+// ── Authentication ──
+
+export const AUTH_ERROR_MESSAGE = API_TOKEN
+  ? "backend rejected the API token (401): NEXT_PUBLIC_META_HARNESS_API_TOKEN " +
+    "does not match the server's META_HARNESS_API_TOKEN"
+  : "backend requires an API token (401): set NEXT_PUBLIC_META_HARNESS_API_TOKEN " +
+    "to the server's META_HARNESS_API_TOKEN and restart the dashboard";
+
+/** The backend answered 401: the token is missing or wrong. */
+export class ApiUnauthorizedError extends Error {
+  constructor() {
+    super(AUTH_ERROR_MESSAGE);
+    this.name = "ApiUnauthorizedError";
+  }
+}
+
+const unauthorizedListeners = new Set<(message: string) => void>();
+
+/**
+ * Be told about every 401, including those from calls whose callers
+ * deliberately degrade to an empty state (diffs, memory). Without this
+ * a wrong token reads as "this run has no data".
+ */
+export function onUnauthorized(listener: (message: string) => void): () => void {
+  unauthorizedListeners.add(listener);
+  return () => {
+    unauthorizedListeners.delete(listener);
+  };
+}
+
+async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  if (API_TOKEN) headers.set("Authorization", `Bearer ${API_TOKEN}`);
+  const res = await fetch(`${BASE_URL}${path}`, { ...init, headers });
+  if (res.status === 401) {
+    for (const listener of unauthorizedListeners) listener(AUTH_ERROR_MESSAGE);
+    throw new ApiUnauthorizedError();
+  }
+  return res;
+}
+
+/**
+ * URL of a run's SSE stream. EventSource cannot send headers, so the
+ * token travels as a query parameter, which the backend accepts on its
+ * SSE routes only.
+ */
+export function streamUrl(runId: string): string {
+  const url = `${BASE_URL}/runs/${encodeURIComponent(runId)}/stream`;
+  return API_TOKEN ? `${url}?token=${encodeURIComponent(API_TOKEN)}` : url;
+}
+
 // ── Availability check ──
 
 export async function isBackendAvailable(): Promise<boolean> {
   try {
+    // /health is the one route that never requires the token.
     const res = await fetch(`${BASE_URL}/health`, { signal: AbortSignal.timeout(2000) });
     return res.ok;
   } catch {
@@ -47,14 +105,14 @@ export type CreateRunResponse = {
 };
 
 export async function listRuns(): Promise<RunListItem[]> {
-  const res = await fetch(`${BASE_URL}/runs`);
+  const res = await apiFetch("/runs");
   if (!res.ok) return [];
   const data = await res.json();
   return Array.isArray(data) ? data : data.runs ?? [];
 }
 
 export async function createRun(payload: CreateRunRequest): Promise<CreateRunResponse> {
-  const res = await fetch(`${BASE_URL}/runs`, {
+  const res = await apiFetch("/runs", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload),
@@ -68,7 +126,7 @@ export async function createRun(payload: CreateRunRequest): Promise<CreateRunRes
 // ── Run detail ──
 
 export async function fetchRunInfo(runId: string): Promise<unknown> {
-  const res = await fetch(`${BASE_URL}/runs/${runId}`);
+  const res = await apiFetch(`/runs/${encodeURIComponent(runId)}`);
   if (!res.ok) throw new Error(`run ${runId} not found`);
   return res.json();
 }
@@ -84,6 +142,7 @@ type RunDetail = {
   best_score?: number | null;
   bestScore?: number | null;
   status?: string;
+  error?: string;
   current_iteration?: number;
   iteration?: number;
   summary_rows?: EvolutionRow[];
@@ -94,6 +153,7 @@ type RunDetail = {
     mock_proposer?: boolean;
     mock_bench?: boolean;
     metrics_source?: string;
+    error?: string;
   };
 };
 
@@ -102,7 +162,10 @@ type EvolutionRow = {
   candidate_name?: string;
   parent_candidate_name?: string | null;
   iteration?: number;
-  status?: CandidateStatus;
+  /** Absent on rows written before the backend recorded a verdict. */
+  status?: string;
+  accepted?: boolean;
+  reason?: string;
   scores?: Scores;
   hypothesis?: string;
   axis?: "exploration" | "exploitation";
@@ -154,24 +217,59 @@ export function toRunInfo(value: RunDetail): RunSummary {
   };
 }
 
+/** Why a failed run failed, as the backend recorded it. */
+export function runErrorOf(value: RunDetail): string | null {
+  const detail = asRunDetail(value);
+  return detail.error ?? detail.manifest?.error ?? null;
+}
+
 /** A thread id of the form "<run>.fork.<id>" identifies a forked branch. */
 export function isForkThread(threadId: string | undefined): boolean {
   return Boolean(threadId && threadId.includes(".fork."));
+}
+
+const KNOWN_STATUSES: ReadonlySet<string> = new Set<CandidateStatus>([
+  "seed",
+  "accepted",
+  "rejected",
+  "best",
+  "fork",
+  "smoke_failed",
+]);
+
+/**
+ * The backend's verdict on one evolution row, or null when the row
+ * predates verdicts. Never guessed from the score: a candidate that
+ * scored well can still have been rejected against a better parent.
+ */
+export function statusFromRow(row: EvolutionRow): CandidateStatus | null {
+  if (row.status === "smoke_failed" || row.reason === "smoke_failed") return "smoke_failed";
+  if (row.status && KNOWN_STATUSES.has(row.status)) return row.status as CandidateStatus;
+  if (row.accepted === true) return "accepted";
+  if (row.accepted === false) return "rejected";
+  return null;
 }
 
 export function toTreeNodes(rows: EvolutionRow[]): TreeNode[] {
   return rows.map((r) => {
     const candidate = r.candidate ?? r.candidate_name ?? "";
     const threadId = r.thread_id;
+    const verdict = statusFromRow(r);
+    const parent = r.parent_candidate_name ?? null;
+    // The root of the search is the measured baseline, not a proposal
+    // that was accepted or rejected.
+    const status: CandidateStatus =
+      verdict === "smoke_failed" ? verdict : parent === null ? "seed" : verdict ?? "seed";
     return {
       candidate,
-      parent_candidate_name: r.parent_candidate_name ?? null,
+      parent_candidate_name: parent,
       iteration: r.iteration ?? 0,
-      status: r.status ?? "seed",
+      status,
       scores: r.scores ?? { accuracy: 0 },
       hypothesis: r.hypothesis,
       axis: r.axis,
-      delta: r.delta ?? null,
+      // A candidate that never loaded has no score to compare.
+      delta: status === "smoke_failed" ? null : r.delta ?? null,
       // Branch identity comes from the thread id the backend stamped on
       // the row, not from a separate flag that can drift out of sync.
       isForkBranch: r.is_fork_branch ?? isForkThread(threadId),
@@ -182,25 +280,48 @@ export function toTreeNodes(rows: EvolutionRow[]): TreeNode[] {
 }
 
 export function toTreeNodesFromRunDetail(detail: RunDetail): TreeNode[] {
-  const nodes = toTreeNodes(detail.summary_rows ?? []);
-  const best = detail.frontier_val?._best?.name;
-  const frontier = new Set(detail.frontier_val?._pareto_names ?? []);
-  return nodes.map((node) => ({
-    ...node,
-    status:
-      best && node.candidate === best
-        ? "best"
-        : frontier.has(node.candidate)
-          ? "accepted"
-          : node.status,
-  }));
+  const rows = detail.summary_rows ?? [];
+  const nodes = toTreeNodes(rows);
+  const rootThread = detail.thread_id ?? detail.run_id ?? "";
+
+  // Every branch keeps its own frontier, so each has its own best. A
+  // fork's frontier can name a candidate it inherited from main; that
+  // says nothing about main, so a best only marks a node of its own thread.
+  const frontiers = new Map<string, FrontierVal>(Object.entries(detail.branch_frontiers ?? {}));
+  if (detail.frontier_val && !frontiers.has(rootThread)) {
+    frontiers.set(rootThread, detail.frontier_val);
+  }
+
+  return nodes.map((node, idx) => {
+    const frontier = frontiers.get(node.threadId ?? rootThread);
+    if (!frontier) return node;
+    const decidedAgainst = node.status === "rejected" || node.status === "smoke_failed";
+    if (frontier._best?.name === node.candidate && !decidedAgainst) {
+      return { ...node, status: "best" };
+    }
+    // Rows without a verdict: frontier membership is the best signal left.
+    if (
+      statusFromRow(rows[idx]) === null &&
+      node.parent_candidate_name !== null &&
+      (frontier._pareto_names ?? []).includes(node.candidate)
+    ) {
+      return { ...node, status: "accepted" };
+    }
+    return node;
+  });
 }
 
 // ── Checkpoints ──
 
-export async function fetchCheckpoints(runId: string): Promise<unknown> {
-  const res = await fetch(`${BASE_URL}/runs/${runId}/checkpoints`);
-  if (!res.ok) throw new Error(`checkpoints for ${runId} not found`);
+/**
+ * A thread's checkpoint history. Omitting `threadId` (or passing the
+ * run's own id) reads the root thread; a fork's id reads that fork.
+ */
+export async function fetchCheckpoints(runId: string, threadId?: string): Promise<unknown> {
+  const query =
+    threadId && threadId !== runId ? `?thread_id=${encodeURIComponent(threadId)}` : "";
+  const res = await apiFetch(`/runs/${encodeURIComponent(runId)}/checkpoints${query}`);
+  if (!res.ok) throw new Error(`checkpoints for ${threadId ?? runId} not found (${res.status})`);
   return res.json();
 }
 
@@ -233,8 +354,11 @@ export async function resolveCheckpointForNode(
 ): Promise<string | null> {
   let raw: unknown;
   try {
-    raw = await fetchCheckpoints(runId);
-  } catch {
+    // A fork-branch node's checkpoints live on its own thread; the root
+    // thread's history does not contain them.
+    raw = await fetchCheckpoints(runId, node.threadId);
+  } catch (error) {
+    if (error instanceof ApiUnauthorizedError) throw error;
     // Some runs (especially dry-runs) may not expose checkpoint history yet.
     // Returning null lets callers surface a graceful "no checkpoint" message
     // instead of throwing an unhandled rejection from click handlers.
@@ -284,7 +408,7 @@ type TrajectoryThread = {
 };
 
 export async function fetchTrajectory(runId: string): Promise<BranchNode[]> {
-  const res = await fetch(`${BASE_URL}/runs/${encodeURIComponent(runId)}/trajectory`);
+  const res = await apiFetch(`/runs/${encodeURIComponent(runId)}/trajectory`);
   if (!res.ok) throw new Error(`trajectory for ${runId} not available (${res.status})`);
   const data = await res.json();
   const threads = data?.trajectory?.threads;
@@ -317,12 +441,12 @@ export async function postFork(
     name?: string;
   },
 ): Promise<unknown> {
-  const res = await fetch(`${BASE_URL}/runs/${runId}/fork`, {
+  const res = await apiFetch(`/runs/${encodeURIComponent(runId)}/fork`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`fork failed for run ${runId}`);
+  if (!res.ok) throw new Error(`fork failed for run ${runId} (${res.status})`);
   return res.json();
 }
 
@@ -342,9 +466,7 @@ export async function forkRun(
 // ── Memory ──
 
 export async function fetchMemory(namespace: string, limit = 50): Promise<unknown> {
-  const res = await fetch(
-    `${BASE_URL}/memory/${encodeURIComponent(namespace)}?limit=${limit}`,
-  );
+  const res = await apiFetch(`/memory/${encodeURIComponent(namespace)}?limit=${limit}`);
   if (!res.ok) throw new Error(`memory namespace ${namespace} not found`);
   return res.json();
 }
@@ -364,8 +486,8 @@ export async function listMemory(namespace: string, limit = 50): Promise<MemoryE
 }
 
 export async function getDiff(runId: string, candidate: string): Promise<string | null> {
-  const res = await fetch(
-    `${BASE_URL}/runs/${encodeURIComponent(runId)}/candidates/${encodeURIComponent(candidate)}/diff`,
+  const res = await apiFetch(
+    `/runs/${encodeURIComponent(runId)}/candidates/${encodeURIComponent(candidate)}/diff`,
   );
   if (!res.ok) return null;
   const data = await res.json();
@@ -373,8 +495,8 @@ export async function getDiff(runId: string, candidate: string): Promise<string 
 }
 
 export async function getTestOutput(runId: string, candidate: string): Promise<string | null> {
-  const res = await fetch(
-    `${BASE_URL}/runs/${encodeURIComponent(runId)}/candidates/${encodeURIComponent(candidate)}/test-output`,
+  const res = await apiFetch(
+    `/runs/${encodeURIComponent(runId)}/candidates/${encodeURIComponent(candidate)}/test-output`,
   );
   if (!res.ok) return null;
   const data = await res.json();

@@ -3,8 +3,10 @@ import { defineConfig } from '@playwright/test';
 /**
  * Two projects, two contracts:
  *
- * - `mock` renders the built-in demo fixtures with the backend
- *   deliberately unreachable. It proves the UI works offline.
+ * - `mock` needs no backend. dashboard.spec.ts renders the built-in demo
+ *   fixtures with the backend deliberately unreachable; fixture-backend
+ *   .spec.ts scripts every API response and drives a fake EventSource
+ *   event by event. Together they prove the UI and its state logic.
  * - `live-backend` drives the real FastAPI backend (deterministic mock
  *   proposer, no LLM calls) and proves the product plumbing works:
  *   runs, checkpoints, forks, branch isolation, diffs, memory.
@@ -14,7 +16,13 @@ import { defineConfig } from '@playwright/test';
  *     uv run meta-harness serve --port 8000
  *
  * The live suite skips itself with a clear message if no backend answers.
+ *
+ * DASHBOARD_PORT moves the dev server off 3000. Because an existing
+ * server on the port is reused, a second checkout must pick its own
+ * port or it will test the other checkout's code.
  */
+const PORT = Number(process.env.DASHBOARD_PORT ?? 3000);
+
 export default defineConfig({
   testDir: './e2e',
   // Live-backend specs create a real run and wait for LangGraph to
@@ -23,19 +31,19 @@ export default defineConfig({
   expect: { timeout: 10_000 },
   retries: 0,
   use: {
-    baseURL: 'http://localhost:3000',
+    baseURL: `http://localhost:${PORT}`,
     headless: true,
   },
   webServer: {
-    command: 'npm run dev',
-    port: 3000,
+    command: `npm run dev -- --port ${PORT}`,
+    port: PORT,
     reuseExistingServer: true,
     timeout: 60_000,
   },
   projects: [
     {
       name: 'mock',
-      testMatch: /dashboard\.spec\.ts/,
+      testMatch: /(dashboard|fixture-backend)\.spec\.ts/,
       use: { browserName: 'chromium' },
     },
     {

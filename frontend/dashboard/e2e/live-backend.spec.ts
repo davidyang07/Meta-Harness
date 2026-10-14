@@ -19,6 +19,9 @@ import { test, expect, request as playwrightRequest, type APIRequestContext } fr
  */
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:8000';
+// A backend started with META_HARNESS_API_TOKEN needs it on every call
+// but /health. The dashboard under test reads the same variable.
+const API_TOKEN = process.env.NEXT_PUBLIC_META_HARNESS_API_TOKEN ?? '';
 
 let api: APIRequestContext;
 let runId: string;
@@ -50,7 +53,9 @@ async function waitForRun(ctx: APIRequestContext, id: string, timeoutMs = 90_000
 
 test.describe('Dashboard against a live backend', () => {
   test.beforeAll(async () => {
-    api = await playwrightRequest.newContext();
+    api = await playwrightRequest.newContext({
+      extraHTTPHeaders: API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {},
+    });
     test.skip(
       !(await backendIsUp(api)),
       `no backend at ${API_BASE} — start it with "uv run meta-harness serve"`,

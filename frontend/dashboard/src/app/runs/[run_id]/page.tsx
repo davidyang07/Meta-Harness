@@ -4,7 +4,16 @@ import { useEffect, useCallback, useRef } from 'react';
 import { useParams } from 'next/navigation';
 import { DashboardProvider, useDashboardDispatch } from '@/lib/state';
 import { startSSE, startMockSSE, refreshBranches } from '@/lib/sse';
-import { fetchCheckpointCandidateMap, getRunDetail, isBackendAvailable, toRunInfo, toTreeNodesFromRunDetail } from '@/lib/api';
+import {
+  ApiUnauthorizedError,
+  fetchCheckpointCandidateMap,
+  getRunDetail,
+  isBackendAvailable,
+  onUnauthorized,
+  runErrorOf,
+  toRunInfo,
+  toTreeNodesFromRunDetail,
+} from '@/lib/api';
 import { TopBar } from '@/components/TopBar';
 import { TrajectoryTree } from '@/components/TrajectoryTree';
 import { DecisionLog } from '@/components/DecisionLog';
@@ -65,72 +74,124 @@ function DashboardShell() {
         dispatch({
           type: 'ADD_LOG_ENTRY',
           payload: {
-            id: `replay-${node.candidate}-${node.iteration}`,
+            id: `replay-${node.threadId ?? ''}-${node.candidate}-${node.iteration}`,
             timestamp: new Date().toISOString(),
-            tag: 'score',
-            text: `iter ${node.iteration} ${node.candidate} accuracy ${(node.scores.accuracy * 100).toFixed(0)}%`,
+            tag: node.status === 'smoke_failed' ? 'fail' : 'score',
+            text:
+              node.status === 'smoke_failed'
+                ? `iter ${node.iteration} ${node.candidate} smoke failed (no score)`
+                : `iter ${node.iteration} ${node.candidate} accuracy ${(node.scores.accuracy * 100).toFixed(0)}%`,
             candidateName: node.candidate,
+            threadId: node.threadId,
           },
         });
       });
     });
   }, [clearReplayTimers, dispatch]);
 
-  const connect = useCallback(async () => {
-    const live = await isBackendAvailable();
-    dispatch({ type: 'SET_MODE', payload: live ? 'live' : 'mock' });
+  const connect = useCallback(
+    async (signal: AbortSignal): Promise<(() => void) | undefined> => {
+      const live = await isBackendAvailable();
+      // Every await is a point where the page may have unmounted (or, in
+      // StrictMode, been mounted twice). Nothing past one may act for a
+      // view that no longer exists.
+      if (signal.aborted) return undefined;
+      dispatch({ type: 'SET_MODE', payload: live ? 'live' : 'mock' });
 
-    if (live) {
-      try {
-        const detail = await getRunDetail(runId);
-        latestDetailRef.current = detail;
-        const runInfo = toRunInfo(detail);
-        // `mode` is transport ("is a backend answering"), NOT provenance.
-        // Conflating them made a live mock-bench run fall back to the
-        // offline fixtures and render fabricated diff/test text as if it
-        // were the run's own. Provenance lives on run.metricsSource and
-        // is surfaced by the status bar.
-        dispatch({ type: 'SET_RUN', payload: runInfo });
-        for (const node of toTreeNodesFromRunDetail(detail)) {
-          dispatch({ type: 'ADD_TREE_NODE', payload: node });
+      if (live) {
+        try {
+          const detail = await getRunDetail(runId);
+          if (signal.aborted) return undefined;
+          latestDetailRef.current = detail;
+          const runInfo = toRunInfo(detail);
+          // `mode` is transport ("is a backend answering"), NOT provenance.
+          // Conflating them made a live mock-bench run fall back to the
+          // offline fixtures and render fabricated diff/test text as if it
+          // were the run's own. Provenance lives on run.metricsSource and
+          // is surfaced by the status bar.
+          dispatch({ type: 'SET_RUN', payload: runInfo });
+          const runError = runErrorOf(detail);
+          if (runInfo.status === 'failed' && runError) {
+            dispatch({ type: 'SET_ERROR', payload: `run failed: ${runError}` });
+          }
+          for (const node of toTreeNodesFromRunDetail(detail)) {
+            dispatch({ type: 'ADD_TREE_NODE', payload: node });
+          }
+        } catch (error) {
+          if (signal.aborted) return undefined;
+          dispatch({ type: 'SET_SSE_CONNECTED', payload: false });
+          dispatch({
+            type: 'SET_ERROR',
+            payload: error instanceof Error ? error.message : `run ${runId} unavailable`,
+          });
+          return undefined;
         }
-        const checkpoints = await fetchCheckpointCandidateMap(runId);
-        for (const [candidate, checkpointId] of checkpoints) {
-          dispatch({ type: 'SET_CHECKPOINT_ID', payload: { candidate, checkpointId } });
+
+        // Checkpoint history is an enrichment, not a precondition: a
+        // backend running with in-memory persistence 404s here, and that
+        // must not cost the run its branches and its live stream.
+        try {
+          const checkpoints = await fetchCheckpointCandidateMap(runId);
+          if (signal.aborted) return undefined;
+          for (const [candidate, checkpointId] of checkpoints) {
+            dispatch({ type: 'SET_CHECKPOINT_ID', payload: { candidate, checkpointId } });
+          }
+        } catch (error) {
+          if (signal.aborted) return undefined;
+          if (error instanceof ApiUnauthorizedError) {
+            dispatch({ type: 'SET_ERROR', payload: error.message });
+            return undefined;
+          }
         }
+
         // Reconstructed from backend artifacts, so a page refresh
         // rebuilds the branch tree rather than losing it.
         await refreshBranches(runId, dispatch);
-      } catch (error) {
-        dispatch({ type: 'SET_SSE_CONNECTED', payload: false });
-        dispatch({
-          type: 'SET_ERROR',
-          payload: error instanceof Error ? error.message : `run ${runId} unavailable`,
-        });
-        return undefined;
+        if (signal.aborted) return undefined;
+        return startSSE(runId, dispatch);
       }
-      return startSSE(runId, dispatch);
-    }
 
-    if (runId === 'demo-2026-04-25') {
-      return startMockSSE(dispatch);
-    }
+      if (runId === 'demo-2026-04-25') {
+        return startMockSSE(dispatch);
+      }
 
-    // No backend and not the built-in demo: show an explicit empty
-    // state rather than fixture data dressed up as this run.
-    dispatch({ type: 'SET_SSE_CONNECTED', payload: false });
-    dispatch({
-      type: 'SET_ERROR',
-      payload: `backend unavailable — cannot load run ${runId}`,
-    });
-    return undefined;
-  }, [runId, dispatch]);
+      // No backend and not the built-in demo: show an explicit empty
+      // state rather than fixture data dressed up as this run.
+      dispatch({ type: 'SET_SSE_CONNECTED', payload: false });
+      dispatch({
+        type: 'SET_ERROR',
+        payload: `backend unavailable — cannot load run ${runId}`,
+      });
+      return undefined;
+    },
+    [runId, dispatch],
+  );
+
+  // A 401 anywhere — including calls that degrade to an empty state —
+  // is a configuration problem the user has to see.
+  useEffect(
+    () => onUnauthorized(message => dispatch({ type: 'SET_ERROR', payload: message })),
+    [dispatch],
+  );
 
   useEffect(() => {
+    const controller = new AbortController();
     let cleanup: (() => void) | undefined;
-    connect().then(fn => { cleanup = fn; });
+    void connect(controller.signal).then(fn => {
+      // Cleaned up while connect() was still awaiting (StrictMode's
+      // double mount, or leaving during the health probe): close what it
+      // opened instead of leaking a second EventSource that duplicates
+      // every event.
+      if (controller.signal.aborted) {
+        fn?.();
+        return;
+      }
+      cleanup = fn;
+    });
     return () => {
+      controller.abort();
       cleanup?.();
+      cleanup = undefined;
       clearReplayTimers();
     };
   }, [clearReplayTimers, connect]);
