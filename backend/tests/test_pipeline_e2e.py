@@ -54,12 +54,18 @@ def _mini_protocol(tmp_path: Path, *, tasks_dir: Path) -> Path:
     """Write a config whose task set is a one-task copy of the real one."""
     import shutil
 
+    from app.meta_harness import benchmark as bench
+
+    # The scripted candidate solves the fix-typo task; any committed task
+    # still exercises every stage if that one is renamed.
     task = tasks_dir / "task-001-fix-typo"
-    destination = tmp_path / "eval" / "tasks" / "task-001-fix-typo"
+    if not task.is_dir():
+        task = bench.discover_tasks(tasks_dir)[0]
+    destination = tmp_path / "eval" / "tasks" / task.name
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(task, destination)
 
-    config = {**MINI_CONFIG, "task_set": "eval/tasks"}
+    config = {**MINI_CONFIG, "task_set": "eval/tasks", "tasks": [task.name]}
     path = tmp_path / "config.json"
     path.write_text(json.dumps(config), encoding="utf-8")
     return path
@@ -225,9 +231,24 @@ async def test_a_result_the_pipeline_wrote_reads_back_as_evidence(tmp_path: Path
     assert loaded["reproducible"] is True
     assert loaded["mismatched_keys"] == []
     checks = {c.key: c for c in ev._measurement_checks(loaded)}
-    # Four trials is not two hundred, and the row says so.
-    assert checks["canonical_200_trials"].status == ev.FAIL
-    assert checks["canonical_200_trials"].value == 4
+    # No committed protocol under this repo's benchmarks/ declares the
+    # experiment, so completeness has nothing to be checked against.
+    assert checks["canonical_protocol_trials"].status == ev.UNSUPPORTED
+    assert checks["canonical_protocol_trials"].value["observed_trials"] == 4
+    # With the protocol committed where the reader looks, the run is
+    # complete against it: it ran every trial the protocol declares.
+    committed = tmp_path / "benchmarks" / "pass-rate" / "config.json"
+    committed.parent.mkdir(parents=True, exist_ok=True)
+    committed.write_text(config_path.read_text(), encoding="utf-8")
+    loaded = ev.latest_experiment(tmp_path, experiment="pass-rate")
+    checks = {c.key: c for c in ev._measurement_checks(loaded)}
+    assert checks["canonical_protocol_trials"].status == ev.PASS, (
+        checks["canonical_protocol_trials"].detail
+    )
+    assert checks["canonical_protocol_trials"].value == {
+        "observed_trials": 4,
+        "declared_trials": 4,
+    }
     # The pass-rate rows are real measurements from real trials.
     assert checks["baseline_pass_rate"].value is not None
     assert checks["evolved_pass_rate"].value is not None
