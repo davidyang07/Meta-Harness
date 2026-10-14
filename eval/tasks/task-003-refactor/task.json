@@ -1,7 +1,7 @@
 {
   "id": "task-003-refactor",
   "tier": "restructure",
-  "instruction": "The functions process_admins, process_managers, and process_engineers in util.py duplicate the same filter+normalize logic with only the role string differing. Refactor util.py to share the common logic via a single PRIVATE helper function (name starting with '_'). The role string must be a parameter to the helper, not a literal inside each public function. The public API must NOT change: process_admins, process_managers, and process_engineers must all remain importable from util with the same names and behavior. All tests in tests/test_util.py must continue to pass.",
+  "instruction": "util.py has three public functions, process_admins, process_managers and process_engineers, that are copies of the same filter-and-normalize code and differ only in the role they select. Remove the duplication: the shared logic must live in a single private helper (a function whose name starts with '_') that takes the role as a parameter, and each public function must become a thin wrapper around it with no role comparison of its own. The public names, signatures and behaviour must not change. tests/test_util.py checks both the behaviour and the structure; don't modify it.",
   "test_command": "pytest tests/test_util.py -q",
   "expected_files_changed": [
     "util.py"
