@@ -277,7 +277,10 @@ test.describe('Dashboard against a scripted backend', () => {
     await page.getByPlaceholder(/Explore few-shot/).fill('try a narrower plan');
     await page.getByRole('button', { name: 'Create Fork' }).click();
 
+    // The modal closes once the fork is accepted and the branches reloaded.
+    await expect(page.locator('text=⑂ Create Fork')).toHaveCount(0);
     await expect(page.getByText('Fork Created')).toHaveCount(1);
+    // One card, and it is the dashboard's record: it knows the prior.
     await expect(page.getByText('try a narrower plan')).toBeVisible();
     expect(forkBody).toMatchObject({ parent_checkpoint_id: 'ck-fork-2', parent_thread_id: FORK });
 
@@ -305,25 +308,30 @@ test.describe('Dashboard against a scripted backend', () => {
 });
 
 test.describe('Dashboard lifecycle against a scripted backend', () => {
-  test('leaving during the health probe leaks no stream', async ({ page }) => {
+  test('leaving while the run is still loading leaks no stream', async ({ page }) => {
     await page.addInitScript(installFakeEventSource);
     await serveFixtureBackend(page);
-    let healthRequested = false;
-    await page.route(apiPath('/health'), async route => {
-      healthRequested = true;
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      await json(route, 200, { status: 'ok' }).catch(() => undefined);
+    // Compile "/" now, so navigating to it below is quick in dev mode.
+    await page.goto('/');
+    let detailRequested = false;
+    await page.route(apiPath(`/runs/${RUN}`), async route => {
+      detailRequested = true;
+      // Still loading when the user leaves. (The health probe is the same
+      // kind of await, but its own 2s timeout caps how long it can hang.)
+      await new Promise(resolve => setTimeout(resolve, 4000));
+      await json(route, 200, runDetail).catch(() => undefined);
     });
     await page.goto(`/runs/${RUN}`);
-    // The probe is issued from an effect, so the page is hydrated and the
-    // link below navigates client-side, in this same window.
-    await expect.poll(() => healthRequested, { timeout: 30_000 }).toBe(true);
+    // Requested from an effect, so the page is hydrated and the link
+    // below navigates client-side, in this same window.
+    await expect.poll(() => detailRequested, { timeout: 30_000 }).toBe(true);
     await page.evaluate(() => {
       (window as unknown as { __marker: number }).__marker = 1;
     });
     await page.locator('a', { hasText: 'META-HARNESS' }).click();
     await page.waitForURL(url => url.pathname === '/');
-    await page.waitForTimeout(2500);
+    // Let the delayed response land and connect() run to completion.
+    await page.waitForTimeout(6000);
     expect(await page.evaluate(() => (window as unknown as { __marker?: number }).__marker)).toBe(1);
     expect(await openStreams(page)).toBe(0);
   });
