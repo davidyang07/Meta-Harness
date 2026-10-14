@@ -34,6 +34,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import tempfile
 from datetime import datetime, timezone
@@ -114,12 +115,25 @@ def thread_slug(thread_id: str) -> str:
     return f"t-{digest}"
 
 
+def thread_dir_path(run_dir: Path, thread_id: str) -> Path:
+    """Resolve one thread's artifact directory **without creating it**.
+
+    Readers use this. ``thread_dir`` creates the directory tree and a
+    ``thread.json`` marker, which is right for a writer and wrong for a
+    ``GET``: listing runs used to materialise
+    ``threads/<name>/{agents,candidates,proposer-sessions}`` inside any
+    stray directory that happened to sit under ``runs/``.
+    """
+    return _contained_child(
+        run_dir / THREADS_DIRNAME, thread_slug(thread_id), kind="thread"
+    )
+
+
 def thread_dir(run_dir: Path, thread_id: str) -> Path:
     """Return (and create) the artifact directory for one thread."""
     slug = thread_slug(thread_id)
-    root = run_dir / THREADS_DIRNAME
-    root.mkdir(parents=True, exist_ok=True)
-    d = _contained_child(root, slug, kind="thread")
+    (run_dir / THREADS_DIRNAME).mkdir(parents=True, exist_ok=True)
+    d = thread_dir_path(run_dir, thread_id)
     d.mkdir(parents=True, exist_ok=True)
     (d / "candidates").mkdir(exist_ok=True)
     (d / "agents").mkdir(exist_ok=True)
@@ -164,6 +178,38 @@ def make_run_path(repo_root: Path, run_name: str) -> Path:
     return _contained_child(repo_root / "runs", run_name, kind="run")
 
 
+def generated_run_id(prefix: str = "run") -> str:
+    """A fresh run id: ``<prefix>-<UTC second>-<6 hex>``.
+
+    The timestamp keeps ids sortable and readable; the random suffix
+    makes two ids minted in the same second distinct. Without it, two
+    unnamed ``POST /runs`` in one second named the same directory and the
+    second silently took over the first.
+    """
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return validate_artifact_name(
+        f"{prefix}-{stamp}-{secrets.token_hex(3)}", kind="run"
+    )
+
+
+def list_run_dirs(runs_root: Path) -> list[Path]:
+    """Every run directory under ``runs_root``, sorted by name.
+
+    A run is a directory holding a ``manifest.json``. Anything else under
+    ``runs/`` (notes, a half-deleted directory, an editor's scratch dir)
+    is not a run and is not reported as one.
+    """
+    if not runs_root.is_dir():
+        return []
+    return sorted(
+        p
+        for p in runs_root.iterdir()
+        if p.is_dir()
+        and SAFE_NAME_RE.fullmatch(p.name)
+        and (p / "manifest.json").is_file()
+    )
+
+
 def make_run_dir(repo_root: Path, run_name: str, *, fresh: bool = False) -> Path:
     """Create or return the run directory. Wipes if ``fresh=True``."""
     run_dir = make_run_path(repo_root, run_name)
@@ -191,6 +237,143 @@ def read_manifest(run_dir: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
     return json.loads(path.read_text())
+
+
+# ── skills and the run config a manifest records ──────────────────────
+
+SKILLS_DIRNAME = "skills"
+SKILL_FILENAME = "SKILL.md"
+DEFAULT_DOMAIN = "coding-agent"
+
+
+def validate_domain(domain: str) -> str:
+    """A domain names ``skills/meta-harness-<domain>/``; it must be a safe name."""
+    validate_artifact_name(domain, kind="domain")
+    validate_artifact_name(f"meta-harness-{domain}", kind="domain")
+    return domain
+
+
+def default_skill_path(repo_root: Path, domain: str) -> Path:
+    """``<repo>/skills/meta-harness-<domain>/SKILL.md``, containment-checked."""
+    validate_domain(domain)
+    return resolve_skill_path(
+        repo_root, f"{SKILLS_DIRNAME}/meta-harness-{domain}/{SKILL_FILENAME}"
+    )
+
+
+def resolve_skill_path(repo_root: Path, raw: str | Path) -> Path:
+    """Resolve a skill path, refusing anything but ``skills/<name>/SKILL.md``.
+
+    The SKILL.md becomes the proposer's system prompt, so whatever file
+    this resolves to is read and sent to a model. An unchecked path made
+    any readable file a prompt (``/proc/self/environ`` included). Only
+    ``<repo_root>/skills/<SAFE_NAME>/SKILL.md`` is accepted, after
+    symlinks are resolved, so a link inside ``skills/`` cannot point out
+    of it either. Existence is *not* checked here; callers decide whether
+    a missing skill is an error.
+
+    Raises ``ValueError`` with a message that does not echo the input.
+    """
+    skills_root = (repo_root / SKILLS_DIRNAME).resolve()
+    candidate = Path(raw)
+    resolved = (
+        candidate if candidate.is_absolute() else repo_root / candidate
+    ).resolve()
+    try:
+        parts = resolved.relative_to(skills_root).parts
+    except ValueError:
+        raise ValueError("skill path must be skills/<name>/SKILL.md") from None
+    if len(parts) != 2 or parts[1] != SKILL_FILENAME:
+        raise ValueError("skill path must be skills/<name>/SKILL.md")
+    try:
+        skill_dir = _contained_child(skills_root, parts[0], kind="skill")
+    except ValueError:
+        raise ValueError("skill path must be skills/<name>/SKILL.md") from None
+    path = (skill_dir / SKILL_FILENAME).resolve()
+    if path != resolved:
+        raise ValueError("skill path must be skills/<name>/SKILL.md")
+    return path
+
+
+def portable_path(path: Path | str, repo_root: Path) -> str:
+    """``path`` as a repo-relative POSIX string, for anything written to disk.
+
+    Artifacts (manifests, evidence) are read on other machines and other
+    operating systems; an absolute ``C:\\Users\\...`` path in one is
+    both a leak and useless. A path outside ``repo_root`` is made relative
+    with ``..`` segments, or reduced to its name if that is impossible
+    (different drive).
+    """
+    p = Path(path)
+    if not p.is_absolute():
+        return p.as_posix()
+    root = repo_root.resolve()
+    resolved = p.resolve()
+    try:
+        return resolved.relative_to(root).as_posix()
+    except ValueError:
+        pass
+    try:
+        return Path(os.path.relpath(resolved, root)).as_posix()
+    except ValueError:
+        return resolved.name
+
+
+def skill_path_for_manifest(repo_root: Path, skill_path: Path | None) -> str | None:
+    """The manifest form of a skill path: repo-relative POSIX, or ``None``."""
+    if skill_path is None:
+        return None
+    return portable_path(skill_path, repo_root)
+
+
+def skill_path_from_manifest(
+    repo_root: Path, manifest: dict[str, Any]
+) -> Path | None:
+    """Recover the skill a run was started with.
+
+    Reads ``skill_path`` (repo-relative, or an absolute path written by an
+    older version), falling back to the domain's default skill. Every
+    result is containment-checked; a recorded path that resolves outside
+    ``skills/`` is ignored rather than trusted. Returns ``None`` when no
+    usable skill file exists.
+    """
+    raw = manifest.get("skill_path")
+    if raw:
+        try:
+            path = resolve_skill_path(repo_root, str(raw))
+        except ValueError:
+            path = None
+        if path is not None and path.is_file():
+            return path
+    try:
+        path = default_skill_path(
+            repo_root, str(manifest.get("domain") or DEFAULT_DOMAIN)
+        )
+    except ValueError:
+        return None
+    return path if path.is_file() else None
+
+
+def run_config_from_manifest(
+    repo_root: Path, manifest: dict[str, Any]
+) -> dict[str, Any]:
+    """The run config every rebuild/resume path needs, read from a manifest.
+
+    One reader, so the API fork path, ``meta-harness fork``, ``resume``
+    and ``checkpoints`` cannot drift apart again: they all used to
+    hard-code the coding-agent skill and three workers whatever the run
+    was actually started with.
+    """
+    return {
+        "mock_proposer": bool(manifest.get("mock_proposer", False)),
+        "mock_bench": bool(manifest.get("mock_bench", False)),
+        "trials": int(manifest.get("trials") or 5),
+        "workers": int(manifest.get("workers") or 3),
+        "domain": str(manifest.get("domain") or DEFAULT_DOMAIN),
+        "skill_path": skill_path_from_manifest(repo_root, manifest),
+        "record": bool(manifest.get("record", False)),
+        "memory": bool(manifest.get("memory", False)),
+    }
 
 
 # ── thread-scoped artifacts ───────────────────────────────────────────
@@ -261,7 +444,7 @@ def _write_text_atomic(path: Path, text: str) -> None:
 
 def read_evolution_summary(run_dir: Path, thread_id: str) -> list[dict[str, Any]]:
     """Read one thread's evolution rows in write order."""
-    path = thread_dir(run_dir, thread_id) / "evolution_summary.jsonl"
+    path = thread_dir_path(run_dir, thread_id) / "evolution_summary.jsonl"
     if not path.exists():
         return []
     return [
@@ -278,7 +461,7 @@ def write_pending_eval(
 
 def read_pending_eval(run_dir: Path, thread_id: str) -> dict[str, Any] | None:
     """Read this thread's ``pending_eval.json`` if present, else None."""
-    path = thread_dir(run_dir, thread_id) / "pending_eval.json"
+    path = thread_dir_path(run_dir, thread_id) / "pending_eval.json"
     if not path.exists():
         return None
     return json.loads(path.read_text())
@@ -293,7 +476,7 @@ def write_frontier(
 
 def read_frontier(run_dir: Path, thread_id: str) -> dict[str, Any] | None:
     """Read this thread's ``frontier_val.json`` if present."""
-    path = thread_dir(run_dir, thread_id) / "frontier_val.json"
+    path = thread_dir_path(run_dir, thread_id) / "frontier_val.json"
     if not path.exists():
         return None
     return json.loads(path.read_text())
