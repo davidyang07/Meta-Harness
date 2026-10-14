@@ -8,8 +8,8 @@ from fastapi import APIRouter, HTTPException, Request, status
 
 from app.api.runs import get_run_dir
 from app.meta_harness.branches import (
-    cancel_branch,
-    get_branch,
+    BranchOwnedElsewhere,
+    cancel_branch_outcome,
     list_branches,
     reconstruct_trajectory,
 )
@@ -39,26 +39,35 @@ async def cancel_run_branch(
     thread_id: str,
     request: Request,
 ) -> dict[str, str]:
+    """Stop one branch of ``run_id``.
+
+    The branch must belong to the run in the URL: a fork of another run
+    is a 404 here, and nothing is emitted on this run's stream for it.
+    ``branch-cancelled`` is emitted only when the branch's status actually
+    changed — cancelling a branch that already finished is a no-op, not a
+    cancellation. A branch another live process drives is a 409.
+    """
     get_run_dir(request, run_id)
-    if get_branch(thread_id) is None:
+    try:
+        metadata, changed = await cancel_branch_outcome(thread_id, run_id=run_id)
+    except KeyError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="branch not found",
-        )
-    try:
-        metadata = await cancel_branch(thread_id)
-    except KeyError as exc:
+        ) from None
+    except BranchOwnedElsewhere as exc:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from None
 
-    emit_run_event(
-        run_id,
-        "branch-cancelled",
-        {
-            "thread_id": thread_id,
-            "reason": "requested",
-        },
-    )
+    if changed:
+        emit_run_event(
+            run_id,
+            "branch-cancelled",
+            {
+                "thread_id": metadata.thread_id,
+                "reason": "requested",
+            },
+        )
     return {"status": metadata.status}

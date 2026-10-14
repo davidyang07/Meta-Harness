@@ -25,15 +25,34 @@ from app.meta_harness.memory import (
 router = APIRouter(tags=["memory"])
 
 
+#: Upper bound on ``limit``. A query search pre-fetches ``limit * 20``
+#: rows, so an unbounded limit was an unbounded read.
+MAX_LIMIT = 200
+
+_NAMESPACE_PREFIX = "learned_patterns:"
+
+
 class MemorySearchRequest(BaseModel):
     query: str
-    limit: int = Field(default=5, ge=1)
+    limit: int = Field(default=5, ge=1, le=MAX_LIMIT)
+
+
+def _domain(namespace: str) -> str:
+    """The domain a ``{namespace}`` path segment names.
+
+    Accepts the bare domain (``coding-agent``) and the qualified form
+    (``learned_patterns:coding-agent``). The qualified form used to be
+    reported as ``["learned_patterns", "coding-agent"]`` while the store
+    was queried for ``("learned_patterns", "learned_patterns:coding-agent")``,
+    which never holds anything.
+    """
+    if namespace.startswith(_NAMESPACE_PREFIX):
+        return namespace[len(_NAMESPACE_PREFIX):]
+    return namespace
 
 
 def _namespace(namespace: str) -> list[str]:
-    if namespace.startswith("learned_patterns:"):
-        return ["learned_patterns", namespace.split(":", 1)[1]]
-    return ["learned_patterns", namespace]
+    return ["learned_patterns", _domain(namespace)]
 
 
 def _get_memory_store(request: Request) -> Any:
@@ -45,7 +64,7 @@ def _get_memory_store(request: Request) -> Any:
 async def list_memory(
     namespace: str,
     request: Request,
-    limit: int = Query(default=50, ge=1),
+    limit: int = Query(default=50, ge=1, le=MAX_LIMIT),
 ) -> dict[str, Any]:
     store = _get_memory_store(request)
     if store is None:
@@ -60,7 +79,7 @@ async def list_memory(
         # earlier positional call silently raised ``TypeError`` and was
         # swallowed by the ``except Exception``, leaving every REST
         # consumer with ``implemented: False`` even on a healthy store.
-        entries = await list_namespace(store, domain=namespace, limit=limit)
+        entries = await list_namespace(store, domain=_domain(namespace), limit=limit)
         return {
             "namespace": _namespace(namespace),
             "entries": entries,
@@ -100,7 +119,7 @@ async def search_memory(
         # — same silent-pass bug class as the kwarg fix).
         patterns = await search_patterns(
             store,
-            domain=namespace,
+            domain=_domain(namespace),
             limit=payload.limit,
             query=payload.query or None,
         )
