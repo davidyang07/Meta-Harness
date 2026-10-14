@@ -926,14 +926,6 @@ def manifest_skill_path(skill_path: Path | None, repo_root: Path) -> str | None:
         return skill_path.resolve().as_posix()
 
 
-def resolve_manifest_skill_path(value: Any, repo_root: Path) -> Path | None:
-    """Inverse of ``manifest_skill_path``."""
-    if not value:
-        return None
-    path = Path(str(value))
-    return path if path.is_absolute() else (repo_root / path)
-
-
 async def run_outer_loop(
     *,
     run_dir: Path,
@@ -1041,7 +1033,9 @@ async def resume_outer_loop(
         )
     manifest = json.loads(manifest_path.read_text())
     if "skill_path" in manifest:
-        resolved_skill = resolve_manifest_skill_path(manifest.get("skill_path"), repo_root)
+        # The manifest is a file on disk: its skill path is
+        # containment-checked like any other before it becomes a prompt.
+        resolved_skill = runs_mod.skill_path_from_manifest(repo_root, manifest)
         if resolved_skill is None and not manifest.get("mock_proposer", False):
             resolved_skill = skill_path
     else:
@@ -1087,7 +1081,6 @@ __all__ = [
     "default_recording_root",
     "initial_state",
     "manifest_skill_path",
-    "resolve_manifest_skill_path",
     "resume_outer_loop",
     "run_outer_loop",
 ]
