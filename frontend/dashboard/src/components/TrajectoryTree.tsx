@@ -227,7 +227,7 @@ export function TrajectoryTree() {
           <h2 className="text-[13px] font-medium text-ink">Trajectory</h2>
           {tree.length > 0 && (
             <span className="text-[12px] text-ink-subtle tabular">
-              {tree.length} candidates · {forks} {forks === 1 ? 'fork' : 'forks'}
+              {tree.length} {tree.length === 1 ? 'candidate' : 'candidates'} · {forks} {forks === 1 ? 'fork' : 'forks'}
             </span>
           )}
         </div>

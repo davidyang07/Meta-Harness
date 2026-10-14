@@ -126,16 +126,24 @@ export function DecisionLog() {
   const [expandedLines, setExpandedLines] = useState<Set<string>>(new Set());
   const [showCheckpoints, setShowCheckpoints] = useState(false);
 
+  // Follow the newest content: a chapter or a fork card grows the log as
+  // much as a new line does.
   useEffect(() => {
     if (autoScroll && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [logEntries.length, autoScroll]);
+  }, [logEntries.length, iterations.length, forkEvents.length, tree, autoScroll]);
 
+  // Only the user scrolling *up* turns following off. A scroll event that
+  // lands after more content has rendered also reads as "not at the
+  // bottom", and used to switch following off with nobody touching it.
+  const lastScrollTop = useRef(0);
   const handleScroll = () => {
     if (!scrollRef.current) return;
     const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
-    setAutoScroll(scrollHeight - scrollTop - clientHeight < 50);
+    if (scrollHeight - scrollTop - clientHeight < 50) setAutoScroll(true);
+    else if (scrollTop < lastScrollTop.current) setAutoScroll(false);
+    lastScrollTop.current = scrollTop;
   };
 
   const filteredEntries = logEntries.filter(e => {
@@ -206,7 +214,9 @@ export function DecisionLog() {
         />
       </div>
 
-      <div ref={scrollRef} onScroll={handleScroll} className="relative flex-1 overflow-y-auto px-5 py-4">
+      {/* No scroll anchoring: the browser's own scroll adjustments fire scroll
+          events that read as the user scrolling away from the bottom. */}
+      <div ref={scrollRef} onScroll={handleScroll} className="relative flex-1 overflow-y-auto [overflow-anchor:none] px-5 py-4">
         {iterations.length === 0 && forkEvents.length === 0 && (
           <div className="mb-4 rounded-md border border-hairline bg-surface-2 px-4 py-3">
             <div className="text-[13px] font-medium text-ink">Waiting for the first candidate</div>

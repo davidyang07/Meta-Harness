@@ -50,8 +50,12 @@ function DashboardShell() {
     dispatch({ type: 'SET_RUN', payload: { ...runInfo, iteration: 0 } });
     dispatch({ type: 'SET_SSE_CONNECTED', payload: true });
 
+    let iterationSoFar = 0;
     nodes.forEach((node, idx) => {
       schedule(900 + idx * 2200, () => {
+        // The top bar's iteration follows the replay instead of sitting at 0.
+        iterationSoFar = Math.max(iterationSoFar, node.iteration);
+        dispatch({ type: 'SET_RUN', payload: { ...runInfo, iteration: iterationSoFar } });
         dispatch({ type: 'ADD_TREE_NODE', payload: node });
         if (node.checkpointId) {
           dispatch({
