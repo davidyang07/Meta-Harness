@@ -1,0 +1,9 @@
+{
+  "id": "task-015-metrics-registry",
+  "tier": "restructure",
+  "instruction": "telemetry.py keeps its counters and gauges in module-level dictionaries, so a program cannot keep two independent sets of metrics (one per tenant, say, or one per test). Restructure it around a Registry class: Registry() holds its own state and has methods increment, counter, set_gauge, gauge, snapshot and reset with the same signatures and behaviour as today's module functions. The module exposes default_registry, a Registry instance, and keeps every existing module-level function, including the track_calls decorator, with the same names, signatures and behaviour. Those functions, and functions decorated with track_calls, act on whichever registry telemetry.default_registry refers to at the moment they run. No module-level dict, list or set may remain. tests/test_telemetry.py checks this; don't modify it.",
+  "test_command": "pytest tests/test_telemetry.py -q",
+  "expected_files_changed": [
+    "telemetry.py"
+  ]
+}

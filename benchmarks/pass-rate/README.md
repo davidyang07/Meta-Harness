@@ -8,10 +8,10 @@ Published results live in `benchmarks/results/<experiment-id>/`.
 
 | | |
 |---|---|
-| Task set | `eval/tasks/` — the 5 frozen search tasks |
-| Trials per task per arm | 20, independent |
+| Task set | `eval/tasks/` — the 10 frozen search tasks |
+| Trials per task per arm | 10, independent |
 | Arms | `baseline` (control) vs an evolved candidate |
-| Total | 5 × 20 × 2 = **200 task trials** |
+| Total | 10 × 10 × 2 = **200 task trials** |
 | Model | `META_HARNESS_INNER_MODEL`, default `claude-haiku-4-5-20251001` |
 | Config | [`config.json`](config.json) |
 
@@ -145,7 +145,7 @@ Absolute improvement: +N.N percentage points
 95% CI, clustering by task: [-N.N, +N.N] pp (task-cluster-bootstrap-percentile,
                                              10000 resamples, seed 20260901)
 Total trials: 200
-Distinct evaluation tasks (clusters): 5
+Distinct evaluation tasks (clusters): 10
 ```
 
 *(Shape of the output only — the values are deliberately left as `N`, so
@@ -173,14 +173,14 @@ false, `REPORT.md` says so above the number and the CLI exits non-zero.
 
 ## Scope of a result
 
-- **Trials are clustered within tasks.** The 20 trials of one task are 20
+- **Trials are clustered within tasks.** The 10 trials of one task are 10
   looks at the same problem, so the independent unit is the task.
   `cluster_bootstrap_ci` resamples **tasks** with replacement, carrying
   every trial of a drawn task with it and drawing the same task into both
   arms (both arms ran the identical task set). It is deterministic under
   the published seed, so anyone can recompute it from the published rows,
   and it describes the tasks in hand.
-- **Search-set, not holdout.** This measures the five tasks the proposer
+- **Search-set, not holdout.** This measures the ten tasks the proposer
   optimised against, so whatever it reports is a search-set number and
   must be described as one. Generalisation to unseen tasks is a separate,
   separately-reported measurement:

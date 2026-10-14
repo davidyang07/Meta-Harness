@@ -1,7 +1,7 @@
 # Holdout benchmark — generalisation protocol
 
 The canonical [pass-rate experiment](../pass-rate/README.md) measures the
-five tasks the proposer optimised against. That number answers "did the
+ten tasks the proposer optimised against. That number answers "did the
 search work"; it does not answer "does the evolved harness generalise".
 This protocol answers the second question, and is reported separately so
 the two are never conflated.
@@ -10,10 +10,10 @@ the two are never conflated.
 
 | | |
 |---|---|
-| Task set | `eval/holdout/` — 2 tasks the proposer never sees |
-| Trials per task per arm | 20, independent |
+| Task set | `eval/holdout/` — 5 tasks the proposer never sees |
+| Trials per task per arm | 10, independent |
 | Arms | `baseline` (control) vs the same evolved candidate |
-| Total | 2 × 20 × 2 = **80 task trials** |
+| Total | 5 × 10 × 2 = **100 task trials** |
 | Model | identical to the canonical experiment's |
 | Config | [`config.json`](config.json) |
 
@@ -51,19 +51,18 @@ uv run meta-harness experiment --config benchmarks/holdout/config.json \
 
 **A smaller delta than the search-set experiment is the expected shape of
 the result, not a failure.** The harness was evolved against the search
-tasks; some of the gain there is fit to those five tasks. The holdout
+tasks; some of the gain there is fit to those ten tasks. The holdout
 delta is the part that transferred.
 
-**Two tasks is two clusters.** That is the binding constraint on this
-number, and it is worse here than on the search set. The 80 trials are 80
-looks at two problems, so `cluster_bootstrap_ci` resamples exactly two
-units and its interval is coarse by construction — it can take only a
-handful of distinct values. `summary.json` reports `clusters: 2` and
-`informative: false` for this reason.
+**Five tasks is five clusters.** That is the binding constraint on this
+number, and it is worse here than on the search set. The 100 trials are
+100 looks at five problems, so `cluster_bootstrap_ci` resamples exactly
+five units and its interval is coarse by construction. `summary.json`
+reports `clusters: 5` and `informative: false` for this reason.
 
 Report the holdout delta with that interval and that cluster count, always.
 A holdout delta quoted bare is not a generalisation claim; it is one number
-from two tasks. No significance test is computed, because none would be
+from five tasks. No significance test is computed, because none would be
 defensible at this cluster count.
 
 ## Output

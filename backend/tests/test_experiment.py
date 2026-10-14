@@ -451,7 +451,7 @@ def test_environment_capture_records_provenance_and_no_secrets(monkeypatch):
     assert env["git"]["commit"], "commit SHA must be captured"
     assert isinstance(env["git"]["dirty"], bool)
     assert env["python"] and env["platform"]
-    assert len(env["tasks"]) == 5
+    assert len(env["tasks"]) == 10
     assert env["arm_sources"]["baseline"]["sha256"]
 
     blob = json.dumps(env)
@@ -513,10 +513,10 @@ def test_summary_recomputes_identically_from_the_written_files(tmp_path: Path):
 def test_committed_config_matches_the_documented_200_trial_protocol():
     config = exp.load_config(REPO_ROOT / "benchmarks" / "pass-rate" / "config.json")
     assert config["task_set"] == "eval/tasks"
-    assert config["trials_per_task"] == 20
-    assert len(config["tasks"]) == 5
+    assert config["trials_per_task"] == 10
+    assert len(config["tasks"]) == 10
     assert config["total_trials"] == 200
-    # 5 tasks x 20 trials x 2 arms
+    # 10 tasks x 10 trials x 2 arms
     assert len(config["tasks"]) * config["trials_per_task"] * 2 == 200
     # The evolved arm is supplied at run time, never pinned in the repo.
     assert config["arms"]["candidate"] is None
@@ -671,8 +671,8 @@ def test_the_committed_task_sets_are_disjoint():
     )
     assert isolation["disjoint"] is True
     assert isolation["overlapping_tasks"] == []
-    assert len(isolation["search_tasks"]) == 5
-    assert len(isolation["holdout_tasks"]) == 2
+    assert len(isolation["search_tasks"]) == 10
+    assert len(isolation["holdout_tasks"]) == 5
 
 
 def test_overlapping_task_sets_are_reported(tmp_path: Path):
@@ -694,7 +694,7 @@ def test_overlapping_task_sets_are_reported(tmp_path: Path):
 def test_committed_holdout_config_is_a_two_arm_protocol():
     config = exp.load_config(REPO_ROOT / "benchmarks" / "holdout" / "config.json")
     assert config["task_set"] == "eval/holdout"
-    assert config["trials_per_task"] == 20
+    assert config["trials_per_task"] == 10
     assert (
         len(config["tasks"]) * config["trials_per_task"] * 2 == config["total_trials"]
     )

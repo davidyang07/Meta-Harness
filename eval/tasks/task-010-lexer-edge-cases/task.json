@@ -1,0 +1,9 @@
+{
+  "id": "task-010-lexer-edge-cases",
+  "tier": "robustness",
+  "instruction": "tokenize() in lexer.py copes with simple expressions but breaks on edge cases: some inputs crash with exceptions other than LexError, and others come back as the wrong tokens. tests/test_lexer.py fails. Make tokenize() follow the lexical rules in lexer.py's module docstring, reporting every malformed input as a LexError that carries the documented position. Keep the Token and LexError API, change only lexer.py, and don't modify the tests.",
+  "test_command": "pytest tests/test_lexer.py -q",
+  "expected_files_changed": [
+    "lexer.py"
+  ]
+}

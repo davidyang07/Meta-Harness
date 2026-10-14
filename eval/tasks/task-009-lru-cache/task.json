@@ -1,0 +1,9 @@
+{
+  "id": "task-009-lru-cache",
+  "tier": "implement-spec",
+  "instruction": "lru.py contains a stub LRUCache whose methods all raise NotImplementedError, so tests/test_lru.py fails. Implement LRUCache according to the specification in lru.py's module docstring, keeping the class name and the method and property names and signatures the stub declares. Use only the standard library, change only lru.py, and don't modify the tests.",
+  "test_command": "pytest tests/test_lru.py -q",
+  "expected_files_changed": [
+    "lru.py"
+  ]
+}

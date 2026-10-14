@@ -1,0 +1,11 @@
+{
+  "id": "task-012-task-priorities",
+  "tier": "multi-file",
+  "instruction": "The to-do app in models.py, storage.py and service.py needs task priorities. Implement the feature described in README.md end to end (the model, the service API and the export format), including loading exports written before this change. tests/test_todo.py fails today; it covers both the new feature and existing behaviour that must keep working. Don't modify the README or the tests.",
+  "test_command": "pytest tests/test_todo.py -q",
+  "expected_files_changed": [
+    "models.py",
+    "storage.py",
+    "service.py"
+  ]
+}

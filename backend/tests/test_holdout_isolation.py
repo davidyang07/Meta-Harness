@@ -1,7 +1,7 @@
 """The proposer must never see the holdout tasks.
 
 Holdout results are the only honest signal about whether an evolved
-harness generalises or just fits the five search tasks. That signal is
+harness generalises or just fits the search tasks. That signal is
 worth exactly nothing if a holdout task's content reaches the proposer,
 so these tests check every channel by which it could:
 
