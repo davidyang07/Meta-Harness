@@ -3,8 +3,8 @@
 Produces the recording that `meta-harness verify-replay` turns into
 `docs/evidence/replay-verification.json`. Everything in the run is real —
 the inner graph, the six tools, the pytest verify subprocess, the
-workspace, the Postgres checkpoints — except the model's turns, which
-come from a script.
+grading, the workspace, the Postgres checkpoints — except the model's
+turns, which come from a script.
 
 **That is stated in the artifact, not hidden by it.** The recording's
 manifest records `model: "scripted-offline"` and a `recorded_with` note,
@@ -16,6 +16,18 @@ is run.
 
 With credentials, `meta-harness canonical-experiment --record-trials N`
 overwrites this artifact with recordings of real provider calls.
+
+The scripted trial is graded like any other: the submit node re-runs the
+task's tests in a fresh copy of the pristine workspace that carries over
+only the task's ``expected_files_changed``. The script's fix touches
+exactly that file, and the script refuses to leave behind a recording of
+a trial that did not pass.
+
+The scripted model is a harness *class*, ``ScriptedBaselineHarness``,
+with its model name at class level. Replay rebuilds the recorded class
+from this file (checked against the recorded SHA-256) and compares its
+configuration with the recording's, so this file must not change between
+recording and verifying; re-record after editing it.
 
 Usage:
     docker compose -f infra/docker-compose.yml up -d postgres
@@ -47,6 +59,7 @@ from app.meta_harness.sandbox import sandbox_for  # noqa: E402
 
 TASK_ID = "task-001-fix-typo"
 RUN_NAME = "replay-evidence"
+TASK_DIR = REPO_ROOT / "eval" / "tasks" / TASK_ID
 
 
 class _Block:
@@ -68,13 +81,23 @@ class _Usage:
 class _Response:
     def __init__(self, blocks: list[_Block]) -> None:
         self.content = blocks
-        self.model = "scripted-offline"
+        self.model = ScriptedBaselineHarness.MODEL
         self.usage = _Usage()
         self.stop_reason = "tool_use"
 
 
-BUGGY_LINE = "    return a - b  # BUG: should be a + b"
-FIXED_LINE = "    return a + b"
+# add() and sub() both read `return a - b`, so the fix is located by the
+# function it belongs to, never by the line alone.
+BUGGY_ADD = "def add(a: int, b: int) -> int:\n    return a - b\n"
+FIXED_ADD = "def add(a: int, b: int) -> int:\n    return a + b\n"
+
+
+def repo_relative(path: Path) -> str:
+    """A path as it may appear in anything that reaches docs/evidence/."""
+    try:
+        return path.resolve().relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        return path.as_posix()
 
 
 def fix_patch() -> str:
@@ -84,15 +107,13 @@ def fix_patch() -> str:
     is strict about hunk ranges and context, and the committed task file
     is the only reliable source for both.
     """
-    source = (
-        REPO_ROOT / "eval" / "tasks" / TASK_ID / "workspace" / "calculator.py"
-    ).read_text(encoding="utf-8")
-    fixed = source.replace(BUGGY_LINE, FIXED_LINE)
-    if fixed == source:
+    source = (TASK_DIR / "workspace" / "calculator.py").read_text(encoding="utf-8")
+    if source.count(BUGGY_ADD) != 1:
         raise SystemExit(
-            "the task workspace no longer contains the line this script "
-            "patches; update BUGGY_LINE"
+            "the task workspace no longer contains exactly one add() returning "
+            "`a - b`; update BUGGY_ADD"
         )
+    fixed = source.replace(BUGGY_ADD, FIXED_ADD)
     return "".join(
         difflib.unified_diff(
             source.splitlines(keepends=True),
@@ -128,29 +149,35 @@ SCRIPT: list[list[dict[str, Any]]] = [
 ]
 
 PLAN = {
-    "summary": "fix add() to return a + b",
+    "summary": "fix add() to return a + b; leave sub() alone",
     "steps": [{"action": "patch", "target": "calculator.py", "why": "add() subtracts"}],
     "expected_files_changed": ["calculator.py"],
     "tests_to_run": ["tests/test_calculator.py"],
 }
 
 
-def scripted_harness() -> BaselineHarness:
-    """A real ``BaselineHarness`` whose model turns come from ``SCRIPT``.
+class ScriptedBaselineHarness(BaselineHarness):
+    """The real baseline with its model turns taken from ``SCRIPT``.
 
-    Built with ``__new__`` so the base ``__init__``'s API-key requirement
-    is bypassed and no client is ever constructed: this issues no network
-    call of any kind. The instance keeps every override point the real
-    baseline has, which is what makes the replay meaningful — replay
-    reconstructs the same class and recomputes the same routing.
+    A class rather than a patched instance: replay rebuilds the recorded
+    class and checks its configuration (``MODEL`` among it) against the
+    recording, so everything that distinguishes this harness lives on the
+    class. Every override point other than ``_call_llm`` is the
+    baseline's own, which is what makes the replay meaningful.
+
+    ``__init__`` skips the base constructor's API-key requirement and
+    builds no client: this issues no network call of any kind.
     """
-    harness = BaselineHarness.__new__(BaselineHarness)
-    harness.api_key = None
-    harness._client = None
-    harness.MODEL = "scripted-offline"
-    turn = {"n": 0}
+
+    MODEL = "scripted-offline"
+
+    def __init__(self) -> None:
+        self.api_key = None
+        self._client = None
+        self._turn = 0
 
     async def _call_llm(
+        self,
         messages: list[Any],
         tools: list[Any],
         *,
@@ -158,21 +185,11 @@ def scripted_harness() -> BaselineHarness:
     ) -> _Response:
         if tool_choice is not None:
             return _Response(
-                [
-                    _Block(
-                        type="tool_use",
-                        id="plan-1",
-                        name="submit_plan",
-                        input=dict(PLAN),
-                    )
-                ]
+                [_Block(type="tool_use", id="plan-1", name="submit_plan", input=dict(PLAN))]
             )
-        index = min(turn["n"], len(SCRIPT) - 1)
-        turn["n"] += 1
+        index = min(self._turn, len(SCRIPT) - 1)
+        self._turn += 1
         return _Response([_Block(**block) for block in SCRIPT[index]])
-
-    harness._call_llm = _call_llm
-    return harness
 
 
 async def main() -> int:
@@ -185,8 +202,16 @@ async def main() -> int:
         )
         return 1
 
-    task_dir = REPO_ROOT / "eval" / "tasks" / TASK_ID
-    task_spec = json.loads((task_dir / "task.json").read_text())
+    source_workspace = TASK_DIR / "workspace"
+    task_spec = json.loads((TASK_DIR / "task.json").read_text())
+    # The submit node grades in a fresh copy of the pristine workspace and
+    # refuses a task dict that does not say where that is.
+    task_spec["_source_workspace"] = str(source_workspace)
+    if PLAN["expected_files_changed"] != task_spec.get("expected_files_changed"):
+        raise SystemExit(
+            "the scripted plan no longer matches the task's "
+            "expected_files_changed; the graded copy would not carry the fix"
+        )
 
     run_dir = runs_mod.make_run_dir(REPO_ROOT, RUN_NAME, fresh=True)
     runs_mod.write_manifest(
@@ -211,26 +236,39 @@ async def main() -> int:
     thread_id = f"record::{RUN_NAME}::{TASK_ID}::trial-1::{uuid.uuid4().hex[:8]}"
 
     async with persistence_layer() as saver:
-        with sandbox_for(task_dir / "workspace") as sandbox:
+        with sandbox_for(source_workspace) as sandbox:
             result = await replay_mod.record_inner_execution(
-                harness_factory=scripted_harness,
+                harness_factory=ScriptedBaselineHarness,
                 task_dict=task_spec,
                 workspace=sandbox,
+                source_workspace=source_workspace,
                 thread_id=thread_id,
                 checkpointer=saver,
                 recording_dir=recording_dir,
                 manifest_extra={
                     "recorded_with": (
                         "scripted model turns; no provider call was made. The "
-                        "graph, the six tools, the pytest verify subprocess "
-                        "and the Postgres checkpoints are real."
+                        "graph, the six tools, the pytest verify subprocess, "
+                        "the grading and the Postgres checkpoints are real."
                     )
                 },
             )
 
-    print(json.dumps({k: v for k, v in result.items() if k != "final_state"}, indent=2))
-    print(f"\nscore: {result['final_state'].get('score')}")
-    print(f"recording: {recording_dir}")
+    summary = {k: v for k, v in result.items() if k != "final_state"}
+    summary["recording_dir"] = repo_relative(recording_dir)
+    print(json.dumps(summary, indent=2))
+    score = result["final_state"].get("score")
+    print(f"\nscore: {score}")
+    print(f"recording: {repo_relative(recording_dir)}")
+    if (score or 0.0) < 1.0:
+        # Replaying a failed trial exactly would still "verify", and the
+        # evidence would then rest on a run that did not do its job.
+        shutil.rmtree(recording_dir, ignore_errors=True)
+        print(
+            "the scripted trial did not pass under grading; recording removed",
+            file=sys.stderr,
+        )
+        return 1
     print(f"\nnext: uv run meta-harness verify-replay runs/{RUN_NAME}")
     return 0
 
