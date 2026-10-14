@@ -172,12 +172,16 @@ def test_fork_requires_mod_in_key_value_form() -> None:
 
 
 @pytest.mark.skipif(
-    not (REPO_ROOT / "eval" / "holdout" / "task-006-fix-recursion").exists(),
-    reason="holdout tasks not present",
+    not (REPO_ROOT / "benchmarks" / "holdout" / "config.json").exists(),
+    reason="holdout protocol not present",
 )
 def test_holdout_task_files_well_formed() -> None:
-    """The two holdout tasks should have task.json + workspace/ + tests/."""
-    for task in ("task-006-fix-recursion", "task-007-implement-stack"):
+    """Every holdout task the protocol names has task.json + workspace/."""
+    config = json.loads(
+        (REPO_ROOT / "benchmarks" / "holdout" / "config.json").read_text()
+    )
+    assert config["tasks"], "holdout protocol lists no tasks"
+    for task in config["tasks"]:
         task_dir = REPO_ROOT / "eval" / "holdout" / task
         assert (task_dir / "task.json").exists(), f"{task}/task.json missing"
         assert (task_dir / "workspace").is_dir(), f"{task}/workspace/ missing"
