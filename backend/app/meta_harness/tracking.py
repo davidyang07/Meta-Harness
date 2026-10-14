@@ -261,8 +261,21 @@ class WandbTracker(Tracker):
 
 
 def _import_wandb() -> Any:
+    """Import the real ``wandb`` package, or raise ImportError.
+
+    W&B writes its run files to a ``wandb/`` directory in the working
+    directory. Once the package is uninstalled, Python imports that
+    leftover directory as an empty namespace package, which used to read
+    as "wandb is installed" and then fail on ``wandb.init``. A module
+    without ``init`` is not the package this adapter talks to.
+    """
     import wandb  # noqa: PLC0415 — optional dependency, imported on demand
 
+    if not callable(getattr(wandb, "init", None)):
+        raise ImportError(
+            "the importable 'wandb' is not the W&B package (a leftover "
+            "wandb/ run directory?)"
+        )
     return wandb
 
 

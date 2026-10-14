@@ -487,3 +487,23 @@ def test_core_modules_do_not_import_wandb():
         if "import wandb" in text or "wandb." in text:
             offenders.append(str(path.relative_to(REPO_ROOT)))
     assert offenders == [], f"W&B leaked into {offenders}"
+
+
+def test_a_leftover_wandb_run_directory_is_not_the_package(tmp_path, monkeypatch):
+    """W&B leaves ``./wandb/`` behind; once uninstalled it imports as an
+    empty namespace package and must read as "not installed"."""
+    import importlib.util
+
+    import pytest
+
+    (tmp_path / "wandb").mkdir()
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, "wandb", raising=False)
+    spec = importlib.util.find_spec("wandb")
+    if spec is not None and spec.origin not in (None, "namespace"):
+        pytest.skip("the real wandb package is installed and wins the import")
+    with pytest.raises(ImportError):
+        trk._import_wandb()
+    result = trk.offline_probe()
+    assert result["wandb_installed"] is False
+    assert result["ok"] is True
