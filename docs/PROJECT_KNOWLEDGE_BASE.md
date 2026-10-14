@@ -2564,7 +2564,7 @@ has no configured price.
 ### 18.1 Holdout
 
 Run-end automatically re-evaluates the linear-best AND fork-best against the
-2 unseen tasks in `eval/holdout/`. Holdout score is reported separately. The
+5 unseen tasks in `eval/holdout/`. Holdout score is reported separately. The
 *gap* between search-set score and holdout score is the overfitting signal.
 
 ### 18.2 Why this arc is worth showing

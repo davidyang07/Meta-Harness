@@ -12,12 +12,12 @@ Use `uv` for all Python workflows.
 - `cd backend && uv run pytest tests -q`: run the backend test suite.
 - `uv run meta-harness benchmark --candidate baseline --trials 5`: benchmark a candidate across the eval set.
 - `uv run meta-harness loop --proposer mock --mock-bench --budget 2 --fresh`: exercise the outer loop without live LLM calls.
-- `uv run meta-harness serve --port 8000`: serve the API. Use this rather than a bare `uvicorn app.main:app` — uvicorn picks Windows' ProactorEventLoop, which psycopg cannot use, and the backend would come up with checkpointing silently degraded to in-memory.
+- `uv run meta-harness serve --port 8000`: serve the API. Use this rather than a bare `uvicorn app.main:app` — uvicorn picks Windows' ProactorEventLoop, which psycopg cannot use, and the backend would come up with checkpointing silently degraded to in-memory. It binds loopback by default; set `META_HARNESS_API_TOKEN` before binding anything else (it refuses otherwise).
 - `make verify` (or `bash scripts/verify.sh`): everything provable without credentials — the suite, real Postgres, replay, branches, benchmark integrity, W&B offline, evidence freshness, the Docker image, hygiene, the dashboard build. `ONLY=<stage>` runs one stage.
 - `bash scripts/demo_acceptance.sh`: LEVEL 1 acceptance, no API key required.
 - `bash scripts/live_smoke.sh`: LEVEL 2 acceptance, needs credentials; prints SKIPPED without them.
 - `uv run meta-harness experiment --candidate <name>`: the canonical 200-trial pass-rate experiment (real cost).
-- `uv run meta-harness canonical-experiment --dry-run`: print the measurement plan and a cost estimate; spends nothing. Drop `--dry-run` to evolve, select, measure, verify replay and derive the evidence document (real cost).
+- `uv run meta-harness canonical-experiment --dry-run`: print the measurement plan and a cost estimate; spends nothing. Drop `--dry-run` to evolve, select, measure, verify replay and derive the evidence document (real cost). An existing run is only wiped with `--fresh`.
 - `uv run meta-harness verify-replay <recordings-dir>`: re-execute recorded trials against their tapes and fail loudly on any divergence. No model calls.
 - `uv run meta-harness report capability-evidence`: derive every capability claim from the committed artifacts. Generated output; not a committed source file.
 
@@ -46,8 +46,12 @@ weakening one of those tests, fix the root cause instead.
 6. **Node side effects are idempotent.** An interrupted LangGraph node is
    re-executed on resume; writes must key on identity rather than append.
    (`tests/test_runs_artifacts.py`)
-7. **Holdout tasks never reach the proposer.**
-   (`tests/test_holdout_isolation.py`)
+7. **Holdout tasks never reach the proposer.** The real proposer runs in a
+   staged copy of the repository with no `eval/holdout/`, no published
+   results and no other branch's runs; `eval/` and `benchmarks/` are
+   hashed before and after, and the transcript is audited for holdout
+   paths. Either check failing voids the iteration (`LeakageError`).
+   (`tests/test_holdout_isolation.py`, `tests/test_proposer.py`)
 8. **The benchmark summary is derived from raw trial rows.** `summarize()`
    takes no target or expected value, and must not gain one.
    (`tests/test_experiment.py`)
@@ -80,6 +84,32 @@ weakening one of those tests, fix the root cause instead.
     dangerous kind: nothing catches a task set being tuned until it
     produces the number that was wanted. (`tests/test_experiment.py`,
     `tests/test_capability_evidence.py`)
+16. **A trial is graded outside the agent's reach.** The score comes from a
+    fresh copy of the task's pristine workspace into which only the files
+    in `expected_files_changed` are carried; the agent's own verify only
+    drives its retry loop. Never score from the agent's workspace — an
+    agent that adds a `conftest.py` or edits a test would pass.
+    (`tests/test_grading.py`)
+17. **Cross-run memory holds measured patterns only.** A mock run writes
+    nothing, every pattern carries `metrics_source`, and its key is
+    derived from (run, thread, candidate) so a resumed node rewrites
+    rather than duplicates it. (`tests/test_memory_measured_only.py`,
+    `tests/test_memory.py`)
+18. **A failed or unmeasured candidate is not a measured zero.** A
+    `smoke_failed` candidate keeps that status, has no accuracy and no
+    delta, and never reaches the frontier; a trial that raises becomes a
+    `status: "error"` row instead of aborting the run.
+    (`tests/test_outer.py`, `tests/test_benchmark.py`)
+19. **The API is never reachable beyond loopback without a token.**
+    `meta-harness serve` refuses a non-loopback host unless
+    `META_HARNESS_API_TOKEN` is set, every route but `GET /health`
+    then requires it, and a skill path must resolve to
+    `skills/<name>/SKILL.md`. (`tests/test_api_auth.py`, `tests/test_api.py`)
+20. **A candidate cannot rebind the evaluator.** Proposer-written source is
+    checked before it executes: no `app.meta_harness` import but
+    `harness`, no assignment into an imported module, no `exec`/`eval`.
+    The 11 override points are the whole search space.
+    (`tests/test_candidates.py`)
 
 ## Capabilities and evidence
 

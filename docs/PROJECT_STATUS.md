@@ -29,7 +29,7 @@ make verify          # everything provable without credentials
 | CLI (`app.cli:main`) | Complete |
 | Measurement pipeline + two committed protocols | Complete |
 | Optional W&B tracking, off by default | Complete |
-| 5 frozen search tasks + 2 disjoint holdout tasks | Complete |
+| 10 frozen search tasks + 5 disjoint holdout tasks, graded in a pristine copy | Complete |
 
 ## Verification
 

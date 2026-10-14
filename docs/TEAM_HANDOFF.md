@@ -153,7 +153,7 @@ meta-harness/
 │   │   ├── task-003-refactor/                           # 3 dup fns → shared helper (structural test)
 │   │   ├── task-004-handle-error/                       # parse_ages crashes on empty/invalid — robustness
 │   │   └── task-005-implement-spec/                     # implement Point + Line per README — multi-file
-│   └── holdout/                                         # 2 unseen tasks, disjoint from tasks/
+│   └── holdout/                                         # 5 unseen tasks, disjoint from tasks/
 │
 ├── agents/                                              # immutable starting point + proposer outputs
 │   ├── __init__.py

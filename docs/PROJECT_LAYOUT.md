@@ -96,15 +96,16 @@ meta-harness/                                              # Repo root (uv works
 │
 ├── eval/                                                  # Frozen eval set + scorer
 │   ├── score.py                                           # Wraps pytest; returns {accuracy, per_task, tokens}
-│   ├── tasks/                                             # 5 search-set tasks; each = task.json + workspace/
+│   ├── tasks/                                             # 10 search-set tasks; each = task.json + workspace/
 │   │   ├── task-001-fix-typo/                             # workspace/{calculator.py, tests/test_calculator.py}, task.json
 │   │   ├── task-002-add-function/                         # Same shape: task.json + workspace/{stats.py, tests/...}
 │   │   ├── task-003-refactor/
 │   │   ├── task-004-handle-error/
-│   │   └── task-005-implement-spec/                       # geometry/ package per README spec
-│   └── holdout/                                           # 2 tasks the proposer never sees (--holdout flag)
-│       ├── task-006-…/
-│       └── task-007-…/
+│   │   ├── task-005-implement-spec/                       # geometry/ package per README spec
+│   │   └── task-008-… … task-012-…/                       # pagination, LRU cache, lexer, module split, priorities
+│   └── holdout/                                           # 5 tasks the proposer never sees (--holdout flag)
+│       ├── task-006-…/ · task-007-…/
+│       └── task-013-…/ · task-014-…/ · task-015-…/
 │
 └── infra/
     └── docker-compose.yml                                 # postgres:16 on localhost:5432 + persistent volume

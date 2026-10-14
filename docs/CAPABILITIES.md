@@ -64,6 +64,17 @@ The proposer reads the branch's own `evolution_summary.jsonl`,
 `agents/<name>.py` subclassing `CodingAgentHarness`. The 6 inner-loop
 tools are a fixed contract it may not change.
 
+It runs in a **staged copy** of the repository — no `eval/holdout/`, no
+`benchmarks/results/`, no other branch's runs — with deny rules for those
+paths. `eval/` and `benchmarks/` in the real repository are hashed before
+and after, and the stream-json transcript is audited for holdout paths
+or the real repository's absolute path; either hit raises
+`LeakageError` and voids the iteration. Only the candidate file (straight
+into this branch's snapshot) and `pending_eval.json` are copied back.
+The handoff is validated before use: the stale file is deleted before
+the proposer starts, and the payload must name exactly one new
+candidate for the current iteration whose source exists.
+
 ### Validation
 
 ```bash
@@ -76,7 +87,10 @@ bash scripts/live_smoke.sh          # section 3
 
 Key tests: `test_candidate_source_is_snapshotted_per_branch`,
 `test_mock_outer_loop_produces_all_files`,
-`test_claude_propose_fails_loudly_when_the_branch_handoff_is_missing`.
+`test_claude_propose_fails_loudly_when_the_branch_handoff_is_missing`,
+`test_the_proposer_runs_in_a_staged_copy_without_holdout_material`,
+`test_tampering_with_the_frozen_task_set_fails_the_iteration`,
+`test_a_smoke_failed_candidate_never_becomes_a_measured_zero`.
 
 ---
 
@@ -240,8 +254,15 @@ recorded cannot be replayed exactly, and nothing claims otherwise.
 | Node bodies routed through the boundary | `backend/app/meta_harness/inner.py` |
 
 Every crossing into the world — model responses, tool inputs and outputs,
-the workspace scan, the verify subprocess, the final-file snapshot — is
-recorded in execution order, keyed by a SHA-256 over its *inputs*. Each
+the workspace scan, the verify subprocess, the grade, the final-file
+snapshot — is recorded in execution order, keyed by a SHA-256 over its
+*inputs*. A model call's key covers the full request: messages, system
+prompt, model, `max_tokens` and the complete tool schemas, so a tape
+made under a different harness configuration diverges instead of
+verifying. The recording manifest also pins the harness source file and
+its SHA-256, which is how a candidate the proposer wrote is reloaded and
+replayed in a fresh process. Tapes use schema 2.0.0; older ones are
+refused rather than half-replayed. Each
 completed node is joined to the checkpoint it produced and to the hash of
 the state it produced, which is what makes "replay from checkpoint X"
 answerable.
@@ -359,14 +380,29 @@ uv run meta-harness canonical-experiment             # evolve, measure, verify, 
 
 The parts that make the number defensible, each checked mechanically:
 
+- **The agent cannot grade itself.** `grading.grade` scores each trial in
+  a fresh copy of the task's pristine workspace into which only the files
+  in `expected_files_changed` are carried; tests, test configuration and
+  any other file the agent touched never reach the grade, and are listed
+  as `out_of_plan_changes`. The agent's own verify (`agent_verify_passed`)
+  is recorded alongside but never scored
+  (`test_the_conftest_exploit_fools_verify_but_scores_zero`).
+- **A crash is counted, not dropped.** A trial that raises becomes a row
+  with `status: "error"` and unknown metrics; `summary.json` reports
+  `errored_trials` and `validation.json` fails `no_errored_trials`.
+- **The arms are interleaved.** Baseline and candidate trials run under
+  one scheduler, so drift over the run (rate limits, provider changes)
+  falls on both arms rather than on whichever ran second.
+
 - **Selection cannot see the test.** `pipeline.select_candidate` takes
   the outer loop's terminal state — validation accuracy measured during
   evolution — and nothing else. The canonical experiment runs afterwards
   with fresh independent trials. The decision and the table it was made
   from land in `runs/<run>/selection.json`.
 - **Both arms ran the same protocol.** `check_protocol_equality` verifies
-  identical task set, identical per-task trial counts, identical model,
-  and a single `metrics_source` — published as `validation.json` and
+  identical task set, identical per-task trial counts, identical model
+  (read from each row's `model`, not from a caller's claim), and a single
+  `metrics_source` — published as `validation.json` and
   restated in `REPORT.md`. A failed check makes the CLI exit non-zero.
 - **Incomplete arms are detected.** `trial_completeness` names missing,
   duplicated, unexpected and malformed trials. A row missing its outcome
@@ -382,10 +418,12 @@ The parts that make the number defensible, each checked mechanically:
   before the pipeline starts; `canonical-experiment` refuses to proceed on
   overlap.
 - **Uncertainty is reported with its assumptions, and clustered by task.**
-  Two intervals, because they answer different questions. The 95% Wald
-  interval on the difference of proportions assumes 200 independent
-  Bernoulli trials, which the design does not have, and is kept only for
-  comparison with the naive reading. `cluster_bootstrap_ci` resamples
+  Two kinds of interval, because they answer different questions. A
+  Wilson interval per arm and Newcombe's hybrid score interval on the
+  difference treat every trial as an independent Bernoulli observation,
+  which the design does not have, and are kept for comparison with the
+  naive reading (unlike the Wald interval they replace, they do not
+  collapse to zero width at 0% or 100%). `cluster_bootstrap_ci` resamples
   **tasks** with replacement as the independent unit — every trial of a
   drawn task travels with it, and a drawn task contributes to both arms
   because both arms ran the identical task set. It is deterministic under
@@ -495,12 +533,17 @@ cd backend && uv run pytest tests/test_metrics.py -q
 
 `backend/app/meta_harness/memory.py` (`AsyncPostgresStore`) stores
 accepted-candidate patterns and injects them into a later run's proposer
-prior.
+prior. Only a **measured** acceptance is stored — a mock run writes
+nothing, every pattern carries `metrics_source`, and the proposer reads
+through `patterns_for_proposer`, which drops anything else. The key is
+derived from (run, thread, candidate), so a re-executed `update_frontier`
+rewrites its pattern instead of duplicating it.
 
 ### Validation
 
 ```bash
-cd backend && uv run pytest tests/test_memory.py tests/test_memory_e2e.py -q
+cd backend && uv run pytest tests/test_memory.py tests/test_memory_e2e.py \
+                            tests/test_memory_measured_only.py -q
 uv run meta-harness memory list
 ```
 
@@ -513,19 +556,24 @@ uv run meta-harness memory list
 ### Accurate wording
 
 > Each trial runs in a fresh temp-directory workspace with wall-clock
-> timeouts and, on Unix, CPU/address-space rlimits.
+> timeouts, in its own process group (a timeout kills the whole tree),
+> with credentials scrubbed from its environment and, on Unix,
+> CPU/address-space rlimits. It is graded in a separate pristine copy.
 
 Do **not** describe this as "sandboxed", "container-isolated" or
 "network-isolated".
 
 ### Implementation
 
-`backend/app/meta_harness/sandbox.py` provides process isolation only.
+`backend/app/meta_harness/sandbox.py` provides process isolation only;
+`backend/app/meta_harness/grading.py` grades outside the agent's
+workspace. Tools never raise into the graph: a bad argument, a binary
+file or a timeout comes back to the model as an error result.
 
 ### Validation
 
 ```bash
-cd backend && uv run pytest tests/test_sandbox.py tests/test_tools.py -q
+cd backend && uv run pytest tests/test_sandbox.py tests/test_tools.py tests/test_grading.py -q
 ```
 
 ---
@@ -538,9 +586,15 @@ twelve sections. Each is a deliberate boundary of the design.
 
 **1. Self-improving harness.**
 
-The search space is bounded to the 11 override points; a candidate
-cannot change the tool contract, and validate-time enforcement rejects
-one that tries.
+The search space is bounded to the 11 override points. Before a
+candidate's source is executed, `candidates.check_candidate_source`
+rejects one that imports the evaluator's modules (anything under
+`app.meta_harness` but `harness`), assigns into an imported module,
+calls `setattr` on anything but `self`/`cls`, or executes code by
+string. That is a static guard against a proposer writing a monkeypatch,
+not a sandbox — a candidate is still trusted in-process Python — and
+grading in a pristine copy is what keeps the agent from moving its own
+score.
 
 **2. Dual LangGraph execution.**
 
@@ -584,10 +638,10 @@ the history does, and the branch reports as `interrupted`.
 
 **7. Pass-rate benchmarking.**
 
-**The task is the independent unit.** The 20 trials of one task are 20
+**The task is the independent unit.** The 10 trials of one task are 10
 looks at the same problem, so the interval is computed by resampling
-tasks rather than trials — which is why the Wald interval is not the one
-to quote. The task-cluster bootstrap carries every trial of a drawn task
+tasks rather than trials — which is why the per-trial Wilson and
+Newcombe intervals are not the ones to quote. The task-cluster bootstrap carries every trial of a drawn task
 with it, is deterministic under the published seed, and describes the
 tasks in hand.
 
@@ -597,7 +651,7 @@ measured effect reported with cluster-aware uncertainty. Adding easy
 tasks purely to raise the cluster count would raise the count without
 adding evidence, and is deliberately not done.
 
-The canonical protocol measures the five search tasks the proposer
+The canonical protocol measures the ten search tasks the proposer
 optimised against; the holdout protocol is the separate generalisation
 measurement, and a smaller holdout delta is the expected shape of the
 result rather than a failure.
@@ -620,9 +674,10 @@ connection a run starts with an empty prior.
 
 **10. Trial isolation.**
 
-No container, no network restriction, no binary allowlist. Task
-`test_command`s run with `shell=True` and are trusted repository content
-(`eval/tasks/*/task.json`), not user input.
+No container, no network restriction, no binary allowlist: `run_bash`
+can still write outside its workspace, which is why grading happens in
+a pristine copy. Task `test_command`s run with `shell=True` and are
+trusted repository content (`eval/tasks/*/task.json`), not user input.
 
 ---
 

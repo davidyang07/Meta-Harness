@@ -308,16 +308,19 @@ is derived from the rows.
                                             "candidate_trials": 20}},
     "informative": false,
     "assumptions": "...",
-    "limitation": "5 task clusters. Cluster-robust intervals are ..."
+    "limitation": "10 task clusters. Cluster-robust intervals are ..."
   }
 }
 ```
 
-**Why a second interval.** `wald_diff_ci` treats each of the 200 trials as
-an independent Bernoulli observation. They are not: 20 trials of one task
-are 20 looks at the same problem, so the design has 5 independent units,
-not 200. The Wald interval is kept for comparison with the naive reading
-and is now labelled as mis-stating precision. Note the direction is *not*
+**Why a second interval.** The per-trial intervals — a Wilson interval
+per arm (`accuracy_ci`) and Newcombe's hybrid score interval on the
+difference (`difference_ci`), which replaced the Wald interval because it
+collapsed to zero width at 0% or 100% — treat each of the 200 trials as
+an independent Bernoulli observation. They are not: 10 trials of one task
+are 10 looks at the same problem, so the design has 10 independent
+units, not 200. The per-trial intervals are kept for comparison with the
+naive reading and are labelled as mis-stating precision. Note the direction is *not*
 guaranteed — a per-task effect that is consistent across tasks can make
 the cluster-aware interval the narrower of the two.
 
@@ -361,8 +364,8 @@ estimate never travels without them.
 ### 0.11 The holdout protocol
 
 `benchmarks/holdout/config.json` is a second committed protocol with the
-same shape as `benchmarks/pass-rate/config.json`: 2 tasks × 20 trials × 2
-arms = 80 trials, on `eval/holdout/`. Same runner
+same shape as `benchmarks/pass-rate/config.json`: 5 tasks × 10 trials × 2
+arms = 100 trials, on `eval/holdout/`. Same runner
 (`experiment.run_two_arm_experiment`), same model, same per-task trial
 count, so the two numbers are comparable.
 
