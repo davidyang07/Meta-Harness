@@ -1,5 +1,5 @@
 {
-  "recordings_root": "C:\\Users\\danda\\OneDrive\\Documents\\GitHub\\Meta-Harness\\runs\\replay-evidence",
+  "recordings_root": "runs/replay-evidence",
   "recordings_verified": 1,
   "recorded_models": [
     "scripted-offline"
@@ -17,12 +17,16 @@
       "recording": "task-001-fix-typo-trial-1",
       "mode": "full",
       "recording_id": "task-001-fix-typo-trial-1",
-      "recorded_thread_id": "record::replay-evidence::task-001-fix-typo::trial-1::a12040f4",
+      "recorded_thread_id": "record::replay-evidence::task-001-fix-typo::trial-1::2e0f92ed",
       "recorded_model": "scripted-offline",
-      "recorded_harness_class": "agents.baseline:BaselineHarness",
+      "recorded_harness_class": "__main__:ScriptedBaselineHarness",
+      "recorded_harness_source_path": "scripts/record_replay_evidence.py",
+      "recorded_harness_source_sha256": "d7e210595ddc6a615b63cb5f7e0f5bac0cbe42f0da3601f2df99d2e6660727eb",
+      "replayed_harness_source_path": "scripts/record_replay_evidence.py",
+      "replayed_harness_source_sha256": "d7e210595ddc6a615b63cb5f7e0f5bac0cbe42f0da3601f2df99d2e6660727eb",
       "recorded_task_id": "task-001-fix-typo",
-      "recorded_with": "scripted model turns; no provider call was made. The graph, the six tools, the pytest verify subprocess and the Postgres checkpoints are real.",
-      "replay_thread_id": "record::replay-evidence::task-001-fix-typo::trial-1::a12040f4::replay::e86f87af",
+      "recorded_with": "scripted model turns; no provider call was made. The graph, the six tools, the pytest verify subprocess, the grading and the Postgres checkpoints are real.",
+      "replay_thread_id": "record::replay-evidence::task-001-fix-typo::trial-1::2e0f92ed::replay::1c1c4b54",
       "from_checkpoint": null,
       "start_step_index": null,
       "model_calls_issued": 0,
@@ -40,9 +44,9 @@
         "verify",
         "submit"
       ],
-      "recorded_final_state_sha256": "73ea1df960f0ed8aed03bd9257465f7df6bd333598d4dc62073d96cba1b14f5b",
-      "replayed_final_state_sha256": "73ea1df960f0ed8aed03bd9257465f7df6bd333598d4dc62073d96cba1b14f5b",
-      "tape_entries_consumed": 9,
+      "recorded_final_state_sha256": "589c48640c8ff7b186718dbb46fcb4d4dc8f31dc29d5a6bce6b8ab1c0fae72ef",
+      "replayed_final_state_sha256": "589c48640c8ff7b186718dbb46fcb4d4dc8f31dc29d5a6bce6b8ab1c0fae72ef",
+      "tape_entries_consumed": 10,
       "tape_entries_remaining": 0,
       "usage": {
         "llm_calls": 4,
@@ -88,14 +92,14 @@
           "check": "final_state_byte_identical",
           "ok": true,
           "detail": {
-            "recorded": "73ea1df960f0ed8aed03bd9257465f7df6bd333598d4dc62073d96cba1b14f5b",
-            "replayed": "73ea1df960f0ed8aed03bd9257465f7df6bd333598d4dc62073d96cba1b14f5b"
+            "recorded": "589c48640c8ff7b186718dbb46fcb4d4dc8f31dc29d5a6bce6b8ab1c0fae72ef",
+            "replayed": "589c48640c8ff7b186718dbb46fcb4d4dc8f31dc29d5a6bce6b8ab1c0fae72ef"
           }
         },
         {
           "check": "tape_fully_consumed",
           "ok": true,
-          "detail": "9 entries consumed, 0 left unread"
+          "detail": "10 entries consumed, 0 left unread"
         }
       ],
       "verified": true,
@@ -106,13 +110,17 @@
       "recording": "task-001-fix-typo-trial-1",
       "mode": "from-checkpoint",
       "recording_id": "task-001-fix-typo-trial-1",
-      "recorded_thread_id": "record::replay-evidence::task-001-fix-typo::trial-1::a12040f4",
+      "recorded_thread_id": "record::replay-evidence::task-001-fix-typo::trial-1::2e0f92ed",
       "recorded_model": "scripted-offline",
-      "recorded_harness_class": "agents.baseline:BaselineHarness",
+      "recorded_harness_class": "__main__:ScriptedBaselineHarness",
+      "recorded_harness_source_path": "scripts/record_replay_evidence.py",
+      "recorded_harness_source_sha256": "d7e210595ddc6a615b63cb5f7e0f5bac0cbe42f0da3601f2df99d2e6660727eb",
+      "replayed_harness_source_path": "scripts/record_replay_evidence.py",
+      "replayed_harness_source_sha256": "d7e210595ddc6a615b63cb5f7e0f5bac0cbe42f0da3601f2df99d2e6660727eb",
       "recorded_task_id": "task-001-fix-typo",
-      "recorded_with": "scripted model turns; no provider call was made. The graph, the six tools, the pytest verify subprocess and the Postgres checkpoints are real.",
-      "replay_thread_id": "record::replay-evidence::task-001-fix-typo::trial-1::a12040f4::replay::ec6e0ecc",
-      "from_checkpoint": "1f1a40d9-feb0-619d-8003-7ea9772b8ead",
+      "recorded_with": "scripted model turns; no provider call was made. The graph, the six tools, the pytest verify subprocess, the grading and the Postgres checkpoints are real.",
+      "replay_thread_id": "record::replay-evidence::task-001-fix-typo::trial-1::2e0f92ed::replay::44dc9814",
+      "from_checkpoint": "1f1c8185-74c6-606a-8003-e1f291c60b89",
       "start_step_index": 2,
       "model_calls_issued": 0,
       "replayed_nodes": [
@@ -123,9 +131,9 @@
         "verify",
         "submit"
       ],
-      "recorded_final_state_sha256": "73ea1df960f0ed8aed03bd9257465f7df6bd333598d4dc62073d96cba1b14f5b",
-      "replayed_final_state_sha256": "73ea1df960f0ed8aed03bd9257465f7df6bd333598d4dc62073d96cba1b14f5b",
-      "tape_entries_consumed": 2,
+      "recorded_final_state_sha256": "589c48640c8ff7b186718dbb46fcb4d4dc8f31dc29d5a6bce6b8ab1c0fae72ef",
+      "replayed_final_state_sha256": "589c48640c8ff7b186718dbb46fcb4d4dc8f31dc29d5a6bce6b8ab1c0fae72ef",
+      "tape_entries_consumed": 3,
       "tape_entries_remaining": 0,
       "usage": {
         "llm_calls": 0,
@@ -165,14 +173,14 @@
           "check": "final_state_byte_identical",
           "ok": true,
           "detail": {
-            "recorded": "73ea1df960f0ed8aed03bd9257465f7df6bd333598d4dc62073d96cba1b14f5b",
-            "replayed": "73ea1df960f0ed8aed03bd9257465f7df6bd333598d4dc62073d96cba1b14f5b"
+            "recorded": "589c48640c8ff7b186718dbb46fcb4d4dc8f31dc29d5a6bce6b8ab1c0fae72ef",
+            "replayed": "589c48640c8ff7b186718dbb46fcb4d4dc8f31dc29d5a6bce6b8ab1c0fae72ef"
           }
         },
         {
           "check": "tape_fully_consumed",
           "ok": true,
-          "detail": "2 entries consumed, 0 left unread"
+          "detail": "3 entries consumed, 0 left unread"
         }
       ],
       "verified": true,
