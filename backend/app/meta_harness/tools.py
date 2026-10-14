@@ -7,6 +7,17 @@ specific args and returns a structured dict (``{"status": ...}``).
 The ``TOOL_SCHEMAS`` list is the JSON Schema dict passed to the
 Anthropic API as ``tools=...``; ``TOOL_DISPATCH`` maps tool names to
 the Python implementation.
+
+**A tool call never raises.** ``execute_tool`` validates the model's
+arguments against ``TOOL_SCHEMAS`` and turns every failure — a bad
+argument, a binary file, a timeout, an unexpected exception — into a
+``{"status": "error", "error_type": ...}`` result. An exception here
+would escape ``act``, kill the trial and, before the benchmark caught
+per-trial errors, the whole benchmark; the model is always owed a
+``tool_result`` instead.
+
+Every subprocess a tool starts goes through ``sandbox.run_in_sandbox``:
+its own process group, a scrubbed environment, no stdin and a timeout.
 """
 
 from __future__ import annotations
@@ -27,6 +38,8 @@ _STDOUT_LIMIT = 8000
 _STDERR_LIMIT = 2000
 _FILE_LINE_HARD_LIMIT = 2000  # Read errors over this without explicit range
 _GREP_OUTPUT_LIMIT = 8000
+_GREP_TIMEOUT_S = 30
+_GIT_APPLY_TIMEOUT_S = 30
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -179,8 +192,27 @@ def read_file(
             "error_message": f"not a regular file: {path}",
         }
 
-    text = target.read_text()
-    lines = text.split("\n")
+    try:
+        raw = target.read_bytes()
+    except OSError as exc:
+        return {
+            "status": "error",
+            "error_type": "read_failed",
+            "error_message": f"could not read {path}: {exc}",
+        }
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return {
+            "status": "error",
+            "error_type": "binary_file",
+            "error_message": (
+                f"{path} is not UTF-8 text ({len(raw)} bytes); use run_bash "
+                "(e.g. `file` or `xxd | head`) to inspect it"
+            ),
+        }
+    # Universal newlines, as text-mode reading always did.
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     n = len(lines)
 
     explicit_range = (start_line != 1) or (end_line not in (-1, n))
@@ -242,8 +274,27 @@ def write_file(workspace: Path, path: str, content: str) -> dict[str, Any]:
             ),
         }
     try:
+        data = content.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        return {
+            "status": "error",
+            "error_type": "invalid_content",
+            "error_message": f"content is not encodable as UTF-8: {exc}",
+        }
+    try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content)
+        # Bytes, not text mode: the model's "\n" must stay "\n" on
+        # Windows too, or a later LF patch no longer matches the file.
+        with target.open("xb") as fh:
+            fh.write(data)
+    except FileExistsError:
+        return {
+            "status": "error",
+            "error_type": "file_exists",
+            "error_message": (
+                f"file '{path}' already exists. Use apply_patch to modify it."
+            ),
+        }
     except OSError as exc:
         return {
             "status": "error",
@@ -253,7 +304,7 @@ def write_file(workspace: Path, path: str, content: str) -> dict[str, Any]:
     return {
         "status": "ok",
         "path": path,
-        "bytes_written": len(content.encode("utf-8")),
+        "bytes_written": len(data),
     }
 
 
@@ -285,16 +336,86 @@ def _normalize_patch_header_path(raw: str) -> str | None:
     return posix.as_posix()
 
 
+_HUNK_START = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
+
+#: Git extended headers ``apply_patch`` refuses. Each makes a patch do
+#: something other than edit the declared file's content in place —
+#: rename or copy it, create or delete a file, change a mode, or carry a
+#: binary payload — and a rename-only patch has no ``---``/``+++`` lines
+#: at all, which is how a path check that only read those lines was
+#: bypassed.
+_FORBIDDEN_PATCH_HEADERS = (
+    "rename from ",
+    "rename to ",
+    "copy from ",
+    "copy to ",
+    "deleted file mode",
+    "new file mode",
+    "old mode ",
+    "new mode ",
+    "similarity index ",
+    "dissimilarity index ",
+    "GIT binary patch",
+    "Binary files ",
+)
+
+
+def _scan_patch_headers(
+    patch_text: str,
+) -> tuple[set[str], bool, list[str], list[str]]:
+    """Read a patch's file headers the way ``git apply`` delimits them.
+
+    Hunk bodies are skipped by their declared line counts, so a removed
+    line that happens to begin ``--- `` is not mistaken for a header.
+    Returns ``(paths, mentions_dev_null, diff_git_lines, forbidden_lines)``.
+    Raises ``ValueError`` for a header path that escapes the workspace.
+    """
+    paths: set[str] = set()
+    dev_null = False
+    git_lines: list[str] = []
+    forbidden: list[str] = []
+    old_left = new_left = 0
+    for line in patch_text.splitlines():
+        if old_left > 0 or new_left > 0:
+            tag = line[:1]
+            if tag == "-":
+                old_left -= 1
+            elif tag == "+":
+                new_left -= 1
+            elif tag != "\\":  # context, including an empty line
+                old_left -= 1
+                new_left -= 1
+            continue
+        hunk = _HUNK_START.match(line)
+        if hunk:
+            old_left = int(hunk.group(1) if hunk.group(1) is not None else 1)
+            new_left = int(hunk.group(2) if hunk.group(2) is not None else 1)
+            continue
+        if line.startswith(("--- ", "+++ ")):
+            normalized = _normalize_patch_header_path(line[4:])
+            if normalized is None:
+                dev_null = True
+            else:
+                paths.add(normalized)
+        elif line.startswith("diff --git "):
+            git_lines.append(line)
+        elif line.startswith(_FORBIDDEN_PATCH_HEADERS):
+            forbidden.append(line)
+    return paths, dev_null, git_lines, forbidden
+
+
 def _patch_header_paths(patch_text: str) -> set[str]:
     """Return file paths mentioned by ``---`` / ``+++`` patch headers."""
-    paths: set[str] = set()
-    for line in patch_text.splitlines():
-        if not (line.startswith("--- ") or line.startswith("+++ ")):
-            continue
-        normalized = _normalize_patch_header_path(line[4:])
-        if normalized is not None:
-            paths.add(normalized)
-    return paths
+    return _scan_patch_headers(patch_text)[0]
+
+
+def _patch_error(error_type: str, message: str) -> dict[str, Any]:
+    return {
+        "status": "error",
+        "error_type": error_type,
+        "error_message": message,
+        "context_echo": None,
+    }
 
 
 def _validate_single_file_patch(
@@ -302,28 +423,57 @@ def _validate_single_file_patch(
     target: Path,
     patch_text: str,
 ) -> dict[str, Any] | None:
-    """Return an error dict if ``patch_text`` edits anything but target."""
+    """Return an error dict unless ``patch_text`` only edits ``target``.
+
+    A patch must name the declared path in its ``---``/``+++`` headers
+    and nothing else; it may not create, delete, rename, copy, re-mode or
+    binary-patch anything. Every one of those used to reach ``git apply``
+    unchecked whenever the patch had no ``---``/``+++`` lines to compare.
+    """
     try:
-        patch_paths = _patch_header_paths(patch_text)
+        patch_paths, dev_null, git_lines, forbidden = _scan_patch_headers(
+            patch_text
+        )
     except ValueError as exc:
-        return {
-            "status": "error",
-            "error_type": "invalid_patch_path",
-            "error_message": str(exc),
-            "context_echo": None,
-        }
+        return _patch_error("invalid_patch_path", str(exc))
     expected = _workspace_relative_path(workspace, target)
-    if patch_paths and patch_paths != {expected}:
-        return {
-            "status": "error",
-            "error_type": "path_mismatch",
-            "error_message": (
-                f"patch headers target {sorted(patch_paths)!r}, but tool path is "
-                f"{expected!r}. apply_patch only accepts single-file patches "
-                "for the declared path."
-            ),
-            "context_echo": None,
-        }
+    if forbidden:
+        return _patch_error(
+            "unsupported_patch",
+            f"apply_patch only edits the content of {expected!r}; it does not "
+            f"accept {forbidden[0].strip()!r}. Use write_file to create a "
+            "file and run_bash to move or delete one.",
+        )
+    if dev_null:
+        return _patch_error(
+            "unsupported_patch",
+            "a /dev/null header creates or deletes a file; apply_patch only "
+            f"edits {expected!r} in place",
+        )
+    if not patch_paths:
+        return _patch_error(
+            "invalid_patch",
+            "the patch has no '--- a/<path>' / '+++ b/<path>' file headers; "
+            f"start it with '--- a/{expected}' and '+++ b/{expected}'",
+        )
+    if patch_paths != {expected}:
+        return _patch_error(
+            "path_mismatch",
+            f"patch headers target {sorted(patch_paths)!r}, but tool path is "
+            f"{expected!r}. apply_patch only accepts single-file patches "
+            "for the declared path.",
+        )
+    allowed_git_lines = {
+        f"diff --git a/{expected} b/{expected}",
+        f"diff --git {expected} {expected}",
+    }
+    for line in git_lines:
+        if line.rstrip() not in allowed_git_lines:
+            return _patch_error(
+                "path_mismatch",
+                f"{line.strip()!r} does not name {expected!r}; apply_patch only "
+                "accepts single-file patches for the declared path.",
+            )
     return None
 
 
@@ -346,7 +496,10 @@ def _extract_context_echo(
     if length == 0:
         length = 1
     end = start + length - 1
-    file_lines = target.read_text().split("\n")
+    try:
+        file_lines = target.read_text(encoding="utf-8", errors="replace").split("\n")
+    except OSError:
+        return None
     if start < 1 or start > len(file_lines):
         return None
     end = min(end, len(file_lines))
@@ -357,6 +510,18 @@ def _extract_context_echo(
         "end_line": end,
         "content": snippet,
     }
+
+
+def _run_git_apply(
+    workspace: Path, args: list[str]
+) -> subprocess.CompletedProcess[str] | None:
+    """``git apply <args>`` in the workspace; ``None`` on timeout."""
+    try:
+        return run_in_sandbox(
+            workspace, ["git", "apply", *args], timeout_sec=_GIT_APPLY_TIMEOUT_S
+        )
+    except subprocess.TimeoutExpired:
+        return None
 
 
 def apply_patch(workspace: Path, path: str, patch: str) -> dict[str, Any]:
@@ -391,6 +556,10 @@ def apply_patch(workspace: Path, path: str, patch: str) -> dict[str, Any]:
     # ``context_mismatch``. That failure does not crash anything — it
     # just makes the inner loop's primary edit tool silently unusable on
     # Windows, and depresses the measured pass rate with it.
+    try:
+        patch.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        return _patch_error("invalid_patch", f"patch is not encodable as UTF-8: {exc}")
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".patch", delete=False, newline="", encoding="utf-8"
     ) as patch_file:
@@ -398,14 +567,11 @@ def apply_patch(workspace: Path, path: str, patch: str) -> dict[str, Any]:
         patch_path = patch_file.name
 
     try:
-        check = subprocess.run(  # noqa: S603,S607 — git is on PATH
-            ["git", "apply", "--check", patch_path],
-            cwd=workspace,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
+        check = _run_git_apply(workspace, ["--check", patch_path])
+        if check is None:
+            return _patch_error(
+                "timeout", f"git apply --check timed out after {_GIT_APPLY_TIMEOUT_S}s"
+            )
         if check.returncode != 0:
             stderr = check.stderr.strip()
             if "patch does not apply" in stderr or "while searching for" in stderr:
@@ -433,14 +599,11 @@ def apply_patch(workspace: Path, path: str, patch: str) -> dict[str, Any]:
                 "context_echo": None,
             }
 
-        apply_proc = subprocess.run(  # noqa: S603,S607
-            ["git", "apply", patch_path],
-            cwd=workspace,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
+        apply_proc = _run_git_apply(workspace, [patch_path])
+        if apply_proc is None:
+            return _patch_error(
+                "timeout", f"git apply timed out after {_GIT_APPLY_TIMEOUT_S}s"
+            )
         if apply_proc.returncode != 0:
             return {
                 "status": "error",
@@ -500,7 +663,15 @@ def grep_search(
     file_glob: str | None = None,
     context_lines: int = 2,
 ) -> dict[str, Any]:
-    """Search using ripgrep (or ``grep -rn`` fallback)."""
+    """Search using ripgrep (or ``grep -rn`` fallback).
+
+    The pattern is passed with ``-e`` and the search root after ``--``,
+    so neither can be read as an option: a pattern of ``-v`` used to be
+    taken as a flag, leaving no search root, and the search ran over the
+    *server's* working directory instead of the workspace. The command
+    runs with ``cwd`` set to the workspace and reports workspace-relative
+    paths.
+    """
     context_lines = max(0, min(context_lines, 10))
     target = _resolve_in_workspace(workspace, path)
     if target is None:
@@ -509,34 +680,45 @@ def grep_search(
             "error_type": "invalid_path",
             "error_message": f"path '{path}' escapes the workspace",
         }
+    if not target.exists():
+        return {
+            "status": "error",
+            "error_type": "file_not_found",
+            "error_message": f"path not found: {path}",
+        }
+    root = _workspace_relative_path(workspace, target)
 
-    rg_path = shutil.which("rg")
-    if rg_path:
-        cmd: list[str] = ["rg", "-n", "-C", str(context_lines), pattern, str(target)]
+    if shutil.which("rg"):
+        cmd: list[str] = ["rg", "--no-config", "-n", "-C", str(context_lines)]
         if file_glob:
             cmd += ["-g", file_glob]
+        cmd += ["-e", pattern, "--", root]
     else:
         cmd = ["grep", "-rn", f"-C{context_lines}", "-E"]
         if file_glob:
             cmd.append(f"--include={file_glob}")
-        cmd += [pattern, str(target)]
+        cmd += ["-e", pattern, "--", root]
 
-    proc = subprocess.run(  # noqa: S603 — controlled command
-        cmd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=30,
-    )
+    try:
+        proc = run_in_sandbox(workspace, cmd, timeout_sec=_GREP_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "error",
+            "error_type": "timeout",
+            "error_message": f"search timed out after {_GREP_TIMEOUT_S}s",
+            "command": " ".join(cmd),
+        }
     matches = proc.stdout[-_GREP_OUTPUT_LIMIT:]
-    return {
+    result: dict[str, Any] = {
         "status": "ok",
         "matches": matches,
         "match_count": matches.count("\n"),
         "exit_code": proc.returncode,
         "command": " ".join(cmd),
     }
+    if proc.stderr.strip():
+        result["stderr"] = proc.stderr[-_STDERR_LIMIT:]
+    return result
 
 
 def task_complete() -> dict[str, Any]:
@@ -559,15 +741,96 @@ TOOL_DISPATCH: dict[str, Callable[..., dict[str, Any]]] = {
 }
 
 
+_SCHEMA_BY_NAME: dict[str, dict[str, Any]] = {s["name"]: s for s in TOOL_SCHEMAS}
+
+#: JSON-schema type → the Python types that satisfy it. ``bool`` is a
+#: subclass of ``int`` and is excluded from "integer" explicitly.
+_JSON_TYPES: dict[str, tuple[type, ...]] = {
+    "string": (str,),
+    "integer": (int,),
+    "number": (int, float),
+    "boolean": (bool,),
+    "object": (dict,),
+    "array": (list,),
+}
+
+
+def _invalid_arguments(name: str, message: str) -> dict[str, Any]:
+    return {
+        "status": "error",
+        "error_type": "invalid_arguments",
+        "error_message": f"{name}: {message}",
+    }
+
+
+def validate_tool_arguments(
+    name: str, arguments: dict[str, Any]
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Check ``arguments`` against the tool's JSON schema.
+
+    Returns ``(clean_arguments, None)`` or ``(None, error_result)``.
+    An optional argument the model sent as ``null`` is treated as absent.
+    Types are checked, not coerced: ``"start_line": "2"`` is an error the
+    model can read and correct, not a ``TypeError`` that ends the trial.
+    """
+    schema = _SCHEMA_BY_NAME[name]["input_schema"]
+    properties: dict[str, Any] = schema.get("properties", {})
+    required = set(schema.get("required", []))
+
+    unknown = sorted(set(arguments) - set(properties))
+    if unknown:
+        return None, _invalid_arguments(
+            name,
+            f"unexpected argument(s) {unknown}; accepted: {sorted(properties)}",
+        )
+    clean = {
+        key: value
+        for key, value in arguments.items()
+        if value is not None or key in required
+    }
+    missing = sorted(required - set(clean))
+    if missing:
+        return None, _invalid_arguments(name, f"missing required argument(s) {missing}")
+    for key, value in clean.items():
+        expected = properties[key].get("type")
+        allowed = _JSON_TYPES.get(expected)
+        if allowed is None:
+            continue
+        wrong = not isinstance(value, allowed) or (
+            expected in ("integer", "number") and isinstance(value, bool)
+        )
+        if wrong:
+            return None, _invalid_arguments(
+                name,
+                f"argument {key!r} must be {expected}, got "
+                f"{type(value).__name__} {value!r:.80}",
+            )
+    return clean, None
+
+
 def execute_tool(name: str, workspace: Path, **kwargs: Any) -> dict[str, Any]:
-    """Dispatch a tool call by name. ``task_complete`` ignores ``workspace``."""
+    """Dispatch a tool call by name. ``task_complete`` ignores ``workspace``.
+
+    Never raises: invalid arguments and any failure inside a tool come
+    back as a structured error result the model can act on.
+    """
     if name not in TOOL_DISPATCH:
         return {
             "status": "error",
             "error_type": "unknown_tool",
             "error_message": f"unknown tool: {name}",
         }
+    arguments, error = validate_tool_arguments(name, kwargs)
+    if error is not None:
+        return error
     fn = TOOL_DISPATCH[name]
-    if name == "task_complete":
-        return fn()
-    return fn(workspace, **kwargs)
+    try:
+        if name == "task_complete":
+            return fn()
+        return fn(workspace, **(arguments or {}))
+    except Exception as exc:  # noqa: BLE001 — the model is owed a tool_result
+        return {
+            "status": "error",
+            "error_type": "tool_exception",
+            "error_message": f"{name} failed: {type(exc).__name__}: {exc}",
+        }

@@ -46,6 +46,10 @@ CROSSINGS = (
     "subprocess.call",
     "os.system",
     "os.popen",
+    # The project's own wrappers around the same thing.
+    "run_in_sandbox",
+    "execute_tool",
+    "grading.grade_workspace",
 )
 
 
@@ -256,10 +260,18 @@ def test_the_effect_kinds_are_a_closed_set_and_all_are_used():
         rec.KIND_ORIENT,
         rec.KIND_VERIFY,
         rec.KIND_FILES,
+        rec.KIND_GRADE,
     }
 
     combined = INNER.read_text(encoding="utf-8") + EFFECTS.read_text(encoding="utf-8")
-    for kind in ("KIND_LLM", "KIND_TOOL", "KIND_ORIENT", "KIND_VERIFY", "KIND_FILES"):
+    for kind in (
+        "KIND_LLM",
+        "KIND_TOOL",
+        "KIND_ORIENT",
+        "KIND_VERIFY",
+        "KIND_FILES",
+        "KIND_GRADE",
+    ):
         assert kind in combined, f"{kind} is declared but never routed"
 
 

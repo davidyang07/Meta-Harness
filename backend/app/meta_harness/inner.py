@@ -4,14 +4,21 @@ Per Appendix C §C.8 / INTERFACES.md §1.2. **All nodes are async** so
 the inner graph can be checkpointed via ``AsyncPostgresSaver`` (step 7)
 and forks can run concurrently via ``asyncio.create_task`` (step 9).
 
-Node bodies still issue some sync subprocess calls (``find``, ``pytest``)
-because their wall time is short and bounded; we accept the brief
-event-loop block. Use ``asyncio.to_thread`` if a future change makes
-these long-running.
+Subprocess work (the workspace scan, tools, verify, the grade) runs in
+worker threads via ``asyncio.to_thread``, and every command goes through
+``sandbox.run_in_sandbox``: its own process group, a scrubbed
+environment, rlimits and a timeout.
+
+**The score comes from the grader, not from verify.** ``verify`` runs
+the task's tests in the agent's own workspace, where the agent can write
+a ``conftest.py`` or edit the tests; its result drives the retry loop
+and nothing else. ``submit`` grades in a pristine copy of the task that
+carries over only ``expected_files_changed`` (``grading.py``), and
+refuses to run without the task's ``_source_workspace``.
 
 **Every crossing into the world goes through ``effects``.** Model calls,
-tool dispatch, the workspace scan, the verify subprocess, the final-file
-snapshot and every trace write are routed through
+tool dispatch, the workspace scan, the verify subprocess, the grade, the
+final-file snapshot and every trace write are routed through
 ``app.meta_harness.effects``. With the default :class:`Effects` that is
 exactly the behaviour it always was; with a recording or replaying
 implementation the same graph re-executes against a tape instead of the
@@ -25,28 +32,44 @@ reducer assigns a fresh UUID per message, which (a) makes two executions
 of the same recorded run produce different state and (b) makes a
 re-executed ``act`` append duplicates instead of replacing its own
 writes — the idempotency requirement for a node that can be re-entered
-after an interrupt.
+after an interrupt. The entry state clears the channel for the same
+reason: inner thread ids are deterministic, and a re-run trial must not
+inherit the conversation an earlier run left on its thread.
 """
 
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import RemoveMessage
-from langgraph.graph import END, START, StateGraph
+from langgraph.graph import StateGraph
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from app.meta_harness import effects as fx
+from app.meta_harness import grading
 from app.meta_harness import recording as rec
-from app.meta_harness.harness import PLAN_TOOL_SCHEMA, CodingAgentHarness
+from app.meta_harness.harness import (
+    PLAN_TOOL_SCHEMA,
+    CodingAgentHarness,
+    wire_default_inner_graph,
+)
+from app.meta_harness.sandbox import run_in_sandbox
 from app.meta_harness.state import CodingAgentState
 from app.meta_harness.tools import TOOL_SCHEMAS, execute_tool
 
 ACT_TOOLS = TOOL_SCHEMAS  # all 6 fixed tools incl. task_complete
+
+#: Most verify output fed back to the model on a retry.
+_VERIFY_FEEDBACK_LIMIT = 3000
+
+#: Super-steps reserved beyond the phases themselves.
+_RECURSION_HEADROOM = 10
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -57,7 +80,8 @@ ACT_TOOLS = TOOL_SCHEMAS  # all 6 fixed tools incl. task_complete
 def _depth_limited_tree(workspace: Path, max_depth: int = 3) -> str:
     """Build a depth-limited workspace tree (best-effort, sync)."""
     try:
-        proc = subprocess.run(
+        proc = run_in_sandbox(
+            workspace,
             [
                 "find",
                 ".",
@@ -70,12 +94,7 @@ def _depth_limited_tree(workspace: Path, max_depth: int = 3) -> str:
                 "-path",
                 "*/.*",
             ],
-            cwd=workspace,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=10,
+            timeout_sec=10,
         )
         return proc.stdout
     except (subprocess.SubprocessError, OSError):
@@ -95,12 +114,12 @@ def _scan_workspace(workspace: Path) -> dict[str, Any]:
     }
 
     tests: dict[str, str] = {}
-    for test_file in list(workspace.rglob("test_*.py"))[:10]:
+    for test_file in sorted(workspace.rglob("test_*.py"))[:10]:
         if test_file.is_file():
             try:
-                tests[str(test_file.relative_to(workspace))] = test_file.read_text()[
-                    :4000
-                ]
+                tests[test_file.relative_to(workspace).as_posix()] = (
+                    test_file.read_text(encoding="utf-8", errors="replace")[:4000]
+                )
             except OSError:
                 pass
 
@@ -113,7 +132,9 @@ def _scan_workspace(workspace: Path) -> dict[str, Any]:
             and cfg_path.stat().st_size < 4000
         ):
             try:
-                configs[cfg_name] = cfg_path.read_text()
+                configs[cfg_name] = cfg_path.read_text(
+                    encoding="utf-8", errors="replace"
+                )
             except OSError:
                 pass
 
@@ -133,6 +154,9 @@ async def orient(
     """Phase 1: build initial context for the planner."""
     effects = effects or fx.Effects()
     effects.set_node("orient")
+    # Fail before the first model call rather than after the last one: a
+    # trial that cannot be graded is not worth paying for.
+    _source_workspace(state)
     workspace = Path(state["workspace_path"])
 
     summary = await effects.observe(
@@ -179,7 +203,9 @@ async def plan(
     messages = [{"role": "user", "content": prompt}]
     response = await harness._call_llm(
         messages=messages,
-        tools=[PLAN_TOOL_SCHEMA],
+        # A copy: an override that edits its tools must not edit the
+        # module-level schema every later call shares.
+        tools=[copy.deepcopy(PLAN_TOOL_SCHEMA)],
         tool_choice={"type": "tool", "name": "submit_plan"},
     )
 
@@ -203,18 +229,14 @@ async def plan(
 
 
 def _serialize_block(block: Any) -> dict[str, Any]:
-    """Convert an Anthropic SDK content block into a plain dict."""
-    btype = getattr(block, "type", None)
-    if btype == "text":
-        return {"type": "text", "text": block.text}
-    if btype == "tool_use":
-        return {
-            "type": "tool_use",
-            "id": block.id,
-            "name": block.name,
-            "input": dict(block.input),
-        }
-    return {"type": str(btype), "raw": str(block)}
+    """Convert a response content block into the dict the API accepts back.
+
+    Shared with the tape codec (``recording.serialize_content_block``), so
+    a thinking block is kept as ``{"type": "thinking", "thinking": …,
+    "signature": …}`` — valid to send back, and identical whether it came
+    from the SDK or from a replayed tape. ``str(block)`` was neither.
+    """
+    return rec.serialize_content_block(block)
 
 
 _ROLE_BY_MESSAGE_TYPE = {
@@ -250,8 +272,17 @@ def _as_api_messages(messages: list[Any]) -> list[dict[str, Any]]:
 
 
 def _request_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Strip our bookkeeping ``id`` before the request goes to the model."""
-    return [{k: v for k, v in m.items() if k != "id"} for m in messages]
+    """The request's messages: a deep copy, minus our bookkeeping ``id``.
+
+    Deep, because a ``_call_llm`` override is free to edit what it is
+    given — adding ``cache_control`` to the last block is the usual
+    prompt-caching idiom. With a shallow copy that edit landed in the
+    graph's state, and a replay (which never runs the override) produced
+    a different state.
+    """
+    return [
+        copy.deepcopy({k: v for k, v in m.items() if k != "id"}) for m in messages
+    ]
 
 
 def _messages_update(messages: list[dict[str, Any]]) -> list[Any]:
@@ -278,6 +309,49 @@ def _messages_update(messages: list[dict[str, Any]]) -> list[Any]:
     ]
 
 
+def _verify_feedback(state: CodingAgentState, harness: CodingAgentHarness) -> str:
+    """The user text that tells the model what the last verify reported."""
+    verify_result = state.get("verify_result") or {}
+    attempts = state.get("verify_attempts", 0)
+    budget = getattr(harness, "MAX_VERIFY_RETRIES", None)
+    command = state["task"].get("test_command", "pytest -q")
+    outcome = "passed" if verify_result.get("tests_pass") else "failed"
+    output = str(verify_result.get("test_output") or "").strip()
+    if len(output) > _VERIFY_FEEDBACK_LIMIT:
+        output = (
+            "[... earlier output truncated ...]\n"
+            + output[-_VERIFY_FEEDBACK_LIMIT:]
+        )
+    of_budget = f" of {budget}" if budget else ""
+    return (
+        f"Verification attempt {attempts}{of_budget} {outcome}: `{command}` "
+        f"reported:\n\n{output or '(no output)'}\n\n"
+        "Fix the cause of the failures, then call task_complete again."
+    )
+
+
+def _with_user_text(
+    messages: list[dict[str, Any]], text: str
+) -> list[dict[str, Any]]:
+    """Append ``text`` as user input without two user turns in a row.
+
+    After a full act turn the conversation ends with the user message
+    that carries the tool results; the text joins that message (tool
+    results first, then text, as the API requires). After a turn with no
+    tool call it ends with the assistant, and the text becomes a new user
+    message. Either way ``_messages_update`` gives it a positional id.
+    """
+    last = messages[-1] if messages else None
+    if last is None or last.get("role") != "user":
+        return [*messages, {"role": "user", "content": text}]
+    content = last.get("content")
+    if isinstance(content, list):
+        merged: Any = [*content, {"type": "text", "text": text}]
+    else:
+        merged = f"{content}\n\n{text}" if content else text
+    return [*messages[:-1], {**last, "content": merged}]
+
+
 async def act(
     state: CodingAgentState,
     harness: CodingAgentHarness,
@@ -296,15 +370,27 @@ async def act(
         messages.append(
             {"role": "user", "content": harness._compose_act_prompt(plan_dict)}
         )
+    elif state.get("verify_result") is not None:
+        # Re-entered from verify. The model used to be asked to try again
+        # with nothing new to go on. The text is built from state alone,
+        # so a replay rebuilds the identical message.
+        messages = _with_user_text(messages, _verify_feedback(state, harness))
 
+    # ``turn_count`` is the trial's running total; the budget is per entry.
+    # Each verify attempt gets MAX_ACT_TURNS of its own, where it used to
+    # inherit whatever earlier attempts had left — nothing, once they had
+    # used it all, so the retries made zero model calls.
     turn_count = state.get("turn_count", 0)
+    turns_this_attempt = 0
     act_complete = False
 
-    while turn_count < harness.MAX_ACT_TURNS:
+    while turns_this_attempt < harness.MAX_ACT_TURNS:
         if len(messages) > 40:
             messages = harness._summarize_for_overflow(messages)
 
-        response = await harness._call_llm(_request_messages(messages), ACT_TOOLS)
+        response = await harness._call_llm(
+            _request_messages(messages), copy.deepcopy(ACT_TOOLS)
+        )
 
         assistant_blocks: list[dict[str, Any]] = []
         tool_uses: list[Any] = []
@@ -341,17 +427,27 @@ async def act(
                     )
                 continue
 
-            # Tool dispatch is sync (subprocess-based). Wrap in
-            # to_thread so we don't block the event loop on long
-            # bash commands.
-            tool_input = dict(tu.input)
-            result = await effects.observe(
-                rec.KIND_TOOL,
-                {"tool": tu.name, "input": tool_input},
-                lambda name=tu.name, args=tool_input: asyncio.to_thread(
-                    execute_tool, name, workspace, **args
-                ),
-            )
+            raw_input = getattr(tu, "input", None)
+            if isinstance(raw_input, Mapping):
+                # Tool dispatch is sync (subprocess-based). Wrap in
+                # to_thread so we don't block the event loop on long
+                # bash commands.
+                tool_input = dict(raw_input)
+                result = await effects.observe(
+                    rec.KIND_TOOL,
+                    {"tool": tu.name, "input": tool_input},
+                    lambda name=tu.name, args=tool_input: asyncio.to_thread(
+                        execute_tool, name, workspace, **args
+                    ),
+                )
+            else:
+                # Decided from the recorded response alone: nothing to observe.
+                tool_input = {"input": raw_input}
+                result = {
+                    "status": "error",
+                    "error_type": "invalid_arguments",
+                    "error_message": f"{tu.name}: tool input must be a JSON object",
+                }
             formatted = harness._format_tool_result(tu.name, result)
             is_error = result.get("status") == "error"
             tool_results.append(
@@ -375,6 +471,7 @@ async def act(
 
         messages.append({"role": "user", "content": tool_results})
         turn_count += 1
+        turns_this_attempt += 1
 
         if act_complete:
             break
@@ -414,7 +511,11 @@ def _append_tool_log(
 # ──────────────────────────────────────────────────────────────────────
 
 
-def _run_verify_subprocess(workspace: Path, test_command: str) -> tuple[bool, str]:
+def _run_verify_subprocess(
+    workspace: Path,
+    test_command: str,
+    timeout_sec: int = grading.DEFAULT_TEST_TIMEOUT_SEC,
+) -> tuple[bool, str]:
     """Sync helper for verify (called via asyncio.to_thread).
 
     **Trust boundary.** ``test_command`` runs through a shell. It comes
@@ -427,24 +528,15 @@ def _run_verify_subprocess(workspace: Path, test_command: str) -> tuple[bool, st
     needs an argv list and an allowlist first. The workspace itself is a
     disposable sandbox copy (``sandbox.sandbox_for``), so a command can
     destroy its own workspace but not the task's pristine source.
+
+    It runs through ``run_in_sandbox`` like every tool command — process
+    group, scrubbed environment, rlimits — because the tests execute
+    code the agent wrote.
     """
     try:
-        proc = subprocess.run(  # noqa: S602 — see the trust boundary above
-            test_command,
-            shell=True,
-            cwd=workspace,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=60,
-        )
+        proc = run_in_sandbox(workspace, test_command, timeout_sec=timeout_sec)
         return proc.returncode == 0, (proc.stdout + "\n" + proc.stderr)[-2000:]
     except subprocess.TimeoutExpired as exc:
-        # With ``text=True`` the partial output on a timeout is already
-        # ``str``. Calling ``.decode()`` on it turned every verify
-        # timeout into an AttributeError, which surfaced as a crashed
-        # node rather than the failed trial it actually is.
         out = _as_text(exc.stdout) + _as_text(exc.stderr)
         return False, (out + "\n[timeout]")[-2000:]
 
@@ -463,26 +555,36 @@ async def verify(
     harness: CodingAgentHarness,
     effects: fx.Effects | None = None,
 ) -> dict[str, Any]:
-    """Phase 4: run the task's test_command + persist verify.json."""
+    """Phase 4: run the task's test_command in the agent's workspace.
+
+    This is the agent's own check and drives the retry loop only; the
+    score comes from ``submit``'s grade. Fields nothing measures are
+    ``None`` rather than a reassuring default: no linter runs, failing
+    test ids are not parsed, and ``out_of_plan_changes`` is filled in by
+    ``submit`` from the grade.
+    """
     effects = effects or fx.Effects()
     effects.set_node("verify")
     workspace = Path(state["workspace_path"])
     test_command = state["task"].get("test_command", "pytest -q")
+    timeout_sec = grading.timeout_for_task(state["task"])
     attempt = state.get("verify_attempts", 0) + 1
 
     tests_pass, output = await effects.observe(
         rec.KIND_VERIFY,
         {"command": test_command, "attempt": attempt},
-        lambda: asyncio.to_thread(_run_verify_subprocess, workspace, test_command),
+        lambda: asyncio.to_thread(
+            _run_verify_subprocess, workspace, test_command, timeout_sec
+        ),
     )
 
     verify_result = {
         "tests_pass": tests_pass,
-        "tests_failed": [],
+        "tests_failed": None,
         "test_output": output,
-        "lint_pass": True,
-        "lint_errors": [],
-        "out_of_plan_changes": [],
+        "lint_pass": None,
+        "lint_errors": None,
+        "out_of_plan_changes": None,
     }
 
     trace_dir = _trace_dir_or_none(state)
@@ -506,10 +608,29 @@ def _snapshot_workspace(workspace: Path) -> dict[str, str]:
     for f in sorted(workspace.rglob("*")):
         if f.is_file() and f.stat().st_size < 50_000:
             try:
-                final_files[str(f.relative_to(workspace))] = f.read_text()
+                final_files[f.relative_to(workspace).as_posix()] = f.read_text(
+                    encoding="utf-8"
+                )
             except (OSError, UnicodeDecodeError):
                 pass
     return final_files
+
+
+def _source_workspace(state: CodingAgentState) -> Path:
+    """The task's pristine ``workspace/`` directory, which grading needs.
+
+    There is deliberately no fallback to the agent's own verify result:
+    that ran in a workspace the agent controls.
+    """
+    raw = state["task"].get("_source_workspace")
+    if not raw:
+        raise ValueError(
+            f"task {state['task'].get('id')!r} has no '_source_workspace'. "
+            "The grader runs the tests in a pristine copy of the task's "
+            "workspace/ directory and will not fall back to the agent's own "
+            "verify; set task['_source_workspace'] the way '_trace_dir' is set."
+        )
+    return Path(raw)
 
 
 async def submit(
@@ -517,17 +638,53 @@ async def submit(
     harness: CodingAgentHarness,
     effects: fx.Effects | None = None,
 ) -> dict[str, Any]:
-    """Phase 5: snapshot workspace, write score.json + summary.md +
-    final-files.json."""
+    """Phase 5: grade, snapshot the workspace, write the trial's traces.
+
+    The grade runs the task's ``test_command`` in a fresh copy of
+    ``_source_workspace`` carrying only ``expected_files_changed`` from
+    the agent's workspace; ``score`` is 1.0 iff it passes.
+    """
     effects = effects or fx.Effects()
     effects.set_node("submit")
+    task = state["task"]
+    source_workspace = _source_workspace(state)
     workspace = Path(state["workspace_path"])
-    verify_result = state.get("verify_result") or {}
-    score = 1.0 if verify_result.get("tests_pass") else 0.0
+    verify_result = state.get("verify_result")
+    test_command = task.get("test_command", "pytest -q")
+    expected = grading.normalize_expected_files(task.get("expected_files_changed"))
+    timeout_sec = grading.timeout_for_task(task)
+
+    # Keyed on the task, never on machine paths, so a recording replays on
+    # a machine whose temp and checkout directories differ.
+    grade = await effects.observe(
+        rec.KIND_GRADE,
+        {
+            "task_id": task.get("id"),
+            "test_command": test_command,
+            "expected_files_changed": expected,
+        },
+        lambda: asyncio.to_thread(
+            grading.grade_workspace,
+            source_workspace=source_workspace,
+            agent_workspace=workspace,
+            test_command=test_command,
+            expected_files_changed=expected,
+            timeout_sec=timeout_sec,
+        ),
+    )
+    agent_verify_passed = bool((verify_result or {}).get("tests_pass"))
+    grade_result = {
+        "passed": bool(grade.get("passed")),
+        "output": str(grade.get("output") or ""),
+        "carried_files": list(grade.get("carried_files") or []),
+        "out_of_plan_changes": list(grade.get("out_of_plan_changes") or []),
+        "agent_verify_passed": agent_verify_passed,
+    }
+    score = 1.0 if grade_result["passed"] else 0.0
 
     final_files = await effects.observe(
         rec.KIND_FILES,
-        {"task_id": state["task"].get("id")},
+        {"task_id": task.get("id")},
         lambda: asyncio.to_thread(_snapshot_workspace, workspace),
     )
 
@@ -536,17 +693,26 @@ async def submit(
         effects.write_trace(
             trace_dir / "final-files.json", json.dumps(final_files, indent=2)
         )
+        effects.write_trace(trace_dir / "grade.json", json.dumps(grade, indent=2))
+        if grade_result["passed"]:
+            why = "tests pass in a pristine copy carrying only the expected files"
+        elif agent_verify_passed:
+            why = (
+                "tests fail in a pristine copy carrying only the expected "
+                "files, although the agent's own verify passed"
+            )
+        else:
+            why = "tests fail in a pristine copy carrying only the expected files"
         effects.write_trace(
             trace_dir / "score.json",
             json.dumps(
                 {
-                    "passed": bool(verify_result.get("tests_pass")),
+                    "passed": grade_result["passed"],
                     "score": score,
-                    "why": (
-                        "all tests green"
-                        if score == 1.0
-                        else "tests failed after retries exhausted"
-                    ),
+                    "why": why,
+                    "agent_verify_passed": agent_verify_passed,
+                    "carried_files": grade_result["carried_files"],
+                    "out_of_plan_changes": grade_result["out_of_plan_changes"],
                 },
                 indent=2,
             ),
@@ -555,31 +721,33 @@ async def submit(
             trace_dir / "summary.md",
             f"""# Trial summary
 
-- Task: {state["task"].get("id", "unknown")}
+- Task: {task.get("id", "unknown")}
 - Score: {score}
 - Turns: {state.get("turn_count", 0)}
 - Verify attempts: {state.get("verify_attempts", 0)}
-- Tests pass: {verify_result.get("tests_pass", False)}
+- Agent verify passed: {agent_verify_passed}
+- Graded pass: {grade_result["passed"]}
+- Out-of-plan changes: {", ".join(grade_result["out_of_plan_changes"]) or "none"}
 """,
         )
 
+    update: dict[str, Any] = {
+        "score": score,
+        "final_files": final_files,
+        "grade_result": grade_result,
+    }
+    if verify_result is not None:
+        update["verify_result"] = {
+            **verify_result,
+            "out_of_plan_changes": grade_result["out_of_plan_changes"],
+        }
     effects.end_step("submit")
-    return {"score": score, "final_files": final_files}
+    return update
 
 
 # ──────────────────────────────────────────────────────────────────────
 # Routing + graph build + run
 # ──────────────────────────────────────────────────────────────────────
-
-
-def _route_after_verify(state: CodingAgentState, max_verify_retries: int = 3) -> str:
-    """Conditional edge: loop back to act on test failure if budget remains."""
-    verify_result = state.get("verify_result") or {}
-    if verify_result.get("tests_pass", False):
-        return "submit"
-    if state.get("verify_attempts", 0) >= max_verify_retries:
-        return "submit"
-    return "act"
 
 
 def _route_after_verify_for_harness(
@@ -592,6 +760,26 @@ def _route_after_verify_for_harness(
     if state.get("verify_attempts", 0) >= harness.MAX_VERIFY_RETRIES:
         return "submit"
     return "act" if harness.should_loop_back_to_act(verify_result) else "submit"
+
+
+def recursion_limit_for(harness: Any) -> int:
+    """LangGraph's super-step limit for one trial of ``harness``.
+
+    Derived from the harness' own budgets instead of a fixed 100: orient,
+    plan and submit once each, then per verify attempt up to two
+    super-steps per act turn (room for a structural override that splits
+    act) plus verify and a re-plan, and fixed headroom. A harness with
+    larger budgets gets a larger limit rather than a GraphRecursionError.
+    """
+    try:
+        act_turns = max(1, int(getattr(harness, "MAX_ACT_TURNS", 25)))
+    except (TypeError, ValueError):
+        act_turns = 25
+    try:
+        attempts = max(1, int(getattr(harness, "MAX_VERIFY_RETRIES", 3)))
+    except (TypeError, ValueError):
+        attempts = 3
+    return 3 + attempts * (2 * act_turns + 2) + _RECURSION_HEADROOM
 
 
 def build_inner_graph(
@@ -608,6 +796,10 @@ def build_inner_graph(
     The graph's *shape* is identical in every mode — that is the point:
     a replay re-runs this exact state machine and recomputes its own
     routing decisions.
+
+    The five phase nodes are fixed; how they are connected is override
+    11, ``harness._wire_inner_graph``. A harness-like object without that
+    method gets the default wiring.
 
     Wraps each phase function in an async closure that captures
     ``harness`` — sync lambdas would return coroutines without awaiting,
@@ -630,6 +822,9 @@ def build_inner_graph(
     async def _submit(s: CodingAgentState) -> dict[str, Any]:
         return await submit(s, harness, fx_impl)
 
+    def _route(s: CodingAgentState) -> str:
+        return _route_after_verify_for_harness(s, harness)
+
     g: StateGraph = StateGraph(CodingAgentState)
     g.add_node("orient", _orient)
     g.add_node("plan", _plan)
@@ -637,16 +832,11 @@ def build_inner_graph(
     g.add_node("verify", _verify)
     g.add_node("submit", _submit)
 
-    g.add_edge(START, "orient")
-    g.add_edge("orient", "plan")
-    g.add_edge("plan", "act")
-    g.add_edge("act", "verify")
-    g.add_conditional_edges(
-        "verify",
-        lambda s: _route_after_verify_for_harness(s, harness),
-        {"act": "act", "submit": "submit"},
-    )
-    g.add_edge("submit", END)
+    wire = getattr(harness, "_wire_inner_graph", None)
+    if callable(wire):
+        wire(g, route_after_verify=_route)
+    else:
+        wire_default_inner_graph(g, route_after_verify=_route)
     return g.compile(checkpointer=checkpointer) if checkpointer else g.compile()
 
 
@@ -658,19 +848,42 @@ def _trace_dir_or_none(state: CodingAgentState) -> Path | None:
 def initial_inner_state(
     *, task_dict: dict[str, Any], workspace: Path | str
 ) -> CodingAgentState:
-    """The inner loop's entry state. Shared by live runs and replays."""
+    """The inner loop's entry state. Shared by live runs and replays.
+
+    ``messages`` starts with a clear rather than ``[]``: under
+    ``add_messages`` an empty list merges into whatever the thread
+    already holds, so a trial re-run on its deterministic thread id (a
+    benchmark node re-executed on resume) began with the previous run's
+    whole conversation.
+    """
     return {
         "task": task_dict,
         "workspace_path": str(workspace),
         "orient_summary": None,
         "plan": None,
-        "messages": [],
+        "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)],
         "turn_count": 0,
         "verify_attempts": 0,
         "verify_result": None,
         "final_files": None,
+        "grade_result": None,
         "score": None,
     }
+
+
+def with_source_workspace(
+    task_dict: dict[str, Any], source_workspace: Path | str | None
+) -> dict[str, Any]:
+    """``task_dict`` carrying ``_source_workspace``; raises if neither has one."""
+    if source_workspace is not None:
+        return {**task_dict, "_source_workspace": str(source_workspace)}
+    if not task_dict.get("_source_workspace"):
+        raise ValueError(
+            f"task {task_dict.get('id')!r} needs '_source_workspace' (the "
+            "task's pristine workspace/ directory) for grading; pass "
+            "source_workspace= or set the key"
+        )
+    return task_dict
 
 
 async def run_inner_loop(
@@ -682,11 +895,18 @@ async def run_inner_loop(
     thread_id: str = "inner-trial-1",
     checkpointer: Any = None,
     effects: fx.Effects | None = None,
+    source_workspace: Path | None = None,
 ) -> CodingAgentState:
-    """Run one inner-loop trial. Async."""
+    """Run one inner-loop trial. Async.
+
+    ``source_workspace`` is the task's pristine ``workspace/`` directory
+    (``workspace`` is the agent's disposable copy of it). It may instead
+    already be in ``task_dict`` as ``_source_workspace``; with neither,
+    this raises before any model call.
+    """
+    task_dict = with_source_workspace(dict(task_dict), source_workspace)
     if trace_dir is not None:
         trace_dir.mkdir(parents=True, exist_ok=True)
-        task_dict = dict(task_dict)
         task_dict["_trace_dir"] = str(trace_dir)
 
     initial_state = initial_inner_state(task_dict=task_dict, workspace=workspace)
@@ -694,6 +914,9 @@ async def run_inner_loop(
     graph = build_inner_graph(harness, checkpointer=checkpointer, effects=effects)
     final_state = await graph.ainvoke(
         initial_state,
-        config={"configurable": {"thread_id": thread_id}, "recursion_limit": 100},
+        config={
+            "configurable": {"thread_id": thread_id},
+            "recursion_limit": recursion_limit_for(harness),
+        },
     )
     return final_state  # type: ignore[return-value]

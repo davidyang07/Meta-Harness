@@ -108,12 +108,17 @@ class FixTypoHarness(ScriptedHarness):
                 "name": "apply_patch",
                 "input": {
                     "path": "calculator.py",
+                    # A real hunk header: a bare "@@" is rejected by the
+                    # patch tool, which left every recorded FixTypo run on
+                    # the failing route and the passing one untested.
                     "patch": (
                         "--- a/calculator.py\n"
                         "+++ b/calculator.py\n"
-                        "@@\n"
-                        "-    return a - b\n"
+                        "@@ -4,3 +4,3 @@\n"
+                        " def add(a: int, b: int) -> int:\n"
+                        "-    return a - b  # BUG: should be a + b\n"
                         "+    return a + b\n"
+                        " \n"
                     ),
                 },
             }
@@ -156,6 +161,54 @@ class DifferentPromptHarness(FixTypoHarness):
         return "a materially different instruction to the model"
 
 
+class CachingHarness(FixTypoHarness):
+    """Edits its request in place, as a prompt-caching override does.
+
+    The edit must reach neither the graph's state nor the tape key: a
+    replay never runs this method, so either leak makes it diverge.
+    """
+
+    async def _call_llm(
+        self,
+        messages: list[Any],
+        tools: list[Any],
+        *,
+        tool_choice: dict[str, Any] | None = None,
+    ) -> Response:
+        last = messages[-1]
+        if isinstance(last["content"], list):
+            last["content"][-1]["cache_control"] = {"type": "ephemeral"}
+        else:
+            last["content"] = [
+                {
+                    "type": "text",
+                    "text": last["content"],
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+        tools[-1]["cache_control"] = {"type": "ephemeral"}
+        return await super()._call_llm(messages, tools, tool_choice=tool_choice)
+
+
+class ThinkingHarness(FixTypoHarness):
+    """Opens every act turn with an extended-thinking block."""
+
+    async def _call_llm(
+        self,
+        messages: list[Any],
+        tools: list[Any],
+        *,
+        tool_choice: dict[str, Any] | None = None,
+    ) -> Response:
+        response = await super()._call_llm(messages, tools, tool_choice=tool_choice)
+        if tool_choice is None:
+            thinking = Block(type="thinking")
+            thinking.thinking = f"considering turn {self._turn}"
+            thinking.signature = f"sig-{self._turn}"
+            response.content = [thinking, *response.content]
+        return response
+
+
 class NoRetryHarness(FailingHarness):
     """Never loops back to act, so its node sequence diverges from the tape.
 
@@ -168,8 +221,15 @@ class NoRetryHarness(FailingHarness):
 
 
 def load_task(repo_root: Path, task_id: str, *, holdout: bool = False) -> dict[str, Any]:
+    """A task spec as a runner hands it to the inner graph.
+
+    Carries ``_source_workspace`` — the pristine ``workspace/`` the grader
+    copies — exactly as the benchmark and the CLI set it.
+    """
     root = repo_root / "eval" / ("holdout" if holdout else "tasks") / task_id
-    return json.loads((root / "task.json").read_text())
+    spec = json.loads((root / "task.json").read_text(encoding="utf-8"))
+    spec["_source_workspace"] = str(root / "workspace")
+    return spec
 
 
 def task_workspace(repo_root: Path, task_id: str, *, holdout: bool = False) -> Path:

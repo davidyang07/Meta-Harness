@@ -222,6 +222,84 @@ def test_verify_codec_round_trips():
     assert decode(encode((False, "1 failed"))) == (False, "1 failed")
 
 
+def test_grade_codec_round_trips():
+    encode, decode = rec.CODECS[rec.KIND_GRADE]
+    grade = {"passed": True, "output": "ok", "carried_files": ["a.py"]}
+    assert decode(json.loads(json.dumps(encode(grade)))) == grade
+
+
+# ── every content block is stored in its wire shape ───────────────────
+
+
+def _sdk_blocks() -> list:
+    from anthropic.types import (  # noqa: PLC0415
+        RedactedThinkingBlock,
+        TextBlock,
+        ThinkingBlock,
+        ToolUseBlock,
+    )
+
+    return [
+        ThinkingBlock(type="thinking", thinking="hmm", signature="sig"),
+        RedactedThinkingBlock(type="redacted_thinking", data="opaque"),
+        TextBlock(type="text", text="hello"),
+        ToolUseBlock(type="tool_use", id="tu1", name="read_file", input={"path": "a"}),
+    ]
+
+
+def test_sdk_blocks_serialise_to_what_the_api_accepts_back():
+    serialised = [rec.serialize_content_block(b) for b in _sdk_blocks()]
+    assert serialised == [
+        {"type": "thinking", "thinking": "hmm", "signature": "sig"},
+        {"type": "redacted_thinking", "data": "opaque"},
+        {"type": "text", "text": "hello"},
+        {"type": "tool_use", "id": "tu1", "name": "read_file", "input": {"path": "a"}},
+    ]
+
+
+def test_a_replayed_block_serialises_exactly_like_its_original():
+    class _Response:
+        content = _sdk_blocks()
+
+    replayed = rec.decode_llm_response(
+        json.loads(json.dumps(rec.encode_llm_response(_Response())))
+    )
+    assert [rec.serialize_content_block(b) for b in replayed.content] == [
+        rec.serialize_content_block(b) for b in _sdk_blocks()
+    ]
+    assert replayed.content[0].signature == "sig"
+
+
+def test_an_unknown_block_type_keeps_its_fields():
+    from pydantic import BaseModel  # noqa: PLC0415
+
+    class FutureBlock(BaseModel):
+        type: str = "future_block"
+        payload: dict = {"k": 1}
+        optional: str | None = None
+
+    serialised = rec.serialize_content_block(FutureBlock())
+    assert serialised == {"type": "future_block", "payload": {"k": 1}}
+
+    class _Response:
+        content = [FutureBlock()]
+
+    replayed = rec.decode_llm_response(rec.encode_llm_response(_Response()))
+    assert rec.serialize_content_block(replayed.content[0]) == serialised
+
+
+def test_a_replayed_block_survives_copy_and_pickle():
+    import copy  # noqa: PLC0415
+    import pickle  # noqa: PLC0415
+
+    fields = {"type": "thinking", "thinking": "t"}
+    block = rec.ReplayedBlock(type="thinking", fields=fields)
+    assert copy.copy(block) == block
+    assert pickle.loads(pickle.dumps(block)) == block
+    with pytest.raises(AttributeError):
+        block.no_such_field  # noqa: B018
+
+
 # ── persistence ───────────────────────────────────────────────────────
 
 
@@ -254,6 +332,23 @@ def test_recording_round_trips_through_disk(tmp_path: Path):
     assert len(loaded.entries) == 1
     assert loaded.entries[0].node == "orient"
     assert [m.node for m in loaded.steps] == ["orient"]
+
+
+def test_manifest_carries_harness_provenance_fields(tmp_path: Path):
+    manifest = rec.build_manifest(
+        recording_id="r",
+        thread_id="t",
+        task={"id": "x"},
+        workspace_path="/tmp/ws",
+        model="m",
+        harness_class="agents.baseline:BaselineHarness",
+        harness_source_path="agents/baseline.py",
+        harness_source_sha256="ab" * 32,
+    )
+    assert manifest["schema_version"] == rec.RECORDING_SCHEMA_VERSION
+    assert manifest["harness_source_path"] == "agents/baseline.py"
+    assert manifest["harness_source_sha256"] == "ab" * 32
+    assert manifest["candidate_source_path"] is None
 
 
 def test_manifest_captures_no_environment_variables(tmp_path: Path, monkeypatch):

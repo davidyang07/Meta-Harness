@@ -438,3 +438,208 @@ def test_without_autocrlf_an_lf_patch_does_not_match_a_crlf_file(
 
     assert result["status"] == "error"
     assert result["error_type"] == "context_mismatch"
+
+
+# ── a tool call never raises ──────────────────────────────────────────
+#
+# An exception out of `execute_tool` escaped `act`, killed the trial and,
+# before the benchmark caught per-trial errors, the whole benchmark. The
+# model is always owed a tool_result instead.
+
+
+def test_read_file_on_a_binary_file_is_an_error_result(tmp_path: Path):
+    (tmp_path / "blob.bin").write_bytes(b"\xff\xfe\x00binary")
+    out = execute_tool("read_file", tmp_path, path="blob.bin")
+    assert out["status"] == "error"
+    assert out["error_type"] == "binary_file"
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments", "fragment"),
+    [
+        ("read_file", {"path": "f.txt", "line_start": 1}, "unexpected"),
+        ("read_file", {"path": "f.txt", "start_line": "2"}, "must be integer"),
+        ("read_file", {"path": "f.txt", "start_line": True}, "must be integer"),
+        ("read_file", {}, "missing"),
+        ("run_bash", {"command": "echo hi", "timeout": 60}, "unexpected"),
+        ("apply_patch", {"path": "f.txt"}, "missing"),
+        ("write_file", {"path": "new.txt", "content": 7}, "must be string"),
+        ("grep_search", {"pattern": "x", "context_lines": "2"}, "must be integer"),
+    ],
+)
+def test_bad_arguments_are_an_error_result_not_an_exception(
+    tmp_path: Path, name: str, arguments: dict, fragment: str
+):
+    (tmp_path / "f.txt").write_text("x\n")
+    out = execute_tool(name, tmp_path, **arguments)
+    assert out["status"] == "error"
+    assert out["error_type"] == "invalid_arguments"
+    assert fragment in out["error_message"]
+
+
+def test_an_optional_argument_sent_as_null_counts_as_absent(tmp_path: Path):
+    (tmp_path / "f.txt").write_text("a\nb\n")
+    out = execute_tool("read_file", tmp_path, path="f.txt", end_line=None)
+    assert out["status"] == "ok"
+
+
+def test_an_unexpected_exception_inside_a_tool_is_an_error_result(
+    tmp_path: Path, monkeypatch
+):
+    from app.meta_harness import tools
+
+    def _boom(workspace, **kwargs):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setitem(tools.TOOL_DISPATCH, "read_file", _boom)
+    out = execute_tool("read_file", tmp_path, path="f.txt")
+    assert out["status"] == "error"
+    assert out["error_type"] == "tool_exception"
+    assert "kaboom" in out["error_message"]
+
+
+def test_write_file_refuses_content_that_cannot_be_utf8(tmp_path: Path):
+    out = write_file(tmp_path, "bad.txt", "lone surrogate \ud800")
+    assert out["status"] == "error"
+    assert out["error_type"] == "invalid_content"
+    assert not (tmp_path / "bad.txt").exists()
+
+
+def test_write_file_writes_the_models_bytes_without_newline_translation(
+    tmp_path: Path,
+):
+    write_file(tmp_path, "lf.py", "a = 1\nb = 2\n")
+    assert (tmp_path / "lf.py").read_bytes() == b"a = 1\nb = 2\n"
+
+
+# ── grep_search: the pattern is never an option ──────────────────────
+
+
+@pytest.mark.parametrize("pattern", ["-v", "--version", "--files", "-f/etc/passwd"])
+def test_a_flag_shaped_pattern_is_searched_for_not_obeyed(
+    tmp_path: Path, monkeypatch, pattern: str
+):
+    """``-v`` used to be read as a flag, leaving no search root, so the
+    search ran over the server's cwd and returned repository files."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "x.py").write_text(f"flag {pattern} here\n")
+    monkeypatch.chdir(Path(__file__).resolve().parents[2])
+
+    out = grep_search(workspace, pattern)
+
+    assert out["status"] == "ok"
+    assert out["matches"].strip().endswith(f"flag {pattern} here")
+    assert "AGENTS.md" not in out["matches"]
+    assert "ripgrep" not in out["matches"]
+    assert out["match_count"] == 1
+
+
+def test_grep_search_reports_workspace_relative_paths(tmp_path: Path):
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "mod.py").write_text("needle\n")
+    out = grep_search(tmp_path, "needle")
+    assert str(tmp_path) not in out["matches"]
+    assert "pkg/mod.py" in out["matches"]
+
+
+def test_grep_search_timeout_is_an_error_result(tmp_path: Path, monkeypatch):
+    from app.meta_harness import tools
+
+    def _slow(*args, **kwargs):
+        raise subprocess.TimeoutExpired("rg", 30)
+
+    monkeypatch.setattr(tools, "run_in_sandbox", _slow)
+    out = grep_search(tmp_path, "x")
+    assert out["status"] == "error"
+    assert out["error_type"] == "timeout"
+
+
+def test_grep_search_of_a_missing_path_is_an_error_result(tmp_path: Path):
+    out = grep_search(tmp_path, "x", path="nope")
+    assert out["status"] == "error"
+    assert out["error_type"] == "file_not_found"
+
+
+# ── apply_patch accepts only an in-place edit of the declared file ────
+
+
+def _two_files(tmp_path: Path) -> Path:
+    (tmp_path / "safe.py").write_text("x = 1\n")
+    (tmp_path / "other.py").write_text("y = 1\n")
+    return tmp_path
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        # Rename-only: no ---/+++ lines, so the old path check saw nothing.
+        "diff --git a/other.py b/moved.py\n"
+        "similarity index 100%\n"
+        "rename from other.py\n"
+        "rename to moved.py\n",
+        "diff --git a/other.py b/copy.py\n"
+        "similarity index 100%\n"
+        "copy from other.py\n"
+        "copy to copy.py\n",
+        "diff --git a/other.py b/other.py\n"
+        "deleted file mode 100644\n"
+        "index 1234567..0000000\n",
+        "diff --git a/safe.py b/safe.py\nold mode 100644\nnew mode 100755\n",
+    ],
+)
+def test_git_extended_headers_are_refused(tmp_path: Path, patch: str):
+    workspace = _two_files(tmp_path)
+    out = apply_patch(workspace, "safe.py", patch)
+    assert out["status"] == "error"
+    assert out["error_type"] == "unsupported_patch"
+    assert sorted(p.name for p in workspace.iterdir()) == ["other.py", "safe.py"]
+
+
+def test_a_patch_without_file_headers_is_refused(tmp_path: Path):
+    workspace = _two_files(tmp_path)
+    out = apply_patch(workspace, "safe.py", "@@ -1 +1 @@\n-x = 1\n+x = 2\n")
+    assert out["status"] == "error"
+    assert out["error_type"] == "invalid_patch"
+
+
+def test_a_dev_null_header_is_refused(tmp_path: Path):
+    workspace = _two_files(tmp_path)
+    patch = "--- a/safe.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-x = 1\n"
+    out = apply_patch(workspace, "safe.py", patch)
+    assert out["error_type"] == "unsupported_patch"
+    assert (workspace / "safe.py").exists()
+
+
+def test_a_diff_git_line_for_another_file_is_refused(tmp_path: Path):
+    workspace = _two_files(tmp_path)
+    patch = (
+        "diff --git a/other.py b/other.py\n"
+        "--- a/safe.py\n+++ b/safe.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+    )
+    out = apply_patch(workspace, "safe.py", patch)
+    assert out["error_type"] == "path_mismatch"
+
+
+def test_a_full_git_diff_of_the_declared_file_applies(tmp_path: Path):
+    workspace = _two_files(tmp_path)
+    patch = (
+        "diff --git a/safe.py b/safe.py\n"
+        "index 1234567..89abcde 100644\n"
+        "--- a/safe.py\n+++ b/safe.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+    )
+    out = apply_patch(workspace, "safe.py", patch)
+    assert out["status"] == "ok", out
+    assert (workspace / "safe.py").read_text() == "x = 2\n"
+
+
+def test_a_removed_line_that_looks_like_a_header_is_not_a_header(tmp_path: Path):
+    """``--- x`` inside a hunk is a removed ``-- x`` line, not a file header."""
+    (tmp_path / "q.sql").write_text("select 1;\n-- old comment\nselect 2;\n")
+    patch = (
+        "--- a/q.sql\n+++ b/q.sql\n@@ -1,3 +1,3 @@\n"
+        " select 1;\n--- old comment\n+-- new comment\n select 2;\n"
+    )
+    out = apply_patch(tmp_path, "q.sql", patch)
+    assert out["status"] == "ok", out
+    assert "-- new comment" in (tmp_path / "q.sql").read_text()

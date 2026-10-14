@@ -118,6 +118,7 @@ async def test_inner_graph_transitions_persist_in_postgres(tmp_path: Path):
             trace_dir=tmp_path / "trace",
             thread_id=thread_id,
             checkpointer=saver,
+            source_workspace=workspace,
         )
         assert final["score"] == 1.0
 
@@ -153,6 +154,7 @@ async def test_inner_thread_ids_identify_their_trial(tmp_path: Path):
             trace_dir=tmp_path / "trace",
             thread_id=thread_id,
             checkpointer=saver,
+            source_workspace=workspace,
         )
 
     parsed = met.parse_inner_thread_id(thread_id)
@@ -193,6 +195,7 @@ async def test_two_branches_do_not_share_inner_checkpoint_threads(tmp_path: Path
                 trace_dir=tmp_path / f"trace-{thread_id[-6:]}",
                 thread_id=thread_id,
                 checkpointer=saver,
+                source_workspace=workspace,
             )
         counts = []
         for thread_id in ids:

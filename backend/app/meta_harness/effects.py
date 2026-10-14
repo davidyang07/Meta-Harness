@@ -23,6 +23,7 @@ replay of a run cannot overwrite that run's own recorded artifacts.
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -82,9 +83,16 @@ class RecordingEffects(Effects):
         key_input: Any,
         produce: Callable[[], Awaitable[Any]],
     ) -> Any:
+        # The key is computed *before* the world is touched. A producer
+        # that mutates its own inputs (a ``_call_llm`` override adding
+        # ``cache_control`` to the last message is the common case) would
+        # otherwise be keyed on what it did to the request rather than on
+        # the request, and replay — which never runs the producer — would
+        # ask for a different key.
+        key = rec.effect_key(kind, key_input)
         value = await produce()
         encode, _ = rec.CODECS[kind]
-        self.writer.append(kind, rec.effect_key(kind, key_input), encode(value))
+        self.writer.append(kind, key, encode(value))
         return value
 
     def set_node(self, node: str | None) -> None:
@@ -133,17 +141,36 @@ def llm_key(
     messages: list[Any],
     tools: list[Any],
     tool_choice: dict[str, Any] | None,
+    *,
+    system: Any = None,
+    model: str | None = None,
+    max_tokens: int | None = None,
 ) -> dict[str, Any]:
-    """The key input for one model call.
+    """The key input for one model call: the whole request configuration.
 
-    Only the request is hashed, and the request is built entirely from
-    earlier recorded results — so if anything upstream differed, this key
-    differs too.
+    The messages are built entirely from earlier recorded results, so if
+    anything upstream differed, this key differs too. The rest is what
+    the harness sends alongside them — the system prompt, the model, the
+    token budget and the full tool schemas. Hashing only tool *names*
+    let a harness with a different ``SYSTEM_PROMPT``, ``MODEL`` or
+    ``MAX_TOKENS`` replay another configuration's tape as verified.
     """
     return {
         "messages": messages,
-        "tools": [t.get("name") for t in tools],
+        "tools": tools,
         "tool_choice": tool_choice,
+        "system": system,
+        "model": model,
+        "max_tokens": max_tokens,
+    }
+
+
+def llm_config(harness: Any) -> dict[str, Any]:
+    """The request configuration a harness sends with every model call."""
+    return {
+        "system": getattr(harness, "SYSTEM_PROMPT", None),
+        "model": getattr(harness, "MODEL", None),
+        "max_tokens": getattr(harness, "MAX_TOKENS", None),
     }
 
 
@@ -158,6 +185,10 @@ def instrument_harness_for_effects(harness: Any, effects: Effects) -> None:
     Compose with ``metrics.instrument_harness``: usage recording wraps
     the response this returns, so a replayed run reports the recorded
     token counts.
+
+    The key is a deep copy of the request taken before the call, and the
+    wrapped override receives its own deep copy: whatever it does to its
+    arguments can neither change the key nor reach the graph's state.
     """
     original: Callable[..., Awaitable[Any]] = harness._call_llm
 
@@ -167,10 +198,17 @@ def instrument_harness_for_effects(harness: Any, effects: Effects) -> None:
         *,
         tool_choice: dict[str, Any] | None = None,
     ) -> Any:
+        key_input = copy.deepcopy(
+            llm_key(messages, tools, tool_choice, **llm_config(harness))
+        )
         return await effects.observe(
             rec.KIND_LLM,
-            llm_key(messages, tools, tool_choice),
-            lambda: original(messages, tools, tool_choice=tool_choice),
+            key_input,
+            lambda: original(
+                copy.deepcopy(messages),
+                copy.deepcopy(tools),
+                tool_choice=copy.deepcopy(tool_choice),
+            ),
         )
 
     harness._call_llm = _effectful_call_llm  # type: ignore[method-assign]
@@ -182,5 +220,6 @@ __all__ = [
     "RecordingEffects",
     "ReplayEffects",
     "instrument_harness_for_effects",
+    "llm_config",
     "llm_key",
 ]

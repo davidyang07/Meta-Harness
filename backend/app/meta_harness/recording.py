@@ -16,18 +16,20 @@ which reads persisted checkpoints back without running anything.
 
 - ``entries`` — one row per boundary crossing, in the order the run made
   them: model responses, tool inputs/outputs, workspace scans, verify
-  subprocess results, final-file snapshots.
+  subprocess results, the grade, final-file snapshots.
 - ``steps`` — one row per completed graph node, carrying the tape offset
   at that moment. This is what makes replay *from a checkpoint* possible:
   the checkpoint identifies a step, the step identifies where in the tape
   the continuation begins.
 - ``manifest`` — the configuration and provenance the run happened under:
-  model id, candidate source hash, task hash, thread id, commit.
+  model id, the harness class and the path and SHA-256 of the source file
+  that defines it, task hash, thread id, commit.
 
 **Keys, and why divergence is detectable**
 
-Every entry is keyed by a SHA-256 over its *inputs* — the messages and
-tools of an LLM call, the name and arguments of a tool call. During
+Every entry is keyed by a SHA-256 over its *inputs* — for an LLM call
+the messages, the full tool schemas, the tool choice, the system prompt,
+the model and ``max_tokens``; for a tool call its name and arguments. During
 replay the reader demands that the key the graph asks for equals the key
 recorded at that position. Since each request's inputs are built from the
 results of earlier requests, a single divergence anywhere upstream
@@ -44,8 +46,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-#: Bump when the on-disk tape schema changes incompatibly.
-RECORDING_SCHEMA_VERSION = "1.0.0"
+#: Bump when the on-disk tape schema changes incompatibly. 2.0.0: the
+#: grade became its own effect, LLM keys gained the request configuration,
+#: and non-text content blocks are stored as their wire shape.
+RECORDING_SCHEMA_VERSION = "2.0.0"
 
 MANIFEST_FILENAME = "manifest.json"
 TAPE_FILENAME = "tape.jsonl"
@@ -59,8 +63,11 @@ KIND_TOOL = "tool"
 KIND_ORIENT = "orient"
 KIND_VERIFY = "verify"
 KIND_FILES = "files"
+KIND_GRADE = "grade"
 
-EFFECT_KINDS = frozenset({KIND_LLM, KIND_TOOL, KIND_ORIENT, KIND_VERIFY, KIND_FILES})
+EFFECT_KINDS = frozenset(
+    {KIND_LLM, KIND_TOOL, KIND_ORIENT, KIND_VERIFY, KIND_FILES, KIND_GRADE}
+)
 
 
 class RecordingError(RuntimeError):
@@ -119,14 +126,31 @@ class ReplayedUsage:
 
 @dataclass(frozen=True)
 class ReplayedBlock:
-    """One content block, shaped like the SDK block the inner loop reads."""
+    """One content block, shaped like the SDK block the inner loop reads.
+
+    ``fields`` is the block's full wire shape as recorded. Attributes the
+    dataclass does not declare (``thinking``, ``signature``, ``data`` …)
+    resolve from it, and ``model_dump`` returns it, so a replayed block
+    serialises to exactly the dict its live original did.
+    """
 
     type: str
     text: str | None = None
     id: str | None = None
     name: str | None = None
     input: dict[str, Any] = field(default_factory=dict)
-    raw: str | None = None
+    fields: dict[str, Any] = field(default_factory=dict)
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("__"):
+            raise AttributeError(name)
+        fields = self.__dict__.get("fields") or {}
+        if name in fields:
+            return fields[name]
+        raise AttributeError(name)
+
+    def model_dump(self, **_: Any) -> dict[str, Any]:
+        return dict(self.fields)
 
 
 @dataclass(frozen=True)
@@ -144,24 +168,70 @@ class ReplayedMessage:
     stop_reason: str | None = None
 
 
+def _json_safe(value: Any) -> Any:
+    """``value`` round-tripped through JSON: plain types, key order kept.
+
+    Not ``canonical_json``: sorting keys would reorder a tool input such
+    as the plan, which the act prompt then renders in a different order
+    on replay than it did live.
+    """
+    return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+
+def serialize_content_block(block: Any) -> dict[str, Any]:
+    """One response content block in the shape the Messages API accepts back.
+
+    Used both to write the assistant turn into the conversation and to
+    record the block on the tape, so the live and the replayed run hold
+    the same dict. ``str(block)`` — the old fallback for anything that
+    was not text or a tool call — was neither: a ``thinking`` block came
+    back as ``{"type": "thinking", "raw": "ThinkingBlock(...)"}``, which
+    the API rejects, and its text differed between an SDK object and a
+    replayed one.
+    """
+    btype = str(getattr(block, "type", None))
+    if btype == "text":
+        return {"type": "text", "text": getattr(block, "text", "") or ""}
+    if btype == "tool_use":
+        return {
+            "type": "tool_use",
+            "id": getattr(block, "id", None),
+            "name": getattr(block, "name", None),
+            "input": _json_safe(dict(getattr(block, "input", None) or {})),
+        }
+    if btype == "thinking":
+        return {
+            "type": "thinking",
+            "thinking": str(getattr(block, "thinking", "") or ""),
+            "signature": str(getattr(block, "signature", "") or ""),
+        }
+    if btype == "redacted_thinking":
+        return {
+            "type": "redacted_thinking",
+            "data": str(getattr(block, "data", "") or ""),
+        }
+    dump = getattr(block, "model_dump", None)
+    if callable(dump):
+        try:
+            dumped = dump(mode="json", exclude_none=True)
+        except TypeError:
+            dumped = dump()
+        if isinstance(dumped, dict):
+            return _json_safe({**dumped, "type": btype})
+    public = {
+        key: value
+        for key, value in (getattr(block, "__dict__", None) or {}).items()
+        if not key.startswith("_") and value is not None
+    }
+    return _json_safe({**public, "type": btype})
+
+
 def encode_llm_response(response: Any) -> dict[str, Any]:
     """Serialise a model response into the tape's plain-JSON shape."""
-    blocks: list[dict[str, Any]] = []
-    for block in getattr(response, "content", None) or []:
-        btype = getattr(block, "type", None)
-        if btype == "text":
-            blocks.append({"type": "text", "text": getattr(block, "text", "")})
-        elif btype == "tool_use":
-            blocks.append(
-                {
-                    "type": "tool_use",
-                    "id": getattr(block, "id", None),
-                    "name": getattr(block, "name", None),
-                    "input": dict(getattr(block, "input", {}) or {}),
-                }
-            )
-        else:
-            blocks.append({"type": str(btype), "raw": str(block)})
+    blocks = [
+        serialize_content_block(block)
+        for block in getattr(response, "content", None) or []
+    ]
 
     usage = getattr(response, "usage", None)
     usage_payload: dict[str, Any] | None = None
@@ -202,7 +272,7 @@ def decode_llm_response(payload: dict[str, Any]) -> ReplayedMessage:
             id=b.get("id"),
             name=b.get("name"),
             input=dict(b.get("input") or {}),
-            raw=b.get("raw"),
+            fields=dict(b),
         )
         for b in payload.get("content") or []
     ]
@@ -251,6 +321,7 @@ CODECS: dict[str, tuple[Any, Any]] = {
     KIND_ORIENT: (_identity, _identity),
     KIND_VERIFY: (encode_verify, decode_verify),
     KIND_FILES: (_identity, _identity),
+    KIND_GRADE: (_identity, _identity),
 }
 
 assert set(CODECS) == set(EFFECT_KINDS), "every effect kind needs a codec"
@@ -462,9 +533,17 @@ def build_manifest(
     candidate_source_sha256: str | None = None,
     task_sha256: str | None = None,
     git_commit: str | None = None,
+    harness_source_path: str | None = None,
+    harness_source_sha256: str | None = None,
+    candidate_source_path: str | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the provenance block stored beside a tape.
+
+    ``harness_source_path`` is repo-relative POSIX when the file is inside
+    the repository. ``candidate_source_path`` is set only for a harness
+    loaded from a source snapshot, whose synthetic module name cannot be
+    imported again in another process.
 
     No environment variables are captured, for the same reason
     ``experiment.capture_environment`` captures none: that is how an API
@@ -480,6 +559,9 @@ def build_manifest(
         "workspace_path": workspace_path,
         "model": model,
         "harness_class": harness_class,
+        "harness_source_path": harness_source_path,
+        "harness_source_sha256": harness_source_sha256,
+        "candidate_source_path": candidate_source_path,
         "candidate_source_sha256": candidate_source_sha256,
         "git_commit": git_commit,
     }
@@ -576,6 +658,7 @@ __all__ = [
     "CODECS",
     "EFFECT_KINDS",
     "KIND_FILES",
+    "KIND_GRADE",
     "KIND_LLM",
     "KIND_ORIENT",
     "KIND_TOOL",
@@ -597,6 +680,7 @@ __all__ = [
     "effect_key",
     "list_recordings",
     "read_recording",
+    "serialize_content_block",
     "sha256_of",
     "write_recording",
 ]
