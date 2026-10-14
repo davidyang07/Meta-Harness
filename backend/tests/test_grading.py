@@ -51,7 +51,7 @@ FIX = (
     "+++ b/calculator.py\n"
     "@@ -4,3 +4,3 @@\n"
     " def add(a: int, b: int) -> int:\n"
-    "-    return a - b  # BUG: should be a + b\n"
+    "-    return a - b\n"
     "+    return a + b\n"
     " \n"
 )
@@ -132,7 +132,8 @@ def test_a_symlinked_expected_file_is_not_followed(agent_ws: Path, tmp_path: Pat
     fixed = tmp_path / "elsewhere.py"
     fixed.write_text(
         (SOURCE / "calculator.py").read_text(encoding="utf-8").replace(
-            "return a - b  # BUG: should be a + b", "return a + b"
+            "def add(a: int, b: int) -> int:\n    return a - b",
+            "def add(a: int, b: int) -> int:\n    return a + b",
         ),
         encoding="utf-8",
     )

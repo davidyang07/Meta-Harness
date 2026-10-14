@@ -369,39 +369,12 @@ def _replay_harness_factory(
 ) -> Callable[[], Any]:
     """Rebuild the harness class a recording was made with.
 
-    Replay never calls the model, so the harness needs no credentials —
-    but it must be the same class, because the non-model override points
-    (result formatting, retry policy, act prompt) are part of the state
-    machine being replayed.
+    Delegates to ``replay.harness_factory_for_recording``, which loads a
+    source-snapshot candidate from its recorded file after checking its
+    sha256, so a candidate the proposer wrote replays in a fresh process
+    and not only in the one that recorded it.
     """
-    module_path, _, class_name = str(
-        recording.manifest.get("harness_class") or ""
-    ).partition(":")
-    source_path = recording.manifest.get("candidate_source_path")
-
-    def _factory() -> Any:
-        import importlib  # noqa: PLC0415
-        import sys  # noqa: PLC0415
-
-        if str(repo_root) not in sys.path:
-            sys.path.insert(0, str(repo_root))
-        if source_path:
-            cls = cand_mod.load_harness_from_source(Path(source_path), class_name)
-        else:
-            cls = getattr(importlib.import_module(module_path), class_name)
-        try:
-            return cls()
-        except RuntimeError:
-            # The base harness refuses to construct without an API key.
-            # A replay issues no model call, so build the instance
-            # without running __init__ and give it the attributes the
-            # non-model code paths read.
-            instance = cls.__new__(cls)
-            instance.api_key = None
-            instance._client = None
-            return instance
-
-    return _factory
+    return replay_mod.harness_factory_for_recording(recording, repo_root=repo_root)
 
 
 # ── the pipeline ──────────────────────────────────────────────────────

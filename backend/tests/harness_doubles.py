@@ -116,7 +116,7 @@ class FixTypoHarness(ScriptedHarness):
                         "+++ b/calculator.py\n"
                         "@@ -4,3 +4,3 @@\n"
                         " def add(a: int, b: int) -> int:\n"
-                        "-    return a - b  # BUG: should be a + b\n"
+                        "-    return a - b\n"
                         "+    return a + b\n"
                         " \n"
                     ),

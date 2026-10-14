@@ -45,7 +45,15 @@ any of the **11 search-space methods** (Appendix C §C.9):
 - `_call_llm(messages, tools, *, tool_choice=None)` — Anthropic API call mechanics.
 - `should_loop_back_to_act(verify_result)` — retry decision logic.
 - `_summarize_for_overflow(messages)` — context overflow strategy.
-- (Structural) Override `build_inner_graph()` to reorder phases.
+- (Structural) `_wire_inner_graph(graph, *, route_after_verify)` — how the five
+  phase nodes are connected (skip `plan`, send a failed verify back to `plan`, …).
+  The node bodies are fixed, and only `submit` grades the trial.
+
+How a trial is scored is not part of the search space. Each trial is graded
+in a fresh copy of the task's original workspace into which only the files
+the task lists in `expected_files_changed` are carried over from the agent's
+workspace. Edits to tests, test configuration or any other file never reach
+the grade, so a harness that steers the agent toward them gains nothing.
 
 You may **NOT** override the 6 fixed inner-loop tools (`read_file`,
 `apply_patch`, `write_file`, `run_bash`, `grep_search`, `task_complete`)
