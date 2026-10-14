@@ -1,7 +1,7 @@
 {
   "id": "task-002-add-function",
   "tier": "implement-spec",
-  "instruction": "Add a `median()` function to stats.py. It must: (a) return the middle element for odd-length lists; (b) return the average of the two middle elements for even-length lists; (c) work on unsorted input; (d) raise ValueError on an empty list; (e) NOT mutate the caller's input list. Do not change `mean()`. All tests in tests/test_stats.py must pass.",
+  "instruction": "tests/test_stats.py fails because stats.py has no median() function yet. Add median(values) to stats.py. It returns the median of a list of numbers: the middle value of an odd-length list, or the mean of the two middle values of an even-length list, whatever order the input is in. An empty list raises ValueError, and the caller's list must be left exactly as it was. Don't change mean() or the tests.",
   "test_command": "pytest tests/test_stats.py -q",
   "expected_files_changed": [
     "stats.py"

@@ -1,4 +1,4 @@
-"""Implement a LIFO Stack here. See README and tests for the contract."""
+"""A LIFO stack. tests/test_stack.py describes the contract."""
 
 
 class Stack:

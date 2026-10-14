@@ -1,7 +1,7 @@
 {
   "id": "task-005-implement-spec",
   "tier": "multi-file",
-  "instruction": "Implement Point and Line classes in geometry/__init__.py per the spec in README.md. Read the README carefully \u2014 pay special attention to: (a) the 1e-6 floating-point tolerance for Line.contains(), and (b) the case where Line.start == Line.end (zero-length segment, must not divide by zero). The tests in tests/test_geometry.py exercise the contract; all of them must pass. Do not modify the README or the tests.",
+  "instruction": "tests/test_geometry.py fails because the geometry package is empty. Implement the Point and Line classes in geometry/__init__.py as specified in README.md, including its tolerance rule for Line.contains() and the case of a segment whose start and end are the same point. Don't modify the README or the tests.",
   "test_command": "pytest tests/test_geometry.py -q",
   "expected_files_changed": [
     "geometry/__init__.py"

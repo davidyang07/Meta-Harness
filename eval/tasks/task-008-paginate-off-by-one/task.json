@@ -1,0 +1,9 @@
+{
+  "id": "task-008-paginate-off-by-one",
+  "tier": "bug-fix",
+  "instruction": "Users stepping through results with pagination.py report items missing from some pages and repeated on others, a last page they cannot reach, wrong \"showing X-Y\" positions, and pager links that stop one page short. tests/test_pagination.py fails. Make the module behave as its docstrings describe. Keep every public name and signature unchanged, change only pagination.py, and don't modify the tests.",
+  "test_command": "pytest tests/test_pagination.py -q",
+  "expected_files_changed": [
+    "pagination.py"
+  ]
+}

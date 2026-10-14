@@ -1,0 +1,9 @@
+{
+  "id": "task-014-duration-parser",
+  "tier": "robustness",
+  "instruction": "parse_duration() in durations.py never rejects anything: malformed strings quietly turn into some number of seconds, and some valid inputs give the wrong answer. format_duration() gets zero and negative values wrong. tests/test_durations.py fails. Make both functions follow the rules in the module docstring; every malformed string must raise ValueError and no other exception. Keep the names and signatures, change only durations.py, and don't modify the tests.",
+  "test_command": "pytest tests/test_durations.py -q",
+  "expected_files_changed": [
+    "durations.py"
+  ]
+}

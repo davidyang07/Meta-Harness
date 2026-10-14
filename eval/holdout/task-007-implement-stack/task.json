@@ -1,7 +1,7 @@
 {
   "id": "task-007-implement-stack",
   "tier": "implement-spec",
-  "instruction": "Implement a Stack class in stack.py with these operations: push(x), pop() (raises IndexError on empty), peek() (raises IndexError on empty), is_empty() -> bool, __len__(). Stack is LIFO. All tests in tests/test_stack.py must pass.",
+  "instruction": "stack.py contains only an empty placeholder Stack class, so tests/test_stack.py fails. Implement Stack as a last-in, first-out stack with push(x), pop() (removes and returns the most recently pushed item), peek() (returns that item without removing it), is_empty() returning a bool, and len(stack). pop() and peek() on an empty stack raise IndexError. Don't modify the tests.",
   "test_command": "pytest tests/test_stack.py -q",
   "expected_files_changed": [
     "stack.py"

@@ -4,18 +4,21 @@
   "task_set": "eval/holdout",
   "tasks": [
     "task-006-fix-recursion",
-    "task-007-implement-stack"
+    "task-007-implement-stack",
+    "task-013-stock-reservations",
+    "task-014-duration-parser",
+    "task-015-metrics-registry"
   ],
-  "trials_per_task": 20,
+  "trials_per_task": 10,
   "arms": {
     "baseline": "baseline",
     "candidate": null
   },
   "workers": 5,
-  "total_trials": 80,
+  "total_trials": 100,
   "notes": [
     "These tasks are excluded from every channel the proposer reads: the search task set it benchmarks against, the branch artifacts its prompt points at, and the prompt itself. tests/test_holdout_isolation.py checks each channel.",
-    "trials_per_task x 2 tasks x 2 arms = 80 task trials.",
+    "trials_per_task x 5 tasks x 2 arms = 100 task trials.",
     "A holdout delta below the search-set delta is the expected shape of the result, not a failure: the search set is what the harness was evolved against."
   ]
 }

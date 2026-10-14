@@ -1,0 +1,10 @@
+{
+  "id": "task-013-stock-reservations",
+  "tier": "multi-file",
+  "instruction": "The warehouse order system loses track of stock. After sequences of placing, cancelling and shipping orders, available counts drift away from what was received, orders interfere with each other, a rejected order can leave stock reserved, and the dict an Inventory was created from changes behind its owner's back. tests/test_orders.py fails. Make inventory.py and orders.py honour the contracts in their docstrings. Keep the public classes, methods and signatures unchanged, change only those two files, and don't modify the tests.",
+  "test_command": "pytest tests/test_orders.py -q",
+  "expected_files_changed": [
+    "inventory.py",
+    "orders.py"
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "id": "task-011-split-module",
+  "tier": "restructure",
+  "instruction": "records.py has grown into one module that both parses contact records from text and formats them back. Split it. The parsing side (FIELD_SEPARATOR, Contact, ParseError, parse_line, parse_lines and the helpers they use) moves into parsing.py, and the formatting side (format_contact, format_lines, register_style, available_styles, the built-in styles and their helpers) moves into formatting.py; both files already exist as empty stubs. records.py must remain as a backwards-compatible facade: every name in its __all__ is still importable from it and is the very same object as in its new home, and records.py defines no functions or classes of its own. formatting may import from parsing, but parsing must not import formatting, and neither may import records. Behaviour must not change. tests/test_records.py checks all of this; don't modify it.",
+  "test_command": "pytest tests/test_records.py -q",
+  "expected_files_changed": [
+    "records.py",
+    "parsing.py",
+    "formatting.py"
+  ]
+}
