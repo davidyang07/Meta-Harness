@@ -1,548 +1,254 @@
-# Frontend Design — Meta-Harness Dashboard
+---
+version: 1
+name: meta-harness-dashboard
+description: >-
+  A near-black, precise instrument for watching a self-improving agent
+  search. Linear's visual language — a four-step charcoal surface ladder,
+  hairline borders, light-gray type and one lavender accent — applied to a
+  data-dense, three-pane dashboard laid out like LangGraph Studio: the
+  thread's history on the left, what happened in the middle, an inspector
+  on the right.
+inspiration:
+  visual: Linear (community DESIGN.md, getdesign.md/linear.app)
+  layout: LangGraph / LangSmith Studio (thread history, fork from a checkpoint)
 
-**Date:** 2026-04-25
-**Status:** Approved for implementation
-**Audience:** Hackathon demo (90-second pitch to judges)
-**Mockup:** `frontend/mockup.html` (open in browser for visual reference)
+colors:
+  canvas: "#010102"          # page background, behind the panes
+  surface-1: "#0f1011"       # panes, cards
+  surface-2: "#141516"       # hovered row, raised card, dialog
+  surface-3: "#18191a"       # selected row, active tab, inputs
+  surface-4: "#1e1f21"       # pressed, track of a bar
+  hairline: "#23252a"        # every 1px divider and card border
+  hairline-strong: "#34343a" # focused input, dialog border
+  ink: "#f7f8f8"             # primary text, numbers that matter
+  ink-muted: "#d0d6e0"       # body text in the log
+  ink-subtle: "#8a8f98"      # labels, secondary text
+  ink-tertiary: "#62666d"    # timestamps, disabled, footnotes
+  accent: "#5e6ad2"          # Linear lavender: brand mark, primary button, focus, selection
+  accent-hover: "#828fff"
+  accent-ring: "rgba(94, 106, 210, 0.5)"
+  # Status colours (Linear's product label palette). Only ever on dots,
+  # small tags, deltas and chart marks — never as the fill of a large area.
+  status-green: "#4cb782"    # accepted, best, measured, connected, passing
+  status-red: "#eb5757"      # rejected, error, disconnected, failing
+  status-orange: "#f2994a"   # smoke failed (never loaded, no score)
+  status-yellow: "#f2c94c"   # mock / synthetic data, warnings
+  status-blue: "#4ea7fc"     # running, informational
+  status-purple: "#bb87fc"   # forks and branches
 
+typography:
+  family-sans: "Inter, -apple-system, system-ui, Segoe UI, sans-serif"
+  family-mono: "JetBrains Mono, ui-monospace, SF Mono, Menlo, monospace"
+  page-title:   { size: 20px, weight: 600, lineHeight: 1.3, letterSpacing: -0.3px }
+  pane-title:   { size: 13px, weight: 500, lineHeight: 1.3, letterSpacing: 0 }
+  body:         { size: 13px, weight: 400, lineHeight: 1.5, letterSpacing: 0 }
+  body-sm:      { size: 12px, weight: 400, lineHeight: 1.45, letterSpacing: 0 }
+  caption:      { size: 11px, weight: 500, lineHeight: 1.3, letterSpacing: 0.1px }
+  stat:         { size: 20px, weight: 600, lineHeight: 1.1, letterSpacing: -0.3px, numeric: tabular }
+  mono:         { size: 12px, weight: 400, lineHeight: 1.5, letterSpacing: 0 }
+
+rounded:
+  xs: 4px     # tags, status pills
+  sm: 6px     # rows, segmented controls, buttons
+  md: 8px     # cards, inputs
+  lg: 12px    # dialogs
+
+spacing:
+  base: 4px
+  scale: [4, 8, 12, 16, 20, 24, 32]
+  row-height: 44px      # trajectory rows (two lines: name, then iteration · status · delta)
+  pane-header: 44px
+  top-bar: 48px
+  status-bar: 28px
 ---
 
-## 1. Purpose
+# Meta-Harness dashboard design
 
-A real-time dashboard that shows two things simultaneously:
+## 1. Atmosphere
 
-1. **The forking trajectory tree** — the evolutionary branching of agent variants, where the meta-harness loop becomes a search tree instead of a linear sequence.
-2. **The live agent decision log** — a layered stream showing outer-loop strategy decisions as chapter headers and inner-loop execution (tool calls, patches, test results) as detail lines.
+The dashboard is an instrument, not a poster. Everything on screen is data
+about a running search, so the chrome steps back: a near-black canvas,
+charcoal panes separated by hairlines, light-gray type, and exactly one
+chromatic accent. Colour appears only where it carries meaning — a status,
+a delta, a chart mark — and is always paired with a word or a shape so it
+is never the only signal.
 
-Both must be visible at all times with zero interaction required. A judge watching the screen for 90 seconds should immediately see the tree branch and the agent's reasoning.
+Two rules from the original dashboard stay non-negotiable, because they
+are about honesty rather than style:
 
-A third panel provides context on demand: score convergence chart, code diffs, and test output.
+- **Provenance is always visible.** Mock (synthetic) numbers carry a yellow
+  "Mock data" tag in the top bar and the status bar. Measured numbers never
+  look like mock ones.
+- **Unknown is not zero.** A smoke-failed candidate shows "—", never 0.00,
+  and is drawn in orange, not red.
 
----
+## 2. Colour
 
-## 2. Design Decisions (Locked)
+Use the surface ladder for hierarchy instead of shadows: canvas → surface-1
+(panes) → surface-2 (hover, dialogs) → surface-3 (selected, active,
+inputs). Do not skip levels and do not add drop shadows on dark.
 
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Framework | Next.js 16 + React | Per architecture docs |
-| Styling | Tailwind CSS 4 | Utility-first, fast iteration |
-| Visual tone | Dark instrument panel | Monospace (JetBrains Mono), charcoal bg (#0c0c12), heavily desaturated accents — whisper colors, not shouts |
-| Layout | 3-panel split (26/44/30) with 16px panel gaps | Tree left, log center, context right. All hero features always visible. Generous inner padding (24px) |
-| Tree library | D3.js (custom SVG) | ReactFlow is overkill for a static-ish tree; D3 gives full control over the fork visualization |
-| Diff rendering | Custom component (no Monaco) | Monaco is 2MB+ — too heavy for a hackathon demo. Line-by-line unified diff with syntax highlighting via Prism or manual spans |
-| Chart | Custom SVG (no chart library) | The convergence chart is ~30 lines of SVG. No need for recharts/d3-chart |
-| Data source | Mocked SSE + static JSON | Backend APIs (steps 7-10) don't exist yet. Mock data matches INTERFACES.md contracts exactly so rewiring is mechanical |
-| State management | React context + useReducer | No Redux/Zustand. SSE events dispatch to a reducer; components subscribe via context |
-| Fork animation | Instant split | No animation drama. Tree snaps to show both branches immediately |
+**Lavender (`accent`) is scarce.** It marks the brand glyph, the one
+primary button on a screen, the focus ring and the selected row's left
+edge. It is never a card fill, a section background or a chart line.
 
----
+**Status colours** come from Linear's product label palette and follow one
+mapping everywhere — tree dots, log tags, chart points, tags:
 
-## 3. Layout
+| Meaning | Colour | Shape / word that goes with it |
+|---|---|---|
+| Best candidate | green | filled dot + "Best" tag |
+| Accepted | green | ring dot + "Accepted" |
+| Rejected | red (dimmed row) | ring dot + "Rejected" |
+| Smoke failed | orange | ring dot + "Smoke failed", score "—" |
+| Baseline / seed | ink-subtle | square dot + "Baseline" |
+| Fork branch | purple | its own lane in the history |
+| Running | blue | pulsing dot + "Running" |
+| Mock data | yellow | "Mock data" tag |
+
+## 3. Typography
+
+Inter for everything readable; JetBrains Mono only for things a user might
+copy: candidate file paths, checkpoint and thread ids, timestamps, code,
+diffs and test output. Numbers use tabular figures so columns line up.
+
+- Sentence case everywhere ("Decision log", "Create fork"). No all-caps
+  labels and no letter-spaced eyebrows.
+- Body copy in the log is 13px `ink-muted`; labels are 12px `ink-subtle`;
+  timestamps 11px mono `ink-tertiary`.
+- Times are shown as `HH:MM:SS`, with the full ISO time in a tooltip.
+
+## 4. Layout
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│  META-HARNESS   │ ● demo-2026-04-25 ▾ │ iter 4/5 │ best 0.85 │ $2.14 │ 4m32s  │
-├─────────────────┼────────────────────────────┼───────────────┤
-│  ◆ Trajectory   │  ▸ Decision Log      LIVE  │  ◇ Context    │
-├─────────────────┼────────────────────────────┼───────────────┤
-│  [all] [win] [fk]  zoom │ [all][tools][verify][scores][forks] 🔍 │ [Chart][Diff][Test] │
-├─────────────────┼────────────────────────────┼───────────────┤
-│                 │                            │               │
-│   Tree with     │   Scrolling log with       │  Score chart   │
-│   fork zones,   │   iteration chapters,      │  (always)      │
-│   node scores,  │   expandable lines,        │  ─────────────│
-│   zoom/pan      │   inline test output       │  Diff viewer   │
-│                 │                            │  or            │
-│                 │                            │  Test output   │
-│                 │                            │  (on selection)│
-│                 │                            │               │
-├─────────────────┴────────────────────────────┴───────────────┤
-│  ● SSE connected │ 2 branches │ ckpt: a8f3…2e1b │ v0.1.0     │
-└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│ ◆ Meta-Harness / Runs / demo-run   ● Completed  Mock data   [Replay run] │ 48
+├───────────────────┬──────────────────────────────────┬───────────────────┤
+│ Trajectory    7·1 │ Decision log ● live   All Tools … │ Overview Diff …   │ 44
+├───────────────────┼──────────────────────────────────┼───────────────────┤
+│ ●  baseline  0.67 │ Iteration 1  _mock_iter_1 Rejected│ Best  Δ  Acc  Br  │
+│ │○ _iter_1   0.67 │  ✓ Propose → ✓ Validate → …       │ ───────────────── │
+│ │○ _iter_2   0.67 │  12:01:28  plan   proposed from … │ Candidate …       │
+│ ●╮ _iter_3   1.00 │  12:01:28  score  benchmarked …   │ Task      Pass    │
+│ │●  fork_3   1.00 │  Accuracy 0.67  +0.00             │ fix typo  ██ 100% │
+│ │○  _iter_4  1.00 │                                   │ Accuracy chart    │
+├───────────────────┴──────────────────────────────────┴───────────────────┤
+│ ● Connected   Mock data (synthetic)   1 branch   ckpt 1f1c81a8…   v0.1.0 │ 28
+└──────────────────────────────────────────────────────────────────────────┘
+   320px                       flexible                         480px
 ```
 
-**Panel widths:** 26% / 44% / 30% with 16px gaps between panels. Panels are NOT resizable in v1 (not worth the complexity for a demo).
-
-**Inner padding:** 24px on all panel edges. 20px vertical spacing between sections. 14px between log lines. Everything breathes.
-
-**Viewport:** Designed for 1920×1080 (projector resolution). Must be legible at that size from 3 meters.
-
----
-
-## 4. Components
-
-### 4.1 TopBar
-
-Static bar showing run metadata.
-
-| Element | Source | Behavior |
-|---------|--------|----------|
-| Logo | Static | "META-HARNESS" in cyan, uppercase, letter-spacing 3px |
-| Run selector | `GET /runs` | Dropdown with live dot. Mocked: single entry |
-| Iteration counter | SSE `state-update` | "iter N/budget" |
-| Best score | SSE `frontier-updated` | Cyan highlight, updates on new best |
-| Cost | SSE `eval-result` | Running total of `cost_usd` |
-| Elapsed | Client timer | Starts when run begins |
-
-### 4.2 TrajectoryTree (left panel)
-
-SVG-based tree rendered with D3. Each node is a candidate. Edges encode parent→child. Forks create visible branching.
-
-**Data source:** `evolution_summary.jsonl` rows. Each row has `candidate`, `parent_candidate_name`, `scores.accuracy`, `delta`, `outcome`. The tree is reconstructed by walking `parent_candidate_name` links.
-
-**Node rendering:**
-
-| Status | Border | Background | Glow |
-|--------|--------|------------|------|
-| Baseline (seed) | `#32323e` | `#16161e` | None |
-| Accepted | `#6a9e78` (dusty sage) | `#111816` | None |
-| Rejected | `#b06068` (muted rose) | `#181114` | None, 40% opacity |
-| Best | `#7ab8ad` (sage teal) | `#111616` | Very subtle, 10% opacity |
-| Fork branch | `#8878a8` (dusty lavender) | `#141218` | None |
-
-Each node shows:
-- Iteration label (top-left, 8px, uppercase, ghost color)
-- Candidate name (middle, 10px, primary color)
-- Score (bottom-left, 13px, bold, color-coded)
-- Delta (next to score, 9px, +green/−red)
-- Badge for rejected/best (top-right, 7px uppercase)
-
-**Fork zone:** When a fork occurs, a horizontal band spans the tree width at the fork point. Contains "⑂ FORK" label and the fork's prior text. Background `#88788808`, dashed lavender border (#8878a8).
-
-**Toolbar:**
-- Filter buttons: `all` | `winning path` | `forks only`
-  - "winning path" dims all nodes not on the path from baseline→best
-  - "forks only" shows only fork points and their descendants
-- Zoom: `−` / `+` / `⊡` (fit to view)
-- Canvas: grab to pan, scroll to zoom
-
-**Interaction:** Clicking a node selects it. Selection:
-- Highlights the node border (2.5px stroke)
-- Scrolls the decision log to that iteration's chapter
-- Shows that candidate's diff in the context panel
-
-**Scaling strategy for 20+ nodes:** Vertical layout with collapsible subtrees. If a linear chain has no forks, consecutive accepted nodes collapse into a single "N iterations" summary node with expand on click. Rejected nodes are rendered at 50% opacity and can be hidden via toolbar toggle.
-
-### 4.3 DecisionLog (center panel)
-
-Scrolling terminal-style log with two levels of hierarchy.
-
-**Outer level — Iteration chapters:**
-Each iteration gets a chapter header block containing:
-- Iteration number (14px bold, cyan for main branch, purple for fork)
-- Candidate name (11px, medium weight)
-- Accept/reject/running status badge (top-right)
-- Phase pipeline: `propose → validate → benchmark → frontier` with done/active states
-- Hypothesis text (10px italic, below phases)
-
-Chapters are collapsible. Clicking the header toggles showing/hiding the inner log lines.
-
-**Inner level — Log lines:**
-Each line shows: timestamp | tag | text | expand indicator
-
-Tags (color-coded pills — whisper colors, barely tinted):
-| Tag | Color | Hex | When |
-|-----|-------|-----|------|
-| orient | slate | `#606888` | Workspace scan at start of trial |
-| plan | slate blue | `#7090b0` | Hypothesis and plan steps |
-| tool/read | dusty sage | `#6a9e78` | File reads |
-| tool/patch | dusty sage | `#6a9e78` | Patch applications |
-| act | sage teal | `#7ab8ad` | Active execution |
-| verify | khaki | `#b09868` | Test runs |
-| score | dusty sage | `#6a9e78` | Score results |
-| fail | muted rose | `#b06068` | Failures |
-| fork | dusty lavender | `#8878a8` | Fork-related events |
-| memory | khaki | `#b09868` | Cross-run memory reads/writes |
-
-**Expandable lines:** Lines with `▸` indicator expand on click to show:
-- `read` lines → file content preview (first 20 lines)
-- `patch` lines → inline unified diff (selects it in context panel too)
-- `verify` lines → full pytest output with pass/fail per test and failure tracebacks
-- `score` lines → per-task breakdown
-
-**Score result bars:** After each iteration's log lines, a colored bar shows:
-- Left: "accuracy — accepted/rejected/regression"
-- Right: score value (16px bold) + delta
-
-**Fork events:** Rendered as a prominent card (not a log line) with:
-- Icon + title + timestamp
-- Parent checkpoint ID
-- New prior text
-- Branch ID
-- Rationale
-
-**Filter bar:**
-- Toggle buttons: `all` | `tools` | `verify` | `scores` | `forks`
-- Search input (filters log lines by text match)
-- Filters are additive (selecting "tools" shows only tool-tagged lines)
-
-**Auto-scroll:** Log auto-scrolls to bottom when new events arrive, UNLESS the user has scrolled up. Scrolling up pauses auto-scroll; a "jump to latest" button appears at bottom.
-
-**Branch interleaving:** When fork branches run concurrently, their log entries interleave chronologically. Branch identity is encoded in the chapter header (purple color + "fork" label). This matches how SSE events arrive — multiplexed by `thread_id`.
-
-### 4.4 ContextPanel (right panel)
-
-Three tab views. The panel always shows the score chart at the top (fixed height 200px) regardless of active tab. Below the chart, the active tab content renders.
-
-**Tabs:** `Score Chart` | `Diff` | `Test Output`
-
-**4.4.1 Score Chart (always visible, top 200px)**
-
-SVG line chart: x-axis = iteration, y-axis = accuracy.
-
-- Main branch: green line + dots
-- Fork branch: purple line + dots, diverging from fork point
-- Baseline: dashed horizontal reference line at 0.62
-- Rejected candidates: red dots (on the line but marked differently)
-- Best candidate: cyan dot with glow, larger radius
-- Y-axis: 0.60–0.90 range (auto-scales to data)
-
-**4.4.2 Diff Viewer (below chart)**
-
-Activated by:
-- Clicking a `patch` log line
-- Clicking a tree node (shows that candidate's full diff vs parent)
-
-Renders unified diff format:
-- File header: filename + `+N / −M` stats
-- Line-by-line: line numbers, context (gray), additions (green bg), deletions (red bg)
-- Monospace, 11px
-
-Data source: mock diffs initially. In production, reads `agents/<name>.py` content and diffs against parent via the REST API.
-
-**4.4.3 Test Output (below chart)**
-
-Activated by clicking a `verify` log line.
-
-Shows:
-- Header: test file name + pass/fail summary
-- Full pytest output with:
-  - `PASSED` lines in green
-  - `FAILED` lines in red with full traceback
-  - Scrollable, max-height 400px
-
-Data source: `verify.json` from trace artifacts.
-
-### 4.5 StatusBar
-
-Static bar at bottom: SSE connection status, active branch count, current checkpoint ID, version.
-
----
-
-## 5. Data Flow
-
-### 5.1 Mock Data Layer (v1 — what we build now)
-
-```
-frontend/
-  lib/
-    mock/
-      evolution.ts      — evolution_summary.jsonl rows as TypeScript array
-      events.ts         — SSE events as typed array, replayed on a timer
-      diffs.ts          — candidate diffs as Record<string, string>
-      test-output.ts    — verify.json content per iteration
-    sse.ts              — MockSSEClient that replays events from events.ts
-    api.ts              — functions that return mock data (same signatures as real API calls)
-    types.ts            — TypeScript types matching INTERFACES.md §1-2 exactly
-```
-
-The mock SSE client replays events from `events.ts` with realistic timing (configurable speed: 1x for realism, 10x for dev iteration). It emits the same 11 event types defined in INTERFACES.md §7.2.
-
-### 5.2 Real Data Layer (v2 — wired to backend)
-
-Replace `mock/` imports with real fetch calls and `EventSource`:
-
-```typescript
-// lib/api.ts — v2
-export async function getRun(runId: string): Promise<RunInfo> {
-  const res = await fetch(`http://localhost:8000/runs/${runId}`);
-  return res.json();
-}
-
-// lib/sse.ts — v2
-export function subscribeToRun(runId: string): EventSource {
-  return new EventSource(`http://localhost:8000/runs/${runId}/stream`);
-}
-```
-
-The component layer doesn't change. Only the data layer swaps.
-
-### 5.3 State Management
-
-```typescript
-// lib/state.ts
-type DashboardState = {
-  run: RunInfo | null;
-  iterations: IterationChapter[];    // outer loop chapters
-  logEntries: LogEntry[];            // inner loop lines
-  tree: TreeNode[];                  // trajectory tree nodes
-  frontier: FrontierCandidate[];     // Pareto frontier
-  selectedNode: string | null;       // candidate name
-  selectedLogLine: string | null;    // log entry ID
-  filters: LogFilters;
-  sseConnected: boolean;
-};
-
-type SSEAction =
-  | { type: 'state-update'; payload: StateUpdateEvent }
-  | { type: 'candidate-created'; payload: CandidateCreatedEvent }
-  | { type: 'validate-result'; payload: ValidateResultEvent }
-  | { type: 'eval-result'; payload: EvalResultEvent }
-  | { type: 'frontier-updated'; payload: FrontierUpdatedEvent }
-  | { type: 'iteration-complete'; payload: IterationCompleteEvent }
-  | { type: 'fork-created'; payload: ForkCreatedEvent }
-  | { type: 'branch-cancelled'; payload: BranchCancelledEvent }
-  | { type: 'memory-pattern-stored'; payload: MemoryPatternEvent }
-  | { type: 'checkpoint-written'; payload: CheckpointEvent }
-  | { type: 'error'; payload: ErrorEvent };
-
-function dashboardReducer(state: DashboardState, action: SSEAction): DashboardState {
-  // Each SSE event type maps to a state transition
-}
-```
-
-React context provides `state` + `dispatch`. SSE client dispatches actions on each event. Components read from context.
-
----
-
-## 6. SSE Event → UI Mapping
-
-How each of the 11 SSE event types (INTERFACES.md §7.2) drives UI updates:
-
-| SSE Event | Tree | Log | Context | TopBar |
-|-----------|------|-----|---------|--------|
-| `state-update` | — | Update active phase in current chapter | — | Update iteration counter |
-| `checkpoint-written` | — | — | — | Update checkpoint ID in status bar |
-| `candidate-created` | Add new node to tree | Add new chapter header | — | — |
-| `validate-result` | Update node status if failed | Add validate log line | — | — |
-| `eval-result` | Update node score + delta | Add score bar | Update chart with new point | Update cost |
-| `frontier-updated` | Re-color nodes (best/accepted/rejected) | — | Redraw Pareto markers on chart | Update best score |
-| `iteration-complete` | — | Set chapter status badge | — | — |
-| `fork-created` | Add fork zone + new branch in tree | Add fork event card | Add fork branch to chart | Update branch count |
-| `branch-cancelled` | Gray out cancelled branch | Add cancellation log line | — | Update branch count |
-| `memory-pattern-stored` | — | Add memory log line | — | — |
-| `error` | — | Add error log line (red) | — | — |
-
----
-
-## 7. Mock Data Spec
-
-The mock data tells the demo story from DEFINITION_OF_DONE.md:
-
-### 7.1 Timeline
-
-| Time | Event | SSE Events |
-|------|-------|------------|
-| 0:00 | Run starts, baseline seed | `state-update` (propose) |
-| 0:05 | Iter 1 proposed: retry-on-schema-drift | `candidate-created`, log lines |
-| 0:15 | Iter 1 validated + benchmarked | `validate-result`, `eval-result` (0.70) |
-| 0:20 | Iter 1 accepted | `frontier-updated`, `iteration-complete` |
-| 0:25 | Iter 2 proposed: stricter-tool-hashing | `candidate-created`, log lines |
-| 0:40 | Iter 2 benchmarked: regression | `eval-result` (0.66) |
-| 0:45 | Iter 2 rejected | `frontier-updated`, `iteration-complete` |
-| 0:50 | **Fork from iter 1 checkpoint** | `fork-created` |
-| 0:55 | Iter 3 proposed: early-exit-on-auth | `candidate-created` (main) |
-| 0:55 | Iter 2' proposed: rewrite-tool-desc | `candidate-created` (fork) |
-| 1:10 | Iter 3 benchmarked: 0.74 | `eval-result` |
-| 1:15 | Iter 2' benchmarked: 0.78 | `eval-result` |
-| 1:20 | Iter 4 proposed: more-specific-desc | `candidate-created` (main) |
-| 1:20 | Iter 3' proposed: few-shot-demos | `candidate-created` (fork) |
-| 1:35 | Iter 4 benchmarked: 0.80 | `eval-result` |
-| 1:40 | Iter 3' benchmarked: 0.85 — NEW BEST | `eval-result`, `frontier-updated` |
-| 1:45 | Memory pattern stored | `memory-pattern-stored` |
-
-### 7.2 Candidates
-
-```typescript
-const MOCK_CANDIDATES: EvolutionRow[] = [
-  { iteration: 0, candidate: "baseline", parent_candidate_name: null, scores: { accuracy: 0.62 }, delta: null, outcome: "seed" },
-  { iteration: 1, candidate: "retry-on-schema-drift", parent_candidate_name: "baseline", scores: { accuracy: 0.70 }, delta: 0.08, outcome: "70.0% (+8.0%)" },
-  { iteration: 2, candidate: "stricter-tool-hashing", parent_candidate_name: "retry-on-schema-drift", scores: { accuracy: 0.66 }, delta: -0.04, outcome: "66.0% (−4.0%)" },
-  { iteration: 3, candidate: "early-exit-on-auth", parent_candidate_name: "retry-on-schema-drift", scores: { accuracy: 0.74 }, delta: 0.04, outcome: "74.0% (+4.0%)" },
-  { iteration: 4, candidate: "more-specific-descriptions", parent_candidate_name: "early-exit-on-auth", scores: { accuracy: 0.80 }, delta: 0.06, outcome: "80.0% (+6.0%)" },
-  // Fork branch
-  { iteration: 2, candidate: "rewrite-tool-descriptions", parent_candidate_name: "retry-on-schema-drift", scores: { accuracy: 0.78 }, delta: 0.16, outcome: "78.0% (+16.0%)", thread_id: "demo.fork.c7a1e3f0" },
-  { iteration: 3, candidate: "few-shot-demos", parent_candidate_name: "rewrite-tool-descriptions", scores: { accuracy: 0.85 }, delta: 0.07, outcome: "85.0% (+7.0%)", thread_id: "demo.fork.c7a1e3f0" },
-];
-```
-
-### 7.3 Diffs
-
-Each candidate has a mock diff against its parent. The diffs should be realistic Python — actual `CodingAgentHarness` subclass modifications matching the 11 override points from INTERFACES.md §4.
-
-### 7.4 Test Output
-
-Each `verify` event has mock pytest output. Include:
-- Passing iterations: `5 passed in 2.1s`
-- Failing iterations: full traceback for 1-2 failures (e.g., `test_median_empty`, `test_median_even`)
-
----
-
-## 8. File Structure
-
-```
-frontend/
-├── DESIGN.md                      # This file
-├── mockup.html                    # Static HTML mockup (reference only)
-├── package.json
-├── next.config.ts
-├── tsconfig.json
-├── tailwind.config.ts
-├── postcss.config.mjs
-├── app/
-│   ├── layout.tsx                 # Root layout: JetBrains Mono font, dark bg
-│   ├── page.tsx                   # Redirect to /runs/demo
-│   └── runs/
-│       └── [runId]/
-│           └── page.tsx           # Main dashboard page
-├── components/
-│   ├── TopBar.tsx
-│   ├── TrajectoryTree.tsx         # D3-based SVG tree
-│   ├── DecisionLog.tsx            # Scrolling log with chapters
-│   ├── ContextPanel.tsx           # Tabs: chart, diff, test
-│   ├── ScoreChart.tsx             # SVG convergence chart
-│   ├── DiffViewer.tsx             # Unified diff renderer
-│   ├── TestOutput.tsx             # Pytest output renderer
-│   ├── ForkEvent.tsx              # Fork event card
-│   ├── StatusBar.tsx
-│   └── ui/                        # Shared primitives
-│       ├── FilterBar.tsx
-│       ├── Badge.tsx
-│       └── PhasePipeline.tsx
-├── lib/
-│   ├── types.ts                   # All TypeScript types (mirrors INTERFACES.md)
-│   ├── state.ts                   # DashboardState, reducer, context
-│   ├── sse.ts                     # SSE client (mock in v1, real in v2)
-│   ├── api.ts                     # REST client (mock in v1, real in v2)
-│   └── mock/
-│       ├── evolution.ts           # Mock candidate data
-│       ├── events.ts              # Mock SSE event sequence
-│       ├── diffs.ts               # Mock code diffs
-│       └── test-output.ts         # Mock pytest output
-└── public/
-    └── fonts/                     # JetBrains Mono (self-hosted for reliability)
-```
-
----
-
-## 9. Color System
-
-All colors as CSS variables / Tailwind theme extensions.
-**Design intent:** Heavily desaturated, almost monochrome with color hints. Colors whisper — they tint, they don't shout. The dashboard should feel like a dim cockpit at night: calm, focused, precise. Accents are barely there until you look for them.
-
-```
-Background (warmer charcoal, not void-black):
-  --bg-void:    #0c0c12    (body)
-  --bg-panel:   #111118    (panel bodies)
-  --bg-header:  #16161e    (headers, toolbars)
-  --bg-hover:   #1c1c26    (hover states)
-  --bg-active:  #222230    (selected states)
-
-Borders:
-  --border:     #22222e    (default — barely visible)
-  --border-act: #32323e    (active/hover)
-
-Text:
-  --text-hi:    #c8c8d0    (primary — warm gray, never white)
-  --text-mid:   #707084    (secondary)
-  --text-lo:    #4e4e5c    (tertiary)
-  --text-ghost: #303040    (timestamps, line numbers)
-
-Accents (whisper colors — ~35-45% saturation, pastel-ish):
-  --cyan:       #7ab8ad    (best candidate, active phases — sage teal)
-  --green:      #6a9e78    (accepted, passing tests — dusty sage)
-  --red:        #b06068    (rejected, failing tests — muted rose)
-  --amber:      #b09868    (verify, memory, warnings — khaki)
-  --purple:     #8878a8    (fork branches — dusty lavender)
-  --blue:       #7090b0    (plan phase — slate blue)
-
-Accent backgrounds (barely-there tints for diff lines, node fills):
-  --green-bg:   #111816    (added lines — 3% green tint)
-  --red-bg:     #181114    (deleted lines — 3% red tint)
-  --purple-bg:  #141218    (fork branch nodes — 3% purple tint)
-  --cyan-bg:    #111616    (best node — 3% teal tint)
-```
-
----
-
-## 10. Typography
-
-```
-Font:        JetBrains Mono (self-hosted woff2)
-Fallback:    IBM Plex Mono, monospace
-
-Hierarchy (generous sizing for projector readability):
-  Iteration headers:  16px, weight 600, letter-spacing 1px
-  Candidate names:    13px, weight 500
-  Log lines:          13px, weight 400, line-height 1.7
-  Tags/badges:        9px, weight 600, uppercase, letter-spacing 0.5px
-  Timestamps:         10px, weight 400, ghost color
-  Scores (in nodes):  15px, weight 600
-  Status bar:         10px, weight 400, letter-spacing 0.5px
-```
-
----
-
-## 11. Interaction Model
-
-### Click interactions:
-- **Tree node** → selects node, scrolls log to that iteration, shows diff in context panel
-- **Log line (patch)** → selects line (cyan left border), shows diff in context panel
-- **Log line (verify)** → expands inline to show pytest output, also shows in context panel
-- **Log line (read)** → expands inline to show file preview
-- **Chapter header** → collapses/expands that iteration's log lines
-- **Fork event card** → selects the fork point in the tree
-
-### Keyboard:
-- `↑/↓` — navigate log lines
-- `Enter` — expand/collapse selected line
-- `1/2/3` — switch context panel tabs
-- `f` — toggle "winning path" filter on tree
-
-### Auto-scroll:
-- Log auto-scrolls to newest entry while streaming
-- Scrolling up pauses auto-scroll
-- "↓ Jump to latest" button appears when paused
-- Clicking it resumes auto-scroll
-
----
-
-## 12. Rewiring to Real Backend (v2)
-
-When backend steps 7-10 are complete, the switch is:
-
-1. Replace `lib/mock/` imports in `lib/sse.ts` and `lib/api.ts` with real `fetch` / `EventSource` calls
-2. Point at `http://localhost:8000`
-3. No component changes needed — the types and state shape are identical
-
-**API endpoints consumed** (from INTERFACES.md §6):
-- `GET /runs` — run list for selector
-- `GET /runs/{runId}` — run detail (initial load)
-- `GET /runs/{runId}/stream` — SSE subscription
-- `GET /runs/{runId}/checkpoints` — checkpoint list (for fork modal, future)
-- `POST /runs/{runId}/fork` — create fork (future)
-
-**SSE events consumed** (from INTERFACES.md §7.2):
-All 11 event types. The `thread_id` field on each event determines which branch the entry belongs to.
-
----
-
-## 13. Out of Scope (v1)
-
-- Fork modal (right-click → create fork). The mock data includes a pre-existing fork; creating new forks requires the backend.
-- Run comparison / A-B side-by-side. Deferred to post-backend.
-- Memory panel sidebar. Memory events appear in the log; dedicated panel is post-MVP.
-- Resizable panels. Fixed widths in v1.
-- Mobile/responsive. Desktop-only, 1920×1080 target.
-- Authentication. None.
-- Dark/light theme toggle. Dark only.
-
----
-
-## 14. Implementation Notes
-
-- **No `use client` everywhere.** The dashboard page is a client component (SSE requires it). Layout and routing are server components.
-- **D3 in React:** Use `useRef` + `useEffect` for D3 rendering. D3 owns the SVG; React owns the data. Don't fight React's reconciliation — let D3 draw into a ref'd SVG element.
-- **Self-host JetBrains Mono.** Don't rely on Google Fonts CDN during a demo. Download woff2 files into `public/fonts/`.
-- **SSE reconnection.** The mock client doesn't need it, but structure the code so adding `Last-Event-ID` reconnection for the real client is trivial.
-- **Performance.** The log will have at most ~200 lines for a 5-iteration demo. No virtualization needed. If scaling to 40+ iterations, add `react-window`.
+- Three panes on `surface-1`, separated by 1px `hairline` rules, edge to
+  edge. No gaps, no rounded outer frame: the panes are the page.
+- Pane headers are 44px with a 13px title on the left and controls on the
+  right. Pane bodies scroll independently.
+- Left pane 320px, right pane 480px, the decision log takes the rest. All
+  three must stay readable at 1280px wide.
+
+## 5. Patterns borrowed from LangGraph Studio
+
+Studio shows a thread as a readable list of checkpoints with a **Fork**
+action on each, not as a zoomable picture. The dashboard does the same.
+
+- **Trajectory is a history list.** One 44px row per candidate, in
+  iteration order, with a lane gutter on the left drawn like a git graph:
+  the main thread is lane 0, each fork gets its own purple lane that
+  branches off where it was forked. Each row shows the candidate name,
+  "Iteration n" and the delta underneath, and the score right-aligned.
+- **Fork from any row.** Hovering a row reveals a "Fork" button; right-click
+  does the same. Both open the fork dialog pre-filled with that row's
+  checkpoint.
+- **Selecting a row drives the inspector**, as selecting a checkpoint does
+  in Studio's state pane: the overview, diff and tests all follow the
+  selection.
+- **Run-level noise is folded.** Checkpoint writes collapse into one
+  "N checkpoints written" line that expands on click; errors, forks and
+  cancellations are always shown.
+
+## 6. Components
+
+**Top bar (48px, canvas).** Brand glyph (lavender) and "Meta-Harness" link
+home, then a breadcrumb `Runs / <run id>`, the run status pill and, for
+synthetic runs, the yellow "Mock data" tag. Secondary actions on the right.
+
+**Status pill.** 22px tall, `rounded.xs`, `surface-3` background, a 6px
+status dot and a sentence-case word.
+
+**Tag.** 11px medium text in the status colour on a 12%-opacity tint of the
+same colour, `rounded.xs`, 2px × 6px padding. Used for statuses and log
+categories.
+
+**Segmented control.** A `surface-3` track of small buttons; the active
+one lifts to `surface-4` with `ink` text. Used for log filters and inspector
+tabs.
+
+**Buttons.** 30px tall, `rounded.sm`, 13px medium. Primary: lavender fill,
+white text, one per screen. Secondary: `surface-3` fill, hairline border,
+`ink` text. Ghost: no fill, `ink-subtle` text, `surface-3` on hover.
+
+**Stat strip.** Four peer blocks in one row separated by hairlines: a 12px
+label above a 20px tabular number — best score, latest Δ, accepted (of all
+evaluated, with the breakdown in a tooltip) and fork branches. Deltas are
+green/red with an explicit sign. Labels stay one or two words so they never
+truncate.
+
+**Per-task table.** Task name left, a thin pass-rate bar on a `surface-4`
+track, the percentage right-aligned in tabular figures. Every task is
+listed; nothing is truncated to fit.
+
+**Chart.** Accuracy by iteration. The main thread is an `ink-muted` line,
+forks are purple, accepted points green, rejected points hollow red, the
+best point a larger green dot. The running best is a dashed green step.
+A one-line legend sits directly under the plot (direct end-of-line labels
+collide when two series finish at the same score); axes are 11px
+`ink-tertiary`. Clicking a point selects that candidate.
+
+**Decision log chapter.** A header row ("Iteration 3", the candidate name in
+`ink`, its status tag), the phase steps as small check marks, the
+hypothesis in `ink-subtle`, then the entries as compact rows: time, a
+category tag, the message. The chapter ends with its outcome line:
+accuracy, delta, verdict.
+
+**Fork card.** `surface-2`, `rounded.md`, a 2px purple left edge, the title
+"Fork created", then "From" (thread @ checkpoint, mono) and "Prior" (the
+user's actual text).
+
+**Dialog.** `surface-2`, `rounded.lg`, `hairline-strong` border over a 60%
+black scrim. Title 15px semibold, labels 12px `ink-subtle`, inputs on
+`surface-3` with a lavender focus ring.
+
+## 7. Do and don't
+
+**Do**
+- Keep one primary (lavender) action per screen.
+- Show every number with its unit or sign: `0.67`, `+0.33`, `100%`.
+- Right-align numbers and use tabular figures.
+- Pair every status colour with a word or a distinct dot shape.
+- Truncate long ids with an ellipsis in the middle and put the full value
+  in a tooltip.
+
+**Don't**
+- Don't use pure black (#000) for the canvas, or drop shadows on dark.
+- Don't use lavender as a fill, a chart colour or a decoration.
+- Don't introduce gradients, glows, scanlines or typing animations.
+- Don't write labels in all caps or add letter-spacing to small text.
+- Don't render a smoke-failed candidate as 0, or mock numbers without the
+  "Mock data" tag.
+
+## 8. Accessibility
+
+- Text on `surface-1` meets WCAG AA: `ink` and `ink-muted` for anything a
+  user must read; `ink-tertiary` only for timestamps and decoration.
+- Every interactive row is keyboard reachable, shows the lavender focus
+  ring, and opens the fork dialog with the context-menu key as well as a
+  right-click.
+- Status is never colour alone (see §2).
+
+## 9. Known gaps
+
+- Linear's custom typefaces are proprietary; Inter and JetBrains Mono are
+  the open substitutes the source DESIGN.md recommends.
+- There is no light theme. The source system has none, and the dashboard is
+  used in dark rooms on projectors.
+- The status palette is Linear's in-product label palette, which the
+  marketing-site DESIGN.md mentions but does not tokenise.

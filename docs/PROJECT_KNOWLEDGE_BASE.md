@@ -2104,7 +2104,7 @@ Tech stack (verbatim from `frontend/dashboard/package.json`):
 ```
 
 **Spec vs implementation reality.** The locked design in
-`frontend/DESIGN.md` §3 calls for 26% / 44% / 30% panel widths with 16px
+`docs/history/frontend-design-v1.md` (the v1 design, since superseded by `frontend/DESIGN.md`) §3 called for 26% / 44% / 30% panel widths with 16px
 gaps. The current implementation in
 `frontend/dashboard/src/app/runs/[run_id]/page.tsx:47-57` uses
 `w-[220px]` for the trajectory tree, `flex-[4]` for the decision log, and
@@ -2235,7 +2235,7 @@ black. Text is `#c8c8d0` warm gray, never white. Monospace throughout
 ## 17. Ideal frontend design + visual decisions
 
 This section answers the user's explicit ask: *what should the frontend look
-like, and why?* It builds on `frontend/DESIGN.md` (which is locked) but
+like, and why?* It builds on the v1 design (`docs/history/frontend-design-v1.md`) but
 includes additional tactical recommendations for hackathon polish.
 
 ### 17.1 Design philosophy: "instrument panel," not "dashboard"
