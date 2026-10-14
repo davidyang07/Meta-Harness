@@ -10,9 +10,23 @@
 #
 #   docker compose -f infra/docker-compose.yml up -d --build
 #
-# No credentials are baked in. POSTGRES_DSN, ANTHROPIC_API_KEY and the
-# META_HARNESS_* knobs are read from the environment at run time; see
-# .env.example.
+# No credentials are baked in. POSTGRES_DSN, ANTHROPIC_API_KEY,
+# META_HARNESS_API_TOKEN and the META_HARNESS_* knobs are read from the
+# environment at run time; see .env.example.
+#
+# The container binds 0.0.0.0, so `meta-harness serve` refuses to start
+# unless META_HARNESS_API_TOKEN is set: an unauthenticated API reachable
+# from other machines can start runs that spend money.
+#
+# The real proposer shells out to the `claude` CLI, which is not in the
+# image by default (proposer=mock and the whole API work without it).
+# Opt in with:
+#
+#   docker build -f infra/Dockerfile --build-arg INSTALL_CLAUDE_CLI=1 \
+#       -t meta-harness-backend .
+
+# Global build args: usable in FROM lines below.
+ARG NODE_IMAGE=node:22.23.3-bookworm-slim
 
 # ── builder ───────────────────────────────────────────────────────────
 # Pinned by digest-free tag plus a frozen lockfile: `uv sync --frozen`
@@ -43,6 +57,30 @@ COPY backend/ backend/
 
 RUN uv sync --frozen --no-dev
 
+# ── optional: the `claude` CLI ────────────────────────────────────────
+# A pinned @anthropic-ai/claude-code. Its npm package installs a native
+# binary for the build platform, so only that one self-contained file is
+# carried into the runtime image: no Node.js there, no npm tree. With
+# INSTALL_CLAUDE_CLI=0 (the default) /out/bin stays empty and the COPY
+# below adds nothing.
+FROM ${NODE_IMAGE} AS claude-cli
+
+ARG INSTALL_CLAUDE_CLI=0
+ARG CLAUDE_CODE_VERSION=2.1.292
+
+RUN set -eu; \
+    mkdir -p /out/bin; \
+    case "$INSTALL_CLAUDE_CLI" in \
+      0) ;; \
+      1) npm install --global --no-fund --no-audit --prefix /tmp/claude-npm \
+             "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"; \
+         cp -L /tmp/claude-npm/bin/claude /out/bin/claude; \
+         chmod 0755 /out/bin/claude; \
+         /out/bin/claude --version ;; \
+      *) echo "INSTALL_CLAUDE_CLI must be 0 or 1, got '$INSTALL_CLAUDE_CLI'" >&2; \
+         exit 1 ;; \
+    esac
+
 # ── runtime ───────────────────────────────────────────────────────────
 FROM python:3.12-slim-bookworm AS runtime
 
@@ -68,7 +106,13 @@ COPY --chown=app:app backend/ backend/
 COPY --chown=app:app agents/ agents/
 COPY --chown=app:app eval/ eval/
 COPY --chown=app:app benchmarks/ benchmarks/
+# The proposer's system prompt: proposer=claude resolves
+# skills/meta-harness-<domain>/SKILL.md and refuses to start without it.
+COPY --chown=app:app skills/ skills/
 COPY --chown=app:app infra/healthcheck.py infra/healthcheck.py
+
+# Empty unless built with INSTALL_CLAUDE_CLI=1.
+COPY --from=claude-cli /out/bin/ /usr/local/bin/
 
 # Written to at run time by the outer loop and the benchmark runner.
 RUN mkdir -p /app/runs && chown app:app /app/runs
@@ -79,7 +123,9 @@ ENV PATH="/app/.venv/bin:$PATH" \
     # Bind all interfaces: the only reachable address inside a container.
     # Publishing the port is the compose file's decision, not the image's.
     META_HARNESS_HOST=0.0.0.0 \
-    META_HARNESS_PORT=8000
+    META_HARNESS_PORT=8000 \
+    # A pinned CLI in an immutable image must not rewrite itself.
+    DISABLE_AUTOUPDATER=1
 
 USER app
 EXPOSE 8000

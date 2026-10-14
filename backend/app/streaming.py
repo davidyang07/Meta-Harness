@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -77,21 +78,59 @@ def format_sse(event: SSEEvent) -> str:
     return f"event: {event.event_type}\nid: {event.event_id}\ndata: {payload}\n\n"
 
 
+class _Subscription:
+    """One SSE consumer: a bounded queue on the event loop that reads it."""
+
+    __slots__ = ("queue", "loop", "overflowed")
+
+    def __init__(self, limit: int) -> None:
+        self.queue: asyncio.Queue[SSEEvent] = asyncio.Queue(maxsize=limit)
+        self.loop = asyncio.get_running_loop()
+        self.overflowed = False
+
+    def offer(self, event: SSEEvent) -> None:
+        """Enqueue without blocking; a full queue marks the consumer slow."""
+        if self.overflowed:
+            return
+        try:
+            self.queue.put_nowait(event)
+        except asyncio.QueueFull:
+            self.overflowed = True
+
+
 class EventRegistry:
-    """Closed-set registry with per-channel subscribers and replay history."""
+    """Closed-set registry with per-channel subscribers and replay history.
+
+    Delivery is gap-free for a consumer that keeps up: a subscriber's
+    queue is registered *before* the history it replays is snapshotted,
+    so an event emitted while the backlog is being written is either in
+    the snapshot or in the queue (or both, and then delivered once).
+
+    Delivery is bounded for a consumer that does not: each subscriber
+    queue holds at most ``subscriber_queue_limit`` events. A consumer
+    that falls that far behind is disconnected after what it already
+    holds. ``EventSource`` reconnects with ``Last-Event-ID`` and resumes
+    from history, so a slow client loses nothing that is still in the
+    backlog, and a stalled one cannot grow server memory without limit.
+    """
 
     def __init__(
         self,
         allowed_event_types: set[str] | frozenset[str] | None = None,
         *,
         history_limit: int = 1000,
+        subscriber_queue_limit: int = 1000,
     ) -> None:
         self.allowed_event_types = frozenset(
             allowed_event_types or REGISTERED_EVENT_TYPES
         )
         self.history_limit = history_limit
+        self.subscriber_queue_limit = subscriber_queue_limit
         self._history: dict[str, list[SSEEvent]] = {}
-        self._subscribers: dict[str, set[asyncio.Queue[SSEEvent]]] = {}
+        self._subscribers: dict[str, set[_Subscription]] = {}
+        # Emitters may run on a worker thread; history and the subscriber
+        # sets are only ever touched under this lock.
+        self._lock = threading.Lock()
 
     def emit(
         self,
@@ -124,25 +163,50 @@ class EventRegistry:
             data=payload,
             ts=_now(),
         )
-        history = self._history.setdefault(channel, [])
-        history.append(event)
-        if len(history) > self.history_limit:
-            del history[: len(history) - self.history_limit]
+        with self._lock:
+            history = self._history.setdefault(channel, [])
+            history.append(event)
+            if len(history) > self.history_limit:
+                del history[: len(history) - self.history_limit]
+            subscribers = list(self._subscribers.get(channel, ()))
 
-        for queue in list(self._subscribers.get(channel, set())):
-            queue.put_nowait(event)
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        for subscription in subscribers:
+            if subscription.loop is running:
+                subscription.offer(event)
+            else:
+                try:
+                    subscription.loop.call_soon_threadsafe(subscription.offer, event)
+                except RuntimeError:  # that loop is closed; nobody is reading
+                    pass
         return event
 
     def history(self, channel: str) -> list[SSEEvent]:
         """Return a copy of a channel's replay backlog."""
 
-        return list(self._history.get(channel, []))
+        with self._lock:
+            return list(self._history.get(channel, []))
+
+    def evict(self, channel: str) -> None:
+        """Forget a channel's replay backlog.
+
+        Called when a run is deleted or re-created fresh, so a client of
+        the new run is not replayed the old one's events. Connected
+        subscribers stay connected and receive the new run's events.
+        """
+
+        with self._lock:
+            self._history.pop(channel, None)
 
     def clear(self) -> None:
         """Clear subscribers and history. Intended for tests."""
 
-        self._history.clear()
-        self._subscribers.clear()
+        with self._lock:
+            self._history.clear()
+            self._subscribers.clear()
 
     async def subscribe(
         self,
@@ -157,34 +221,56 @@ class EventRegistry:
         and found, replay starts after that event.
         """
 
-        replay = self.history(channel)
-        if last_event_id:
-            for idx, event in enumerate(replay):
-                if event.event_id == last_event_id:
-                    replay = replay[idx + 1 :]
-                    break
-        for event in replay:
-            yield format_sse(event)
-
-        queue: asyncio.Queue[SSEEvent] = asyncio.Queue()
-        self._subscribers.setdefault(channel, set()).add(queue)
+        subscription = _Subscription(self.subscriber_queue_limit)
+        with self._lock:
+            # Register first, snapshot second: nothing emitted in between
+            # can fall into the gap between the backlog and the live queue.
+            self._subscribers.setdefault(channel, set()).add(subscription)
+            replay = list(self._history.get(channel, []))
         try:
+            if last_event_id:
+                for idx, event in enumerate(replay):
+                    if event.event_id == last_event_id:
+                        replay = replay[idx + 1 :]
+                        break
+            # Events emitted after registration but before the snapshot
+            # are in both; the queue's copy is skipped. Once a queued
+            # event is not in the snapshot, every later one is newer.
+            replayed = {event.event_id for event in replay}
+            for event in replay:
+                yield format_sse(event)
+
             while True:
+                if subscription.overflowed and subscription.queue.empty():
+                    # Too slow: everything it could still be handed has
+                    # been. Close; the client resumes via Last-Event-ID.
+                    return
                 try:
                     event = await asyncio.wait_for(
-                        queue.get(),
+                        subscription.queue.get(),
                         timeout=heartbeat_interval,
                     )
                 except asyncio.TimeoutError:
                     yield ": heartbeat\n\n"
                     continue
+                if replayed:
+                    if event.event_id in replayed:
+                        continue
+                    replayed = set()
                 yield format_sse(event)
         finally:
-            subscribers = self._subscribers.get(channel)
-            if subscribers is not None:
-                subscribers.discard(queue)
-                if not subscribers:
-                    self._subscribers.pop(channel, None)
+            with self._lock:
+                subscribers = self._subscribers.get(channel)
+                if subscribers is not None:
+                    subscribers.discard(subscription)
+                    if not subscribers:
+                        self._subscribers.pop(channel, None)
+
+    def subscriber_count(self, channel: str) -> int:
+        """How many consumers are attached to ``channel``."""
+
+        with self._lock:
+            return len(self._subscribers.get(channel, ()))
 
 
 event_registry = EventRegistry()

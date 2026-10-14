@@ -7,6 +7,7 @@ from typing import Annotated
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import StreamingResponse
 
+from app.api.runs import get_run_dir
 from app.streaming import channel_for_run, event_registry
 
 
@@ -19,6 +20,15 @@ async def stream_run_events(
     request: Request,
     last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
 ) -> StreamingResponse:
+    """Multiplexed SSE stream for one run (all its branches).
+
+    ``run_id`` must name an existing run: an arbitrary string would
+    otherwise open a channel nobody can ever publish to. When an API
+    token is configured this route also accepts ``?token=``, because
+    ``EventSource`` cannot send an ``Authorization`` header.
+    """
+    get_run_dir(request, run_id)
+
     async def _events():
         async for chunk in event_registry.subscribe(
             channel_for_run(run_id),

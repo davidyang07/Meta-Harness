@@ -3,10 +3,13 @@
 # cross-run memory).
 #
 # Usage:
-#   # everything, building the backend image
+#   # everything, building the backend image. The backend binds 0.0.0.0
+#   # inside its container, so it refuses to start without an API token:
+#   export META_HARNESS_API_TOKEN="$(openssl rand -hex 32)"
 #   docker compose -f infra/docker-compose.yml up -d --build
 #   docker compose -f infra/docker-compose.yml logs -f backend
-#   curl localhost:8000/health
+#   curl localhost:8000/health                      # unauthenticated
+#   curl -H "Authorization: Bearer $META_HARNESS_API_TOKEN" localhost:8000/runs
 #
 #   # database only, for running the CLI and the test suite on the host
 #   docker compose -f infra/docker-compose.yml up -d postgres
@@ -18,6 +21,12 @@
 # configuration from the environment; ANTHROPIC_API_KEY is passed through
 # from the host (or an .env file next to this one) and is empty unless you
 # set it — the API itself does not need it, only live model runs do.
+#
+# Both ports are published on the host's loopback interface only. Neither
+# service is meant to be reachable from other machines: Postgres has a
+# well-known password, and the API can start runs that spend money. To
+# expose the API deliberately, change the backend's binding here and keep
+# META_HARNESS_API_TOKEN set.
 
 services:
   postgres:
@@ -30,8 +39,8 @@ services:
       POSTGRES_DB: meta_harness
     ports:
       # Published so the host CLI and `pytest` can reach the same
-      # database the backend container uses.
-      - "5432:5432"
+      # database the backend container uses — on loopback only.
+      - "127.0.0.1:5432:5432"
     volumes:
       - meta_harness_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -65,8 +74,13 @@ services:
       # need it, and none are started by bringing the stack up.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       META_HARNESS_INNER_MODEL: ${META_HARNESS_INNER_MODEL:-}
+      # Required: every route but /health then needs
+      # `Authorization: Bearer <token>`. Without it the backend exits at
+      # startup rather than serve an unauthenticated API on 0.0.0.0. Not
+      # `:?`-required here, so `up -d postgres` alone still works.
+      META_HARNESS_API_TOKEN: ${META_HARNESS_API_TOKEN:-}
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       # Run artifacts are the interesting output of a run and should
       # survive the container.

@@ -46,6 +46,9 @@ frontend/
 docs/
 *.md
 !README.md
+# ...but never a skill: skills/<name>/SKILL.md is the proposer's system
+# prompt, and the image ships skills/ for proposer=claude.
+!skills/**/*.md
 
 # ── OS / editor junk ──────────────────────────────────────────────────
 .DS_Store

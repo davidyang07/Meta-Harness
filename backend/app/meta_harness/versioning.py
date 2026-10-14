@@ -234,11 +234,24 @@ async def verify_immutability(
 
 # ── evidence capture ──────────────────────────────────────────────────
 
+#: Branch fields describing the process that drove it; never evidence.
+_PROCESS_STATE_KEYS = frozenset({"owner_pid", "owner_host", "heartbeat_at"})
+
 
 async def capture_evidence(
-    graph: Any, *, run_id: str, run_dir: Path, full: bool = False
+    graph: Any,
+    *,
+    run_id: str,
+    run_dir: Path,
+    full: bool = False,
+    repo_root: Path | None = None,
 ) -> dict[str, Any]:
     """Capture a run's version graph as a committable evidence artifact.
+
+    Every path in the result is relative to ``repo_root`` (default: the
+    directory holding ``runs/``) and uses forward slashes: the artifact is
+    committed and read on other machines, where an absolute path is both
+    a leak and meaningless.
 
     Re-reads **every** thread's checkpoints and confirms each still
     hashes to what it hashed to a moment ago. That is a weaker statement
@@ -280,6 +293,13 @@ async def capture_evidence(
             }
         )
 
+    # Which process drove a branch, on which host, and when it last
+    # heartbeat is operational state, not part of the version claim — and
+    # a hostname has no business in a committed artifact.
+    version["branches"] = [
+        {k: v for k, v in b.items() if k not in _PROCESS_STATE_KEYS}
+        for b in version["branches"]
+    ]
     if not full:
         version["checkpoints"] = [
             {k: v for k, v in c.items() if k != "values_summary"}
@@ -305,7 +325,7 @@ async def capture_evidence(
             "earlier in the same process"
         ),
     }
-    version["branch_artifacts"] = branch_artifacts(run_dir)
+    version["branch_artifacts"] = branch_artifacts(run_dir, repo_root=repo_root)
     version["values_summaries_included"] = full
     return version
 
@@ -313,14 +333,20 @@ async def capture_evidence(
 # ── per-branch working trees ──────────────────────────────────────────
 
 
-def branch_artifacts(run_dir: Path) -> dict[str, dict[str, Any]]:
+def branch_artifacts(
+    run_dir: Path, *, repo_root: Path | None = None
+) -> dict[str, dict[str, Any]]:
     """What each branch's private working tree holds.
 
     The isolation guarantee is structural — every path is under
     ``threads/<slug>/`` — so this reader is also the check: two branches
     listing the same candidate label must still list different source
     files with different hashes.
+
+    Paths are repo-relative POSIX strings (``runs/<run>/threads/...``);
+    ``repo_root`` defaults to the directory that holds ``runs/``.
     """
+    root = repo_root if repo_root is not None else run_dir.parent.parent
     out: dict[str, dict[str, Any]] = {}
     for thread_path in runs_mod.list_thread_dirs(run_dir):
         thread_id = runs_mod.thread_id_for_dir(thread_path)
@@ -331,12 +357,12 @@ def branch_artifacts(run_dir: Path) -> dict[str, dict[str, Any]]:
                 from app.meta_harness.candidates import source_sha256  # noqa: PLC0415
 
                 sources[source.stem] = {
-                    "path": str(source),
+                    "path": runs_mod.portable_path(source, root),
                     "sha256": source_sha256(source),
                 }
         candidates_dir = thread_path / "candidates"
         out[thread_id] = {
-            "thread_dir": str(thread_path),
+            "thread_dir": runs_mod.portable_path(thread_path, root),
             "candidate_sources": sources,
             "candidates": sorted(
                 d.name for d in candidates_dir.iterdir() if d.is_dir()

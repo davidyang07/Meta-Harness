@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import hmac
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable
+from urllib.parse import parse_qs
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -26,6 +29,87 @@ from app.streaming import StreamingRegistryError
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 log = logging.getLogger("meta_harness.api")
+
+
+#: Environment variable holding the API bearer token. Unset or empty
+#: means the API is unauthenticated, which ``meta-harness serve`` only
+#: allows on a loopback address.
+API_TOKEN_ENV = "META_HARNESS_API_TOKEN"
+
+#: Routes that accept ``?token=`` as well as the header: ``EventSource``
+#: cannot send an ``Authorization`` header.
+_SSE_PATH_RE = re.compile(r"^/runs/[^/]+/stream$")
+
+#: Headers the dashboard may send cross-origin. ``Authorization`` has to
+#: be named: a ``*`` wildcard does not cover it under the Fetch spec.
+CORS_ALLOWED_HEADERS = ["Authorization", "Content-Type", "Last-Event-ID", "Cache-Control"]
+
+
+def configured_api_token() -> str | None:
+    """The API token from the environment, or ``None`` when auth is off."""
+    token = os.environ.get(API_TOKEN_ENV, "").strip()
+    return token or None
+
+
+class APITokenMiddleware:
+    """Require ``Authorization: Bearer <token>`` when a token is configured.
+
+    Pure ASGI rather than ``BaseHTTPMiddleware`` so it never buffers a
+    streaming (SSE) response. Every route except ``GET /health`` is
+    protected: the container healthcheck and load balancers probe
+    ``/health`` without credentials, and it reveals nothing but liveness
+    and the persistence backend. SSE routes also accept ``?token=``,
+    because browsers' ``EventSource`` cannot set headers.
+
+    The token is read per request, so a token in ``.env`` (loaded during
+    lifespan startup) is honoured, and so tests can toggle it.
+    """
+
+    def __init__(
+        self,
+        app: Callable[..., Awaitable[None]],
+        *,
+        token_provider: Callable[[], str | None] = configured_api_token,
+    ) -> None:
+        self.app = app
+        self.token_provider = token_provider
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        token = self.token_provider()
+        if token is None or self._exempt(scope) or self._authorized(scope, token):
+            await self.app(scope, receive, send)
+            return
+        response = JSONResponse(
+            status_code=401,
+            content={"detail": "missing or invalid API token"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+        await response(scope, receive, send)
+
+    @staticmethod
+    def _exempt(scope: dict[str, Any]) -> bool:
+        return scope.get("path") == "/health" and scope.get("method") in {"GET", "HEAD"}
+
+    @staticmethod
+    def _authorized(scope: dict[str, Any], token: str) -> bool:
+        expected = token.encode("utf-8")
+        for name, value in scope.get("headers") or []:
+            if name.lower() != b"authorization":
+                continue
+            scheme, _, presented = value.decode("latin-1").partition(" ")
+            if scheme.lower() == "bearer" and hmac.compare_digest(
+                presented.strip().encode("utf-8"), expected
+            ):
+                return True
+        if scope.get("method") == "GET" and _SSE_PATH_RE.match(scope.get("path", "")):
+            query = parse_qs(scope.get("query_string", b"").decode("latin-1"))
+            for presented in query.get("token", []):
+                if hmac.compare_digest(presented.encode("utf-8"), expected):
+                    return True
+        return False
 
 
 def _should_try_persistence(use_persistence: bool | None) -> bool:
@@ -127,6 +211,10 @@ def create_app(
         version=__version__,
         lifespan=lifespan,
     )
+    # Added first, so it runs *inside* CORS: a 401 still carries the CORS
+    # headers the dashboard needs to read it, and preflights (which never
+    # carry credentials) are answered by CORS before auth sees them.
+    app.add_middleware(APITokenMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -134,7 +222,7 @@ def create_app(
             "http://127.0.0.1:3000",
         ],
         allow_methods=["*"],
-        allow_headers=["*"],
+        allow_headers=CORS_ALLOWED_HEADERS,
     )
 
     @app.exception_handler(StreamingRegistryError)
@@ -150,6 +238,8 @@ def create_app(
 
         ``persistence: "memory"`` means checkpoint history, forking and
         branch recovery are unavailable; ``persistence_error`` says why.
+        ``auth_required`` tells a client whether to send a token. This is
+        the one unauthenticated route.
         """
         return {
             "status": "ok",
@@ -157,6 +247,7 @@ def create_app(
             "persistence": app.state.persistence_backend,
             "persistence_error": getattr(app.state, "persistence_error", None),
             "memory_store": bool(getattr(app.state, "memory_store", None)),
+            "auth_required": configured_api_token() is not None,
         }
 
     app.include_router(runs.router)

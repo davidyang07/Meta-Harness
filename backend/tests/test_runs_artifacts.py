@@ -218,3 +218,184 @@ def test_replacing_a_row_preserves_order_of_the_others(tmp_path: Path):
     # No temp files left behind by the atomic rewrite.
     td = runs_mod.thread_dir(run_dir, "run-a")
     assert not [p for p in td.iterdir() if p.name.startswith(".")]
+
+
+# ── readers never write ───────────────────────────────────────────────
+
+
+def test_readers_do_not_create_thread_directories(tmp_path: Path):
+    """A GET must not materialise a thread tree inside whatever it reads.
+
+    ``GET /runs`` used to create ``threads/<name>/{agents,candidates,
+    proposer-sessions,thread.json}`` inside a stray non-run directory.
+    """
+    stray = tmp_path / "runs" / "notes"
+    stray.mkdir(parents=True)
+    (stray / "todo.txt").write_text("not a run")
+    before = sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*"))
+
+    assert runs_mod.read_frontier(stray, "notes") is None
+    assert runs_mod.read_evolution_summary(stray, "notes") == []
+    assert runs_mod.read_pending_eval(stray, "notes.fork.beef") is None
+    assert runs_mod.aggregate_frontiers(stray) == {}
+    assert runs_mod.aggregate_evolution_rows(stray) == []
+
+    assert sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*")) == before
+
+
+def test_thread_dir_path_matches_the_writer_without_creating(tmp_path: Path):
+    run_dir = _run(tmp_path)
+    resolved = runs_mod.thread_dir_path(run_dir, "run-a.fork.beef")
+    assert not resolved.exists()
+    assert runs_mod.thread_dir(run_dir, "run-a.fork.beef") == resolved
+    assert resolved.is_dir()
+
+
+def test_only_directories_with_a_manifest_are_runs(tmp_path: Path):
+    runs_root = tmp_path / "runs"
+    real = _run(tmp_path, "real-run")
+    runs_mod.write_manifest(real, run_id="real-run")
+    (runs_root / "notes").mkdir()
+    (runs_root / "half-deleted").mkdir()
+    (runs_root / "half-deleted" / "threads").mkdir()
+
+    assert [p.name for p in runs_mod.list_run_dirs(runs_root)] == ["real-run"]
+    assert runs_mod.list_run_dirs(tmp_path / "missing") == []
+
+
+def test_generated_run_ids_do_not_collide_within_one_second():
+    ids = {runs_mod.generated_run_id("run") for _ in range(200)}
+    assert len(ids) == 200
+    for run_id in ids:
+        assert runs_mod.validate_artifact_name(run_id, kind="run") == run_id
+        assert run_id.startswith("run-")
+
+
+# ── skills: only skills/<name>/SKILL.md, ever ─────────────────────────
+
+
+def _repo_with_skill(tmp_path: Path, name: str = "meta-harness-demo") -> Path:
+    repo = tmp_path / "repo"
+    skill = repo / "skills" / name / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: demo\n---\n")
+    return repo
+
+
+def test_resolve_skill_path_accepts_a_repo_skill(tmp_path: Path):
+    repo = _repo_with_skill(tmp_path)
+    expected = (repo / "skills" / "meta-harness-demo" / "SKILL.md").resolve()
+
+    assert runs_mod.resolve_skill_path(repo, "skills/meta-harness-demo/SKILL.md") == expected
+    assert runs_mod.resolve_skill_path(repo, str(expected)) == expected
+    assert runs_mod.default_skill_path(repo, "demo") == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "../outside/secret.txt",
+        "/etc/passwd",
+        "/proc/self/environ",
+        "skills/../../outside/secret.txt",
+        "skills/meta-harness-demo/other.md",
+        "skills/meta-harness-demo/nested/SKILL.md",
+        "skills/SKILL.md",
+        "agents/baseline.py",
+    ],
+)
+def test_resolve_skill_path_refuses_anything_else(tmp_path: Path, raw: str):
+    repo = _repo_with_skill(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("TOP-SECRET")
+
+    with pytest.raises(ValueError) as excinfo:
+        runs_mod.resolve_skill_path(repo, raw)
+    # The message must not echo the path it was given (no probing).
+    assert raw not in str(excinfo.value)
+    assert "secret" not in str(excinfo.value)
+
+
+def test_resolve_skill_path_refuses_a_symlink_out_of_skills(tmp_path: Path):
+    repo = _repo_with_skill(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "SKILL.md").write_text("TOP-SECRET")
+    try:
+        (repo / "skills" / "escape").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable on this platform")
+
+    with pytest.raises(ValueError):
+        runs_mod.resolve_skill_path(repo, "skills/escape/SKILL.md")
+
+
+@pytest.mark.parametrize("domain", ["../x", "a/b", "", ".hidden", "x" * 200])
+def test_domain_must_be_a_safe_name(domain: str):
+    with pytest.raises(ValueError):
+        runs_mod.validate_domain(domain)
+
+
+def test_run_config_round_trips_through_the_manifest(tmp_path: Path):
+    repo = _repo_with_skill(tmp_path)
+    skill = runs_mod.default_skill_path(repo, "demo")
+
+    recorded = runs_mod.skill_path_for_manifest(repo, skill)
+    assert recorded == "skills/meta-harness-demo/SKILL.md"
+
+    config = runs_mod.run_config_from_manifest(
+        repo,
+        {
+            "mock_proposer": False,
+            "mock_bench": True,
+            "trials": 2,
+            "workers": 7,
+            "domain": "demo",
+            "skill_path": recorded,
+            "record": True,
+            "memory": False,
+        },
+    )
+    assert config == {
+        "mock_proposer": False,
+        "mock_bench": True,
+        "trials": 2,
+        "workers": 7,
+        "domain": "demo",
+        "skill_path": skill,
+        "record": True,
+        "memory": False,
+    }
+
+
+def test_manifest_skill_falls_back_to_the_domain_and_never_escapes(tmp_path: Path):
+    repo = _repo_with_skill(tmp_path)
+    expected = runs_mod.default_skill_path(repo, "demo")
+
+    # Legacy manifest with no skill_path: the domain's default skill.
+    assert runs_mod.skill_path_from_manifest(repo, {"domain": "demo"}) == expected
+    # A recorded path outside skills/ is ignored, not trusted.
+    assert (
+        runs_mod.skill_path_from_manifest(
+            repo, {"domain": "demo", "skill_path": "/etc/passwd"}
+        )
+        == expected
+    )
+    # An older absolute path *inside* the repo still resolves.
+    assert (
+        runs_mod.skill_path_from_manifest(repo, {"skill_path": str(expected)})
+        == expected
+    )
+    # Nothing usable: None, not a guess.
+    assert runs_mod.skill_path_from_manifest(repo, {"domain": "missing"}) is None
+
+
+def test_portable_path_is_repo_relative_posix(tmp_path: Path):
+    repo = tmp_path / "repo"
+    inside = repo / "runs" / "r" / "threads" / "r" / "agents" / "x.py"
+    assert runs_mod.portable_path(inside, repo) == "runs/r/threads/r/agents/x.py"
+    assert runs_mod.portable_path("runs/r", repo) == "runs/r"
+    outside = runs_mod.portable_path(tmp_path / "elsewhere" / "rec", repo)
+    assert not Path(outside).is_absolute()
+    assert "\\" not in outside
