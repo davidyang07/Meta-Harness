@@ -113,6 +113,18 @@ def test_frontier_entry_falls_back_to_median_then_unknown():
     assert unknown["avg_tokens"] is None
 
 
+def test_a_result_without_an_accuracy_is_not_a_frontier_point():
+    """A candidate that failed validation was never measured (invariant 4).
+
+    Its scores hold only the load error; projecting that as accuracy 0.0
+    put a fabricated point on the frontier.
+    """
+    import pytest
+
+    with pytest.raises(ValueError, match="no measured accuracy"):
+        frontier_entry("smoke-failed", {"error": "SyntaxError"})
+
+
 def test_unmeasured_candidate_never_dominates_on_cost():
     """avg_tokens=None means 'not measured', not 'free'."""
     unmeasured = {"name": "unmeasured", "accuracy": 0.8, "avg_tokens": None}

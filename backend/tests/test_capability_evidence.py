@@ -45,6 +45,7 @@ def _rows(arm: str, spec: dict[str, list[bool]]) -> list[dict[str, Any]]:
                     "score": 1.0 if passed else 0.0,
                     "wall_time_s": 1.0,
                     "metrics_source": met.MEASURED,
+                    "model": "m",
                     "llm_calls": 2,
                     "input_tokens": 100,
                     "output_tokens": 50,
@@ -65,8 +66,16 @@ def _publish(
     baseline_spec: dict[str, list[bool]] | None = None,
     candidate_spec: dict[str, list[bool]] | None = None,
     tamper: dict[str, Any] | None = None,
+    declared: tuple[list[str], int] | None = None,
+    validation: dict[str, Any] | None = None,
 ) -> Path:
-    """Write a published experiment directory the way the runner does."""
+    """Write a published experiment directory the way the runner does.
+
+    Also writes the committed protocol (``benchmarks/<experiment>/
+    config.json``) the result is checked against. ``declared`` sets its
+    task list and trial depth; by default it declares exactly what was
+    published. ``validation`` overrides the published validation.json.
+    """
     baseline_spec = baseline_spec or {"t1": [True, False, False, False]}
     candidate_spec = candidate_spec or {"t1": [True, True, True, False]}
     directory = root / "benchmarks" / "results" / name
@@ -102,14 +111,30 @@ def _publish(
     )
     (directory / "validation.json").write_text(
         json.dumps(
-            exp.check_protocol_equality(
+            validation
+            or exp.check_protocol_equality(
                 baseline_rows=baseline,
                 candidate_rows=candidate,
                 task_ids=task_ids,
                 trials_per_task=len(baseline_spec[task_ids[0]]),
-                baseline_model="m",
-                candidate_model="m",
             )
+        )
+    )
+    declared_tasks, declared_trials = declared or (
+        task_ids,
+        len(baseline_spec[task_ids[0]]),
+    )
+    committed = root / "benchmarks" / experiment / "config.json"
+    committed.parent.mkdir(parents=True, exist_ok=True)
+    committed.write_text(
+        json.dumps(
+            {
+                "experiment": experiment,
+                "task_set": f"eval/{experiment}",
+                "tasks": declared_tasks,
+                "trials_per_task": declared_trials,
+                "workers": 1,
+            }
         )
     )
     return directory
@@ -186,30 +211,67 @@ def test_a_summary_that_disagrees_with_its_rows_fails(tmp_path: Path):
     assert loaded["reproducible"] is False
     assert "candidate_passes" in loaded["mismatched_keys"]
     checks = {c.key: c for c in ev._measurement_checks(loaded)}
-    assert checks["canonical_200_trials"].status == ev.FAIL
+    assert checks["canonical_protocol_trials"].status == ev.FAIL
     # And the reported value is the recomputed one, not the tampered one.
     assert checks["evolved_pass_rate"].value == 0.75
 
 
-def test_the_trial_count_row_needs_a_full_protocol(tmp_path: Path):
-    """Four trials is not two hundred, however green the run was."""
+def test_the_trial_count_row_needs_the_whole_declared_protocol(tmp_path: Path):
+    """A run of fewer trials than its committed protocol declares is not it."""
     repo = _repo(tmp_path)
-    _publish(repo)
-    checks = {c.key: c for c in ev._measurement_checks(ev.latest_experiment(repo))}
-    assert checks["canonical_200_trials"].status == ev.FAIL
-    assert checks["canonical_200_trials"].value == 8
+    _publish(repo, declared=([f"t{i}" for i in range(1, 6)], 20))
+    row = {c.key: c for c in ev._measurement_checks(ev.latest_experiment(repo))}[
+        "canonical_protocol_trials"
+    ]
+    assert row.status == ev.FAIL
+    assert row.value == {"observed_trials": 8, "declared_trials": 200}
+    assert "benchmarks/pass-rate/config.json" in row.detail
 
 
 def test_a_full_protocol_passes_the_trial_count_row(tmp_path: Path):
+    """Whatever the declared size, running all of it is what passes."""
     repo = _repo(tmp_path)
     _publish(
         repo,
-        baseline_spec={f"t{i}": [True] * 20 for i in range(1, 6)},
-        candidate_spec={f"t{i}": [True] * 20 for i in range(1, 6)},
+        baseline_spec={f"t{i}": [True] * 3 for i in range(1, 4)},
+        candidate_spec={f"t{i}": [True] * 3 for i in range(1, 4)},
     )
-    checks = {c.key: c for c in ev._measurement_checks(ev.latest_experiment(repo))}
-    assert checks["canonical_200_trials"].value == 200
-    assert checks["canonical_200_trials"].status == ev.PASS
+    row = {c.key: c for c in ev._measurement_checks(ev.latest_experiment(repo))}[
+        "canonical_protocol_trials"
+    ]
+    assert row.value == {"observed_trials": 18, "declared_trials": 18}
+    assert row.status == ev.PASS
+
+
+def test_no_committed_protocol_leaves_the_trial_count_unsupported(tmp_path: Path):
+    repo = _repo(tmp_path)
+    _publish(repo)
+    (repo / "benchmarks" / "pass-rate" / "config.json").unlink()
+    row = {c.key: c for c in ev._measurement_checks(ev.latest_experiment(repo))}[
+        "canonical_protocol_trials"
+    ]
+    assert row.status == ev.UNSUPPORTED
+    assert row.value["declared_trials"] is None
+
+
+def test_protocol_equality_is_recomputed_not_read_from_validation_json(
+    tmp_path: Path,
+):
+    """A validation.json that vouches for rows it does not describe is ignored."""
+    repo = _repo(tmp_path)
+    directory = _publish(repo, validation={"identical_protocol": True, "checks": {}})
+    rows = exp.read_rows(directory / "candidate-results.jsonl")
+    for row in rows:
+        row["model"] = "a-different-model"
+    exp.write_rows(directory / "candidate-results.jsonl", rows)
+
+    loaded = ev.latest_experiment(repo)
+    assert loaded["published_validation"]["identical_protocol"] is True
+    assert loaded["validation"]["identical_protocol"] is False
+    assert loaded["validation"]["checks"]["same_model"] is False
+    row = {c.key: c for c in ev._measurement_checks(loaded)}["canonical_protocol_trials"]
+    assert row.status == ev.FAIL
+    assert "same_model" in row.detail
 
 
 def test_a_small_delta_is_reported_as_the_number_it_is(tmp_path: Path):
@@ -293,7 +355,43 @@ def test_holdout_is_read_from_its_own_published_experiment(tmp_path: Path):
     )
     holdout = ev.latest_experiment(repo, experiment="holdout")
     assert holdout is not None
-    assert ev._holdout_checks(holdout)[0].value == 50.0
+    row = ev._holdout_checks(holdout)[0]
+    assert row.value == 50.0
+    assert row.status == ev.PASS
+
+
+def test_an_invalid_holdout_protocol_fails_the_holdout_row(tmp_path: Path):
+    """A holdout delta from unequal arms is not a generalisation number."""
+    repo = _repo(tmp_path)
+    directory = _publish(
+        repo,
+        experiment="holdout",
+        name="holdout-20260101T000000Z",
+        baseline_spec={"task-006": [True, False]},
+        candidate_spec={"task-006": [True, True]},
+    )
+    rows = exp.read_rows(directory / "candidate-results.jsonl")
+    rows[0]["model"] = "a-bigger-model"
+    exp.write_rows(directory / "candidate-results.jsonl", rows)
+
+    row = ev._holdout_checks(ev.latest_experiment(repo, experiment="holdout"))[0]
+    assert row.status == ev.FAIL
+    assert row.value == 50.0, "the number is still reported, as what it is"
+    assert "did NOT run an identical protocol" in row.detail
+
+
+def test_an_incomplete_holdout_run_fails_the_holdout_row(tmp_path: Path):
+    repo = _repo(tmp_path)
+    _publish(
+        repo,
+        experiment="holdout",
+        name="holdout-20260101T000000Z",
+        baseline_spec={"task-006": [True, False]},
+        candidate_spec={"task-006": [True, True]},
+        declared=(["task-006", "task-007"], 2),
+    )
+    row = ev._holdout_checks(ev.latest_experiment(repo, experiment="holdout"))[0]
+    assert row.status == ev.FAIL
 
 
 def test_latest_experiment_selects_by_experiment_name(tmp_path: Path):

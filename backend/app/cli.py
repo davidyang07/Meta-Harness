@@ -961,8 +961,13 @@ def experiment(
     from raw per-trial rows; no target number exists anywhere in this
     command.
 
-    THIS ISSUES REAL LLM CALLS. The committed protocol is
-    5 tasks x 20 trials x 2 arms = 200 trials.
+    The two arms are interleaved trial by trial under one worker pool, so
+    drift over the run lands on both. Which model served each trial is
+    read from the trial rows, and the protocol check compares those.
+
+    THIS ISSUES REAL LLM CALLS. The committed protocol (tasks x trials per
+    task x 2 arms) is read from the config; the total is printed below
+    before anything runs.
     """
     import datetime as _dt
 
@@ -1007,7 +1012,13 @@ def experiment(
 
     baseline_cls = _resolve_harness_class(baseline)
     candidate_cls = _resolve_harness_class(candidate)
-    model = getattr(candidate_cls, "MODEL", CodingAgentHarness.MODEL)
+    # Declared models, for provenance. The protocol check reads what
+    # actually served each trial from the rows.
+    arm_models = {
+        "baseline": getattr(baseline_cls, "MODEL", CodingAgentHarness.MODEL),
+        "candidate": getattr(candidate_cls, "MODEL", CodingAgentHarness.MODEL),
+    }
+    model = arm_models["candidate"]
 
     total_per_arm = len(task_dirs) * n_trials
     for line in (
@@ -1016,7 +1027,7 @@ def experiment(
         f"  trials:    {n_trials} per task per arm",
         f"  arms:      {baseline} (control) vs {candidate}",
         f"  total:     {total_per_arm * 2} task trials",
-        f"  model:     {model}",
+        f"  models:    {arm_models['baseline']} (control), {arm_models['candidate']}",
         f"  output:    {output_dir}",
     ):
         typer.echo(line)
@@ -1025,7 +1036,9 @@ def experiment(
 
     def _progress(arm: str, row: dict[str, Any]) -> None:
         done[arm] += 1
-        mark = "PASS" if row["passed"] else "FAIL"
+        mark = "ERROR" if row.get("status") == "error" else (
+            "PASS" if row["passed"] else "FAIL"
+        )
         typer.echo(
             f"  [{arm} {done[arm]}/{total_per_arm}] {mark} "
             f"{row['task_id']} trial-{row['trial']}"
@@ -1069,6 +1082,7 @@ def experiment(
                     candidate: REPO_ROOT / "agents" / f"{candidate}.py",
                 },
                 model=model,
+                arm_models=arm_models,
                 trials=n_trials,
                 workers=n_workers,
                 output_dir=output_dir,
@@ -1093,6 +1107,7 @@ def experiment(
                     candidate: REPO_ROOT / "agents" / f"{candidate}.py",
                 },
                 model=model,
+                arm_models=arm_models,
                 trials=n_trials,
                 workers=n_workers,
                 output_dir=output_dir,
@@ -1683,10 +1698,11 @@ def verify_replay(
 # ──────────────────────────────────────────────────────────────────────
 
 
-# ``resume-experiment`` was the original name and still works. It reads as
-# though it resumes something, which it does not — it runs the canonical
-# measurement end to end — so the primary name says what it does.
-@app.command("resume-experiment", hidden=True)
+# ``resume-experiment`` was the original name of ``canonical-experiment``
+# and still resolves, so anything scripted against it keeps working. It now
+# does what its name says: it continues an existing run from its
+# checkpoints and never deletes one. ``canonical-experiment`` starts a run,
+# and replaces an existing one only when told to with ``--fresh``.
 @app.command("canonical-experiment")
 def canonical_experiment(
     budget: int = typer.Option(
@@ -1742,6 +1758,15 @@ def canonical_experiment(
             "trials already on disk, then exit without spending anything."
         ),
     ),
+    fresh: bool = typer.Option(
+        False,
+        "--fresh",
+        help=(
+            "Delete runs/<run-name>/ first if it already exists. Without it, "
+            "an existing run is refused rather than overwritten; continue one "
+            "with `resume-experiment --run-name <name>`."
+        ),
+    ),
 ) -> None:
     """Evolve, select on validation only, measure, verify replay, report.
 
@@ -1751,10 +1776,16 @@ def canonical_experiment(
     2. select the best candidate using ONLY the validation accuracy the
        outer loop measured during evolution — the final experiment has not
        run yet, so its trials cannot influence the choice;
-    3. run the canonical two-arm experiment (5 tasks x 20 trials x 2 arms);
+    3. run the canonical two-arm experiment (the committed protocol in
+       benchmarks/pass-rate/config.json, both arms interleaved);
     4. run the two-arm holdout experiment on tasks the proposer never saw;
     5. verify a recorded trial replays exactly;
     6. derive the capability-evidence document from the artifacts.
+
+    Results are written to benchmarks/results/<experiment-id>/, which is
+    where the evidence derivation reads them; commit that directory to
+    publish them. The evidence document itself is generated at
+    docs/CAPABILITY_EVIDENCE.md and is never committed.
 
     THIS ISSUES REAL LLM CALLS AND COSTS MONEY. Use ``--dry-run`` first.
 
@@ -1762,13 +1793,97 @@ def canonical_experiment(
     target anywhere in the pipeline. Whatever the measured delta is, it is
     what gets reported.
     """
+    _run_canonical_experiment(
+        budget=budget,
+        search_trials=search_trials,
+        workers=workers,
+        candidate=candidate,
+        run_name=run_name,
+        domain=domain,
+        record_trials=record_trials,
+        holdout=holdout,
+        wandb=wandb,
+        dry_run=dry_run,
+        fresh=fresh,
+        resume=False,
+    )
+
+
+@app.command("resume-experiment", hidden=True)
+def resume_experiment(
+    run_name: str = typer.Option(
+        ..., "--run-name", help="The canonical-experiment run under runs/ to continue."
+    ),
+    budget: int = typer.Option(
+        5,
+        "--budget",
+        help="Only used when the run does not exist yet and is started here.",
+    ),
+    search_trials: int = typer.Option(
+        5,
+        "--search-trials",
+        help="Only used when the run does not exist yet and is started here.",
+    ),
+    workers: int = typer.Option(5, "--workers", help="Parallel trial workers."),
+    candidate: str = typer.Option(
+        None, "--candidate", help="Skip evolution and measure this candidate."
+    ),
+    domain: str = typer.Option(
+        "coding-agent", "--domain", help="SKILL.md domain for a run started here."
+    ),
+    record_trials: int = typer.Option(1, "--record-trials"),
+    holdout: bool = typer.Option(True, "--holdout/--no-holdout"),
+    wandb: bool = typer.Option(None, "--wandb/--no-wandb"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+) -> None:
+    """Continue a canonical experiment from its last checkpoint.
+
+    Evolution resumes from the run's Postgres checkpoints under the
+    settings its manifest recorded, then selection, measurement, replay
+    verification and the evidence document follow as in
+    ``canonical-experiment``. Nothing is ever deleted: a run that does not
+    exist yet is started, one that does is continued.
+    """
+    _run_canonical_experiment(
+        budget=budget,
+        search_trials=search_trials,
+        workers=workers,
+        candidate=candidate,
+        run_name=run_name,
+        domain=domain,
+        record_trials=record_trials,
+        holdout=holdout,
+        wandb=wandb,
+        dry_run=dry_run,
+        fresh=False,
+        resume=True,
+    )
+
+
+def _run_canonical_experiment(
+    *,
+    budget: int,
+    search_trials: int,
+    workers: int,
+    candidate: str | None,
+    run_name: str | None,
+    domain: str,
+    record_trials: int,
+    holdout: bool,
+    wandb: bool | None,
+    dry_run: bool,
+    fresh: bool,
+    resume: bool,
+) -> None:
+    """The canonical pipeline. Every input is validated before anything on
+    disk changes, and a run is only ever deleted by an explicit ``--fresh``."""
     import datetime as _dt
 
     from app.meta_harness import evidence as ev
     from app.meta_harness import pipeline as pipe
     from app.meta_harness import runs as runs_mod
     from app.meta_harness import tracking as trk
-    from app.meta_harness.outer import run_outer_loop
+    from app.meta_harness.outer import resume_outer_loop, run_outer_loop
     from app.meta_harness.persistence import persistence_layer
 
     search_config = REPO_ROOT / "benchmarks" / "pass-rate" / "config.json"
@@ -1805,17 +1920,38 @@ def canonical_experiment(
         typer.echo("--dry-run: nothing was executed and nothing was spent.")
         return
 
-    if run_name is None:
-        run_name = "experiment-" + _dt.datetime.now(_dt.timezone.utc).strftime(
-            "%Y%m%dT%H%M%SZ"
-        )
-    run_dir = runs_mod.make_run_dir(REPO_ROOT, run_name, fresh=True)
-    output_root = REPO_ROOT / "benchmark-results"
-
+    # ── validate everything before touching the filesystem ───────────
     skill_path = REPO_ROOT / "skills" / f"meta-harness-{domain}" / "SKILL.md"
     if candidate is None and not skill_path.exists():
         typer.echo(f"skill not found: {skill_path}", err=True)
         raise typer.Exit(2)
+    supplied_selection = (
+        _selection_from_agents_dir(candidate) if candidate is not None else None
+    )
+
+    if run_name is None:
+        run_name = "experiment-" + _dt.datetime.now(_dt.timezone.utc).strftime(
+            "%Y%m%dT%H%M%SZ"
+        )
+    try:
+        run_path = runs_mod.make_run_path(REPO_ROOT, run_name)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from None
+    resuming = resume and (run_path / "manifest.json").is_file()
+    if run_path.exists() and not resume and not fresh:
+        typer.echo(
+            f"run {run_name} already exists at {run_path}. Pass --fresh to delete "
+            f"it and start over, or continue it with "
+            f"`meta-harness resume-experiment --run-name {run_name}`.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    # Only now: the one place a run is deleted, and only when asked to.
+    run_dir = runs_mod.make_run_dir(REPO_ROOT, run_name, fresh=fresh and not resume)
+    # Published where the evidence derivation (stage 6) reads them.
+    output_root = REPO_ROOT / "benchmarks" / "results"
 
     tracker = trk.make_tracker(
         enabled=wandb,
@@ -1826,6 +1962,7 @@ def canonical_experiment(
             "workers": workers,
             "record_trials": record_trials,
             "holdout": holdout,
+            "resumed": resuming,
         },
         tags=["canonical-experiment"],
         job_type="canonical-experiment",
@@ -1835,43 +1972,56 @@ def canonical_experiment(
     elif tracker.reason:
         typer.echo(f"tracking: off ({tracker.reason})")
 
-    stages: list[Any] = []
-
     def _progress(arm: str, row: dict[str, Any]) -> None:
-        mark = "PASS" if row["passed"] else "FAIL"
+        mark = "ERROR" if row.get("status") == "error" else (
+            "PASS" if row["passed"] else "FAIL"
+        )
         typer.echo(f"  [{arm}] {mark} {row['task_id']} trial-{row['trial']}")
 
     async def _run() -> list[Any]:
         collected: list[Any] = []
         async with persistence_layer() as saver:
-            if candidate is None:
+            if supplied_selection is None:
                 typer.echo("")
-                typer.echo("stage 1/6: evolving candidates")
-                final_state = await run_outer_loop(
-                    run_dir=run_dir,
-                    repo_root=REPO_ROOT,
-                    eval_tasks_dir=REPO_ROOT / "eval" / "tasks",
-                    mock_proposer=False,
-                    mock_bench=False,
-                    trials=search_trials,
-                    bench_workers=workers,
-                    budget=budget,
-                    skill_path=skill_path,
-                    checkpointer=saver,
-                    tracker=tracker,
-                )
+                if resuming:
+                    typer.echo(f"stage 1/6: resuming evolution of {run_name}")
+                    final_state = await resume_outer_loop(
+                        run_dir=run_dir,
+                        repo_root=REPO_ROOT,
+                        eval_tasks_dir=REPO_ROOT / "eval" / "tasks",
+                        checkpointer=saver,
+                        skill_path=skill_path,
+                        tracker=tracker,
+                    )
+                else:
+                    typer.echo("stage 1/6: evolving candidates")
+                    final_state = await run_outer_loop(
+                        run_dir=run_dir,
+                        repo_root=REPO_ROOT,
+                        eval_tasks_dir=REPO_ROOT / "eval" / "tasks",
+                        mock_proposer=False,
+                        mock_bench=False,
+                        trials=search_trials,
+                        bench_workers=workers,
+                        budget=budget,
+                        skill_path=skill_path,
+                        checkpointer=saver,
+                        tracker=tracker,
+                        domain=domain,
+                    )
                 collected.append(
                     pipe.StageResult(
                         "evolve",
                         "ok",
                         f"{final_state['iteration']} iterations, "
-                        f"{len(final_state.get('candidates') or [])} candidates",
+                        f"{len(final_state.get('candidates') or [])} candidates"
+                        + (" (resumed)" if resuming else ""),
                         {"best_candidate": final_state.get("best_candidate")},
                     )
                 )
                 selection = pipe.select_candidate(final_state)
             else:
-                selection = _selection_from_agents_dir(candidate)
+                selection = supplied_selection
                 collected.append(
                     pipe.StageResult(
                         "evolve",
@@ -1944,24 +2094,38 @@ def canonical_experiment(
                         )
                     )
 
-            version = await _capture_version_graph(saver, run_dir, run_name)
-            collected.append(
-                pipe.StageResult(
-                    "version-graph",
-                    "ok",
-                    f"{version['checkpoint_count']} checkpoints, "
-                    f"{version['branch_count']} branches",
-                    {"version_graph": {k: version[k] for k in ("checkpoint_count", "branch_count", "immutable")}},
+            if supplied_selection is None:
+                version = await _capture_version_graph(saver, run_dir, run_name)
+                collected.append(
+                    pipe.StageResult(
+                        "version-graph",
+                        "ok",
+                        f"{version['checkpoint_count']} checkpoints, "
+                        f"{version['branch_count']} branches",
+                        {"version_graph": {k: version[k] for k in ("checkpoint_count", "branch_count", "immutable")}},
+                    )
                 )
-            )
+            else:
+                # No evolution ran, so this run has no checkpoint history.
+                # Capturing it would replace the committed version graph
+                # with an empty one.
+                collected.append(
+                    pipe.StageResult(
+                        "version-graph",
+                        "skipped",
+                        "evolution was skipped, so this run has no checkpoints",
+                    )
+                )
         return collected
 
     stages = _run_async(_run())
 
     typer.echo("")
     typer.echo("stage 6/6: regenerating capability evidence")
+    # Derived from what stages 3-5 just wrote under benchmarks/results/ and
+    # docs/evidence/. Generated, gitignored, never committed.
     report = ev.build_report(REPO_ROOT)
-    evidence_path = REPO_ROOT / "docs" / ev.DOCUMENT_PATH
+    evidence_path = REPO_ROOT / ev.DOCUMENT_PATH
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
     evidence_path.write_text(report["markdown"], encoding="utf-8")
 

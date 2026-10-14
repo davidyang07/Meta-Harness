@@ -213,25 +213,48 @@ def test_empty_aggregate_reports_none_rather_than_zero():
     assert agg["total_cost_usd"] is None
 
 
-def test_combine_run_metrics_keeps_proposer_and_benchmark_separate():
-    bench = met.aggregate_trials([_row("t", 1, True, 100)], metrics_source=met.MEASURED)
-    proposer = {"tokens": {"total_tokens": 40}, "total_cost_usd": 0.5}
-    combined = met.combine_run_metrics(benchmark=bench, proposer=proposer)
-    assert combined["benchmark"]["tokens"]["total_tokens"] == 100
-    assert combined["proposer"]["total_cost_usd"] == 0.5
-    assert combined["combined"]["total_tokens"] == 140
-    assert combined["combined"]["total_cost_usd"] == pytest.approx(0.501)
+def test_an_errored_trial_counts_as_a_failure_with_unknown_usage():
+    """A trial that raised is a failed trial whose usage nobody measured."""
+    error = met.error_trial_row(
+        task_id="t1", trial=2, error=RuntimeError("529 overloaded"), wall_time_s=3.0,
+        model="m",
+    )
+    assert error["status"] == met.TRIAL_ERROR
+    assert error["passed"] is False
+    assert "RuntimeError: 529 overloaded" in error["error"]
+    for field in ("total_tokens", "input_tokens", "llm_calls", "cost_usd"):
+        assert error[field] is None, field
+
+    agg = met.aggregate_trials(
+        [_row("t1", 1, True, 100), error], metrics_source=met.MEASURED
+    )
+    assert agg["total_trials"] == 2
+    assert agg["passed_trials"] == 1
+    assert agg["errored_trials"] == 1
+    # The unknown usage is left out, not averaged in as zero.
+    assert agg["mean_total_tokens_per_trial"] == 100.0
+    assert agg["tokens"]["total_tokens"] == 100
+    # ...and the cost is no longer complete.
+    assert agg["total_cost_usd"] is None
+    assert agg["cost_complete"] is False
 
 
-def test_combine_run_metrics_propagates_unknown_cost():
-    bench = met.aggregate_trials(
-        [_row("t", 1, True, 100, cost=None)], metrics_source=met.MEASURED
+def test_a_trial_row_records_the_model_that_served_it():
+    rec = met.UsageRecorder()
+    rec.record(response=_Response(_Usage(input_tokens=1), model="served-a"), model="declared", latency_s=0.1)
+    row = rec.to_trial_row(
+        task_id="t", trial=1, passed=True, score=1.0, wall_time_s=1.0, model="declared"
     )
-    combined = met.combine_run_metrics(
-        benchmark=bench, proposer={"tokens": {"total_tokens": 1}, "total_cost_usd": 0.5}
-    )
-    assert combined["combined"]["total_cost_usd"] is None
-    assert combined["combined"]["cost_complete"] is False
+    assert row["model"] == "served-a"
+    assert row["status"] == met.TRIAL_OK
+
+    rec.record(response=_Response(_Usage(input_tokens=1), model="served-b"), model="declared", latency_s=0.1)
+    assert rec.served_model("declared") == "served-a,served-b"
+
+    # No call at all: the harness' declared model is the best available.
+    empty = met.UsageRecorder()
+    assert empty.served_model("declared") == "declared"
+    assert empty.served_model(None) is None
 
 
 # ── inner thread naming ───────────────────────────────────────────────

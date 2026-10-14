@@ -34,6 +34,7 @@ def _rows(arm: str, spec: dict[str, list[bool]]) -> list[dict[str, Any]]:
                     "score": 1.0 if passed else 0.0,
                     "wall_time_s": 1.0,
                     "metrics_source": met.MEASURED,
+                    "model": "m",
                     "llm_calls": 2,
                     "input_tokens": 100,
                     "output_tokens": 50,
@@ -131,24 +132,68 @@ def test_empty_experiment_reports_no_result_rather_than_zero():
 # ── statistics ────────────────────────────────────────────────────────
 
 
-def test_wald_interval_brackets_the_observed_difference():
-    ci = exp.wald_diff_ci(63, 100, 75, 100)
+def test_difference_interval_brackets_the_observed_difference():
+    ci = exp.newcombe_diff_ci(63, 100, 75, 100)
     assert ci["difference"] == pytest.approx(0.12)
     assert ci["lower"] < ci["difference"] < ci["upper"]
     assert ci["confidence"] == 0.95
+    assert ci["method"] == "newcombe-hybrid-score-95"
     # The clustering caveat is part of the payload, not a footnote.
     assert "clustered within tasks" in ci["assumptions"]
 
 
-def test_wald_interval_widens_with_fewer_trials():
-    wide = exp.wald_diff_ci(6, 10, 8, 10)
-    narrow = exp.wald_diff_ci(600, 1000, 800, 1000)
+def test_difference_interval_matches_newcombes_published_example():
+    """Newcombe (1998), method 10: 56/70 vs 48/80 gives [0.0524, 0.3339]."""
+    ci = exp.newcombe_diff_ci(48, 80, 56, 70)
+    assert ci["difference"] == pytest.approx(0.2)
+    assert ci["lower"] == pytest.approx(0.0524, abs=1e-4)
+    assert ci["upper"] == pytest.approx(0.3339, abs=1e-4)
+
+
+def test_wilson_interval_matches_the_textbook_value():
+    ci = exp.wilson_interval(81, 263)
+    assert ci["lower"] == pytest.approx(0.2553, abs=1e-4)
+    assert ci["upper"] == pytest.approx(0.3662, abs=1e-4)
+
+
+def test_intervals_keep_their_width_at_zero_and_one_hundred_percent():
+    """Where a Wald interval collapses to a point, a score interval does not."""
+    for passes in (0, 10):
+        arm = exp.wilson_interval(passes, 10)
+        assert arm["upper"] - arm["lower"] > 0.2, arm
+        assert 0.0 <= arm["lower"] <= arm["upper"] <= 1.0
+    both_zero = exp.newcombe_diff_ci(0, 10, 0, 10)
+    both_full = exp.newcombe_diff_ci(10, 10, 10, 10)
+    for ci in (both_zero, both_full):
+        assert ci["difference"] == 0.0
+        assert ci["lower"] < 0.0 < ci["upper"]
+    extreme = exp.newcombe_diff_ci(0, 10, 10, 10)
+    assert extreme["upper"] == 1.0 and extreme["lower"] < 1.0
+
+
+def test_difference_interval_widens_with_fewer_trials():
+    wide = exp.newcombe_diff_ci(6, 10, 8, 10)
+    narrow = exp.newcombe_diff_ci(600, 1000, 800, 1000)
     assert (wide["upper"] - wide["lower"]) > (narrow["upper"] - narrow["lower"])
 
 
-def test_wald_interval_handles_zero_trials():
-    ci = exp.wald_diff_ci(0, 0, 0, 0)
+def test_difference_interval_handles_zero_trials():
+    ci = exp.newcombe_diff_ci(0, 0, 0, 0)
     assert ci["lower"] is None and ci["upper"] is None
+    assert exp.wilson_interval(0, 0)["lower"] is None
+
+
+def test_each_arm_publishes_its_wilson_interval():
+    summary = exp.summarize(
+        baseline_rows=_rows("baseline", {"t": [True, False]}),
+        candidate_rows=_rows("candidate", {"t": [True, True]}),
+        task_ids=["t"],
+        baseline_label="b",
+        candidate_label="c",
+    )
+    assert summary["arms"]["candidate"]["accuracy_ci"]["method"] == "wilson-score-95"
+    assert summary["arms"]["candidate"]["accuracy_ci"]["upper"] == 1.0
+    assert summary["arms"]["candidate"]["accuracy_ci"]["lower"] < 1.0
 
 
 # ── task-cluster-aware uncertainty ────────────────────────────────────
@@ -340,7 +385,8 @@ def test_no_target_improvement_can_reach_the_statistics():
     statistics_source = "".join(
         inspect.getsource(fn)
         for fn in (
-            exp.wald_diff_ci,
+            exp.wilson_interval,
+            exp.newcombe_diff_ci,
             exp.task_clusters,
             exp.cluster_bootstrap_diff_ci,
             exp._arm_stats,
@@ -435,6 +481,47 @@ def test_task_hashes_change_when_a_task_changes(tmp_path: Path):
     assert second["task_sha256"] != first["task_sha256"]
 
 
+def test_task_hashes_ignore_caches_left_by_running_the_task(tmp_path: Path):
+    """Running a task's tests in place must not change what it hashes to."""
+    task_dir = tmp_path / "task-x"
+    (task_dir / "workspace" / "tests").mkdir(parents=True)
+    (task_dir / "task.json").write_text('{"id": "task-x"}')
+    (task_dir / "workspace" / "a.py").write_text("x = 1\n")
+    clean = exp.hash_task(task_dir)
+
+    (task_dir / "workspace" / ".pytest_cache" / "v").mkdir(parents=True)
+    (task_dir / "workspace" / ".pytest_cache" / "v" / "lastfailed").write_text("{}")
+    (task_dir / "workspace" / "__pycache__").mkdir()
+    (task_dir / "workspace" / "__pycache__" / "a.cpython-311.pyc").write_bytes(b"\0")
+    (task_dir / "workspace" / "tests" / "stray.pyc").write_bytes(b"\0")
+
+    dirty = exp.hash_task(task_dir)
+    assert dirty["task_sha256"] == clean["task_sha256"]
+    assert set(dirty["files_sha256"]) == {"task.json", "workspace/a.py"}
+
+
+def test_a_regression_is_quoted_as_a_reduction_not_a_negative_improvement():
+    summary = exp.summarize(
+        baseline_rows=_rows("baseline", {"t": [True, True, False, False]}),
+        candidate_rows=_rows("candidate", {"t": [True, False, False, False]}),
+        task_ids=["t"],
+        baseline_label="baseline",
+        candidate_label="evolved",
+    )
+    sentence = exp.reported_metric_sentence(summary)
+    assert sentence.startswith("Reduced agent pass rate by 25.0 percentage points")
+    assert "Improved" not in sentence
+
+    flat = exp.summarize(
+        baseline_rows=_rows("baseline", {"t": [True, False]}),
+        candidate_rows=_rows("candidate", {"t": [True, False]}),
+        task_ids=["t"],
+        baseline_label="baseline",
+        candidate_label="evolved",
+    )
+    assert exp.reported_metric_sentence(flat).startswith("Left agent pass rate unchanged")
+
+
 def test_environment_capture_records_provenance_and_no_secrets(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-should-never-appear")
     env = exp.capture_environment(
@@ -451,8 +538,13 @@ def test_environment_capture_records_provenance_and_no_secrets(monkeypatch):
     assert env["git"]["commit"], "commit SHA must be captured"
     assert isinstance(env["git"]["dirty"], bool)
     assert env["python"] and env["platform"]
-    assert len(env["tasks"]) == 10
+    assert len(env["tasks"]) == len(
+        [d for d in (REPO_ROOT / "eval" / "tasks").iterdir() if d.is_dir()]
+    )
     assert env["arm_sources"]["baseline"]["sha256"]
+    # Committed provenance names files by repo-relative POSIX path, not
+    # by where the machine that wrote it kept its checkout.
+    assert env["arm_sources"]["baseline"]["path"] == "agents/baseline.py"
 
     blob = json.dumps(env)
     assert "sk-should-never-appear" not in blob
@@ -510,14 +602,20 @@ def test_summary_recomputes_identically_from_the_written_files(tmp_path: Path):
 # ── the committed protocol ────────────────────────────────────────────
 
 
-def test_committed_config_matches_the_documented_200_trial_protocol():
+def test_committed_config_is_a_consistent_two_arm_protocol():
+    """The plan is whatever the config declares; it must add up.
+
+    No count is hard-coded here: the task list and the trial depth are
+    the committed protocol's to state, and this checks they agree with
+    each other and with any total the config also states.
+    """
     config = exp.load_config(REPO_ROOT / "benchmarks" / "pass-rate" / "config.json")
     assert config["task_set"] == "eval/tasks"
-    assert config["trials_per_task"] == 10
-    assert len(config["tasks"]) == 10
-    assert config["total_trials"] == 200
-    # 10 tasks x 10 trials x 2 arms
-    assert len(config["tasks"]) * config["trials_per_task"] * 2 == 200
+    assert config["tasks"], "the protocol must name its tasks"
+    assert int(config["trials_per_task"]) >= 1
+    planned = len(config["tasks"]) * int(config["trials_per_task"]) * 2
+    if "total_trials" in config:
+        assert config["total_trials"] == planned
     # The evolved arm is supplied at run time, never pinned in the repo.
     assert config["arms"]["candidate"] is None
 
@@ -598,8 +696,6 @@ def test_protocol_equality_passes_for_two_identical_arms():
         candidate_rows=_rows("candidate", {"t1": [True] * 3, "t2": [True] * 3}),
         task_ids=["t1", "t2"],
         trials_per_task=3,
-        baseline_model="claude-haiku-4-5-20251001",
-        candidate_model="claude-haiku-4-5-20251001",
     )
     assert result["identical_protocol"] is True
     assert all(result["checks"].values())
@@ -611,25 +707,127 @@ def test_protocol_equality_fails_when_the_arms_ran_different_trial_counts():
         candidate_rows=_rows("candidate", {"t1": [True] * 2}),
         task_ids=["t1"],
         trials_per_task=3,
-        baseline_model="m",
-        candidate_model="m",
     )
     assert result["identical_protocol"] is False
     assert result["checks"]["same_trials_per_task"] is False
 
 
 def test_protocol_equality_fails_when_the_arms_ran_different_models():
-    """Same harness, different model, is not a harness comparison."""
+    """Same harness, different model, is not a harness comparison.
+
+    The models come from the rows — what actually served each trial —
+    not from an argument the caller fills in for both arms.
+    """
+    candidate = _rows("candidate", {"t1": [True]})
+    candidate[0]["model"] = "claude-sonnet-5"
     result = exp.check_protocol_equality(
         baseline_rows=_rows("baseline", {"t1": [True]}),
-        candidate_rows=_rows("candidate", {"t1": [True]}),
+        candidate_rows=candidate,
         task_ids=["t1"],
         trials_per_task=1,
-        baseline_model="claude-haiku-4-5-20251001",
-        candidate_model="claude-sonnet-5",
     )
     assert result["identical_protocol"] is False
     assert result["checks"]["same_model"] is False
+    assert result["models"] == {"baseline": ["m"], "candidate": ["claude-sonnet-5"]}
+
+
+def test_the_model_check_cannot_be_satisfied_by_the_caller():
+    """It takes no declared model, so it cannot compare a value with itself."""
+    params = inspect.signature(exp.check_protocol_equality).parameters
+    assert not any("model" in name for name in params)
+
+
+def test_a_row_with_no_recorded_model_fails_the_model_check():
+    """Unknown is not "the same": an arm whose model is unrecorded fails."""
+    baseline = _rows("baseline", {"t1": [True]})
+    candidate = _rows("candidate", {"t1": [True]})
+    for row in (*baseline, *candidate):
+        del row["model"]
+    result = exp.check_protocol_equality(
+        baseline_rows=baseline,
+        candidate_rows=candidate,
+        task_ids=["t1"],
+        trials_per_task=1,
+    )
+    assert result["checks"]["same_model"] is False
+
+
+def test_one_model_switch_inside_an_arm_is_visible():
+    """A provider substitution mid-arm makes the arms' model sets differ."""
+    baseline = _rows("baseline", {"t1": [True, True]})
+    candidate = _rows("candidate", {"t1": [True, True]})
+    candidate[1]["model"] = "fallback-model"
+    result = exp.check_protocol_equality(
+        baseline_rows=baseline,
+        candidate_rows=candidate,
+        task_ids=["t1"],
+        trials_per_task=2,
+    )
+    assert result["checks"]["same_model"] is False
+    assert result["models"]["candidate"] == ["fallback-model", "m"]
+
+
+def _error_row(task_id: str, trial: int) -> dict[str, Any]:
+    row = met.error_trial_row(
+        task_id=task_id, trial=trial, error=RuntimeError("529 overloaded"),
+        wall_time_s=1.0, model="m",
+    )
+    row["arm"] = "candidate"
+    return row
+
+
+def test_an_errored_trial_is_accounted_for_but_not_complete():
+    rows = _rows("candidate", {"t1": [True, True]})
+    rows[1] = _error_row("t1", 2)
+    report = exp.trial_completeness(
+        rows, task_ids=["t1"], trials_per_task=2, arm="candidate"
+    )
+    assert report["missing_trials"] == []
+    assert report["malformed_rows"] == []
+    assert [e["trial"] for e in report["errored_trials"]] == ["t1/trial-2"]
+    assert "529 overloaded" in report["errored_trials"][0]["error"]
+    assert report["complete"] is False
+
+
+def test_a_protocol_with_errored_trials_says_so_in_validation(tmp_path: Path):
+    baseline = _rows("baseline", {"t1": [True, False]})
+    candidate = _rows("candidate", {"t1": [True, True]})
+    candidate[1] = _error_row("t1", 2)
+    validation = exp.check_protocol_equality(
+        baseline_rows=baseline,
+        candidate_rows=candidate,
+        task_ids=["t1"],
+        trials_per_task=2,
+    )
+    assert validation["identical_protocol"] is False
+    assert validation["checks"]["no_errored_trials"] is False
+    assert validation["errored_trials"] == {"baseline": 0, "candidate": 1}
+
+    summary = exp.summarize(
+        baseline_rows=baseline,
+        candidate_rows=candidate,
+        task_ids=["t1"],
+        baseline_label="b",
+        candidate_label="c",
+    )
+    # The raised trial is a failed trial, and it is counted, not hidden.
+    assert summary["candidate_passes"] == 1
+    assert summary["candidate_trials"] == 2
+    assert summary["errored_trials"] == 1
+    assert "1 trial(s) raised" in exp.reported_metric_sentence(summary)
+
+    paths = exp.write_results(
+        output_dir=tmp_path / "out",
+        config={"experiment": "t"},
+        environment={"git": {}, "model": "m", "tasks": []},
+        baseline_rows=baseline,
+        candidate_rows=candidate,
+        summary=summary,
+        validation=validation,
+    )
+    written = json.loads(paths["validation"].read_text())
+    assert written["checks"]["no_errored_trials"] is False
+    assert "`no_errored_trials` | FAIL" in paths["report"].read_text(encoding="utf-8")
 
 
 def test_protocol_equality_rejects_a_mock_trial_in_a_measured_comparison():
@@ -640,8 +838,6 @@ def test_protocol_equality_rejects_a_mock_trial_in_a_measured_comparison():
         candidate_rows=candidate,
         task_ids=["t1"],
         trials_per_task=1,
-        baseline_model="m",
-        candidate_model="m",
     )
     assert result["identical_protocol"] is False
     assert result["checks"]["single_metrics_source"] is False
@@ -655,8 +851,6 @@ def test_protocol_equality_fails_when_the_arms_ran_different_tasks():
         candidate_rows=_rows("candidate", {"t2": [True]}),
         task_ids=["t1", "t2"],
         trials_per_task=1,
-        baseline_model="m",
-        candidate_model="m",
     )
     assert result["checks"]["same_task_set"] is False
 
@@ -671,8 +865,11 @@ def test_the_committed_task_sets_are_disjoint():
     )
     assert isolation["disjoint"] is True
     assert isolation["overlapping_tasks"] == []
-    assert len(isolation["search_tasks"]) == 10
-    assert len(isolation["holdout_tasks"]) == 5
+    assert isolation["search_tasks"] and isolation["holdout_tasks"]
+    search_config = exp.load_config(REPO_ROOT / "benchmarks" / "pass-rate" / "config.json")
+    holdout_config = exp.load_config(REPO_ROOT / "benchmarks" / "holdout" / "config.json")
+    assert isolation["search_tasks"] == sorted(search_config["tasks"])
+    assert isolation["holdout_tasks"] == sorted(holdout_config["tasks"])
 
 
 def test_overlapping_task_sets_are_reported(tmp_path: Path):
@@ -694,10 +891,12 @@ def test_overlapping_task_sets_are_reported(tmp_path: Path):
 def test_committed_holdout_config_is_a_two_arm_protocol():
     config = exp.load_config(REPO_ROOT / "benchmarks" / "holdout" / "config.json")
     assert config["task_set"] == "eval/holdout"
-    assert config["trials_per_task"] == 10
-    assert (
-        len(config["tasks"]) * config["trials_per_task"] * 2 == config["total_trials"]
-    )
+    assert config["tasks"] and int(config["trials_per_task"]) >= 1
+    if "total_trials" in config:
+        assert (
+            len(config["tasks"]) * config["trials_per_task"] * 2
+            == config["total_trials"]
+        )
     assert config["arms"]["candidate"] is None
 
 
@@ -732,8 +931,6 @@ def _written_results(tmp_path: Path, baseline_spec, candidate_spec, trials: int)
         candidate_rows=candidate,
         task_ids=["t1"],
         trials_per_task=trials,
-        baseline_model="m",
-        candidate_model="m",
     )
     return exp.write_results(
         output_dir=tmp_path / "out",

@@ -187,7 +187,13 @@ def estimate_cost(
     extrapolate from: an estimate built on no measurement is not a cheap
     estimate, it is a fiction.
     """
-    measured = [r for r in rows if r.get("metrics_source") == met.MEASURED]
+    # A trial that raised has no measured usage; extrapolating from it as
+    # if it cost nothing would understate the estimate.
+    measured = [
+        r
+        for r in rows
+        if r.get("metrics_source") == met.MEASURED and not met.is_error_row(r)
+    ]
     if not measured:
         return {
             "basis_trials": 0,
@@ -324,7 +330,10 @@ async def verify_recorded_replays(
         )
 
     return {
-        "recordings_root": str(recordings_root),
+        # Repo-relative and POSIX: this report is committed as evidence
+        # and read on other machines, where an absolute path names
+        # nothing.
+        "recordings_root": exp.repo_relative(recordings_root, repo_root),
         "recordings_verified": len(directories),
         # What was replayed, so the report is readable without the tapes.
         # ``recorded_models`` distinguishes a provider recording from a
@@ -446,7 +455,13 @@ async def run_measurement_pipeline(
         },
         repo_root=repo_root,
     )
-    model = getattr(candidate_factory(), "MODEL", None) or "unknown"
+    # Declared models are provenance only. Whether both arms really ran
+    # on the same model is checked from what each trial row records.
+    arm_models = {
+        "baseline": exp.declared_model(baseline_factory),
+        "candidate": exp.declared_model(candidate_factory),
+    }
+    model = arm_models["candidate"] or "unknown"
     candidate_source = (
         Path(row["source_path"]) if row.get("source_path") else None
     )
@@ -462,6 +477,7 @@ async def run_measurement_pipeline(
         candidate_factory=candidate_factory,
         candidate_source=candidate_source,
         model=model,
+        arm_models=arm_models,
         trials=trials,
         workers=workers,
         checkpointer=checkpointer,
@@ -484,6 +500,7 @@ async def run_measurement_pipeline(
                 candidate_factory=candidate_factory,
                 candidate_source=candidate_source,
                 model=model,
+                arm_models=arm_models,
                 trials=trials,
                 workers=workers,
                 checkpointer=checkpointer,
@@ -516,6 +533,7 @@ async def _run_one_experiment(
     trials: int | None,
     workers: int | None,
     checkpointer: Any,
+    arm_models: dict[str, str | None] | None = None,
     tracker: trk.Tracker | None,
     on_trial: Callable[[str, dict[str, Any]], None] | None,
     record_trials_per_task: int,
@@ -550,6 +568,7 @@ async def _run_one_experiment(
             candidate_label: candidate_source,
         },
         model=model,
+        arm_models=arm_models,
         trials=n_trials,
         workers=n_workers,
         output_dir=output_root / experiment_id,

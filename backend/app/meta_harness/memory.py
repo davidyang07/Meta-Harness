@@ -4,10 +4,22 @@ Schema design per the step-8 engineering spec:
 
 - **namespace**: ``("learned_patterns", "<domain>")`` — e.g.
   ``("learned_patterns", "coding-agent")``.
-- **key**: UUID — dedup is by cumulative evidence, not by overwrite.
-- **value**: ``{pattern, mechanism_axis, score_delta, evidence_run_ids,
-  created_at}``  — compact text; NO full source code (would blow the
-  proposer's context budget).
+- **key**: derived from ``(run_id, thread_id, candidate)``. One accepted
+  candidate is one pattern. A deterministic key is what makes the write
+  idempotent: ``update_frontier`` is re-executed when a run resumes after
+  an interruption, and a random key turned that re-execution into a
+  duplicate pattern (AGENTS.md invariant 6).
+- **value**: ``{pattern, mechanism_axis, score_delta, metrics_source,
+  evidence_run_ids, candidate, thread_id, created_at}`` — compact text;
+  NO full source code (would blow the proposer's context budget).
+
+**Only measured results become patterns.** A mock-benchmarked run's
+"delta" is synthetic; stored as a pattern it would reach a real
+proposer's system prompt as a learned fact. ``add_pattern`` refuses any
+``metrics_source`` other than ``"measured"``, every stored value carries
+its source, and the proposer reads through ``patterns_for_proposer``,
+which drops anything not tagged measured — including patterns written
+before the tag existed.
 
 Ranking strategy (hackathon scope): **recency-weighted top-N** via
 ``asearch`` with ``limit=N``.  Embeddings (semantic search) are scope
@@ -15,9 +27,9 @@ creep for a 36-hour build; they require ``pgvector`` + an embedding
 model.  We sort results by ``created_at`` descending and return the
 top-N to inject into the proposer's ``--append-system-prompt``.
 
-Dedup strategy: keep both if two runs confirm the same pattern. Each
-has its own ``evidence_run_ids`` list so the proposer sees the
-cumulative evidence weight.
+Dedup strategy: keep both if two runs (or two candidates) confirm the
+same pattern. Each has its own ``evidence_run_ids`` list so the proposer
+sees the cumulative evidence weight.
 
 The store is DISTINCT from ``AsyncPostgresSaver`` (checkpointing).
 They share the same Postgres instance but manage different tables
@@ -26,7 +38,7 @@ They share the same Postgres instance but manage different tables
 
 from __future__ import annotations
 
-import uuid
+import hashlib
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator
@@ -38,6 +50,11 @@ from app.meta_harness.persistence import get_dsn
 # ── store lifecycle ──────────────────────────────────────────────────
 
 DEFAULT_DOMAIN = "coding-agent"
+
+#: The only ``metrics_source`` a stored pattern may carry. Kept as a
+#: literal rather than imported from ``metrics`` so this module's import
+#: graph stays as small as its job.
+MEASURED = "measured"
 
 
 @asynccontextmanager
@@ -64,6 +81,12 @@ def _namespace(domain: str = DEFAULT_DOMAIN) -> tuple[str, str]:
 # ── write ────────────────────────────────────────────────────────────
 
 
+def pattern_key(*, run_id: str, thread_id: str, candidate: str) -> str:
+    """Stable store key for the pattern one accepted candidate produced."""
+    material = "\x1f".join((run_id, thread_id, candidate)).encode("utf-8")
+    return hashlib.sha256(material).hexdigest()[:24]
+
+
 async def add_pattern(
     store: AsyncPostgresStore,
     *,
@@ -71,18 +94,36 @@ async def add_pattern(
     mechanism_axis: str,
     score_delta: float,
     run_id: str,
+    candidate: str,
+    metrics_source: str,
+    thread_id: str | None = None,
     domain: str = DEFAULT_DOMAIN,
 ) -> str:
-    """Write one pattern to the memory store. Returns the generated key.
+    """Write one pattern to the memory store. Returns its key.
 
     Called from ``update_frontier`` when a candidate is **accepted**.
+    Keyed on ``(run_id, thread_id, candidate)``, so writing the same
+    candidate's pattern twice — a resumed node re-executing — replaces
+    rather than duplicates it.
+
+    Raises ``ValueError`` for anything but a measured result: a pattern
+    is advice to a future proposer, and a mock score is not evidence.
     """
-    key = uuid.uuid4().hex[:12]
+    if metrics_source != MEASURED:
+        raise ValueError(
+            f"refusing to store a memory pattern from {metrics_source!r} scores; "
+            "only measured results may become cross-run memory"
+        )
+    thread = thread_id or run_id
+    key = pattern_key(run_id=run_id, thread_id=thread, candidate=candidate)
     value = {
         "pattern": pattern,
         "mechanism_axis": mechanism_axis,
         "score_delta": round(score_delta, 4),
+        "metrics_source": metrics_source,
         "evidence_run_ids": [run_id],
+        "candidate": candidate,
+        "thread_id": thread,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await store.aput(_namespace(domain), key, value)
@@ -98,9 +139,15 @@ async def search_patterns(
     domain: str = DEFAULT_DOMAIN,
     limit: int = 5,
     query: str | None = None,
+    measured_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Return the top-N most recent patterns for a domain, optionally
     filtered by ``query``.
+
+    ``measured_only`` drops every pattern not tagged
+    ``metrics_source == "measured"``, including untagged ones written
+    before the tag existed. Anything that feeds a proposer must set it;
+    see ``patterns_for_proposer``.
 
     Uses ``asearch`` with a wide pre-filter ``limit`` so a query that
     matches few rows can still scan past stale ones; the final
@@ -111,7 +158,8 @@ async def search_patterns(
     proposer uses.
     """
     ns = _namespace(domain)
-    pre_limit = limit if query is None else max(limit * 20, 100)
+    filtering = query is not None or measured_only
+    pre_limit = max(limit * 20, 100) if filtering else limit
     items = await store.asearch(ns, limit=pre_limit)
     results = []
     for item in items:
@@ -131,9 +179,23 @@ async def search_patterns(
             if needle in str(r.get("pattern", "")).lower()
             or needle in str(r.get("mechanism_axis", "")).lower()
         ]
+    if measured_only:
+        results = [r for r in results if r.get("metrics_source") == MEASURED]
     # Sort by created_at descending (newest first) for recency weighting.
     results.sort(key=lambda r: r.get("created_at", ""), reverse=True)
     return results[:limit]
+
+
+async def patterns_for_proposer(
+    store: AsyncPostgresStore,
+    *,
+    domain: str = DEFAULT_DOMAIN,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    """The patterns a proposer may be shown: measured ones only."""
+    return await search_patterns(
+        store, domain=domain, limit=limit, measured_only=True
+    )
 
 
 async def list_namespace(

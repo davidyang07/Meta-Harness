@@ -29,7 +29,16 @@ def frontier_entry(name: str, scores: dict[str, Any]) -> dict[str, Any]:
     Prefers the mean measured tokens-per-trial. Falls back to ``None``
     (unknown) rather than 0 so the domination rule can tell the two
     apart.
+
+    Raises ``ValueError`` for a result with no accuracy: a candidate that
+    was never benchmarked (one that failed validation, say) has no point
+    to put on the frontier, and 0.0 would be a fabricated one.
     """
+    if scores.get("accuracy") is None:
+        raise ValueError(
+            f"candidate {name!r} has no measured accuracy and cannot be a "
+            "frontier point"
+        )
     tokens = scores.get("mean_total_tokens_per_trial")
     if tokens is None:
         tokens = scores.get("median_total_tokens_per_trial")

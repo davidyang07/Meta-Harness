@@ -54,6 +54,7 @@ def test_proposer_prompt_never_mentions_a_holdout_task(tmp_path: Path):
         repo_root=tmp_path,
         parent_name="some-parent",
         thread_id="leak-check",
+        parent_source="runs/leak-check/threads/leak-check/agents/some-parent.py",
     )
 
     for task_id in _holdout_task_ids():
@@ -74,6 +75,7 @@ def test_proposer_prompt_scopes_the_proposer_to_its_own_branch(tmp_path: Path):
         repo_root=tmp_path,
         parent_name="p",
         thread_id="leak-check.fork.beef",
+        parent_source="agents/p.py",
     )
     root_prompt = prp._render_proposer_prompt(
         iteration=3,
@@ -81,6 +83,7 @@ def test_proposer_prompt_scopes_the_proposer_to_its_own_branch(tmp_path: Path):
         repo_root=tmp_path,
         parent_name="p",
         thread_id="leak-check",
+        parent_source="agents/p.py",
     )
     assert "leak-check.fork.beef" in fork_prompt
     assert "leak-check.fork.beef" not in root_prompt

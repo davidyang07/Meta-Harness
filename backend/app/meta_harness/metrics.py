@@ -41,6 +41,11 @@ MetricsSource = str  # "measured" | "mock"
 MEASURED = "measured"
 MOCK = "mock"
 
+#: ``status`` of a trial row. A row without one predates the field and
+#: ran to completion.
+TRIAL_OK = "ok"
+TRIAL_ERROR = "error"
+
 
 # ── pricing ───────────────────────────────────────────────────────────
 
@@ -170,6 +175,21 @@ class UsageRecorder:
             "cost_usd": round(sum(costs), 8) if cost_known else None,  # type: ignore[arg-type]
         }
 
+    def served_model(self, fallback: str | None = None) -> str | None:
+        """The model that answered this trial's calls.
+
+        Read from the responses, so a provider-side substitution shows up
+        here rather than being papered over by the harness' configured
+        name. A trial whose calls came from more than one model reports
+        them all, comma-joined and sorted, so two arms can be compared on
+        exactly what served them. A trial with no call falls back to the
+        harness' declared model.
+        """
+        models = sorted({str(c["model"]) for c in self.calls if c.get("model")})
+        if models:
+            return ",".join(models)
+        return fallback
+
     def to_trial_row(
         self,
         *,
@@ -178,19 +198,70 @@ class UsageRecorder:
         passed: bool,
         score: float,
         wall_time_s: float,
+        model: str | None = None,
     ) -> dict[str, Any]:
-        """Fold this trial's calls into one raw benchmark row."""
+        """Fold this trial's calls into one raw benchmark row.
+
+        ``model`` is the harness' declared model, used only when no call
+        reported one.
+        """
         totals = self.totals()
         return {
             "task_id": task_id,
             "trial": trial,
+            "status": TRIAL_OK,
             "passed": bool(passed),
             "score": float(score),
             "wall_time_s": round(wall_time_s, 3),
             "metrics_source": MEASURED,
+            "model": self.served_model(model),
             "calls": self.calls,
             **totals,
         }
+
+
+def error_trial_row(
+    *,
+    task_id: str,
+    trial: int,
+    error: BaseException | str,
+    wall_time_s: float,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """The row for a trial that raised instead of finishing.
+
+    The outcome is recorded as a failure, because the harness did not
+    produce a passing workspace, but nothing about its usage is claimed:
+    a trial that died part-way has token and cost figures that are
+    neither zero nor known, so they are ``None`` (see the module rule on
+    unknown values). ``status: "error"`` keeps it distinguishable from a
+    trial that ran to completion and failed its tests.
+    """
+    message = error if isinstance(error, str) else f"{type(error).__name__}: {error}"
+    return {
+        "task_id": task_id,
+        "trial": trial,
+        "status": TRIAL_ERROR,
+        "error": message,
+        "passed": False,
+        "score": 0.0,
+        "wall_time_s": round(wall_time_s, 3),
+        "metrics_source": MEASURED,
+        "model": model,
+        "calls": [],
+        "llm_calls": None,
+        "input_tokens": None,
+        "output_tokens": None,
+        "cache_creation_input_tokens": None,
+        "cache_read_input_tokens": None,
+        "total_tokens": None,
+        "cost_usd": None,
+    }
+
+
+def is_error_row(row: dict[str, Any]) -> bool:
+    """Whether a trial row records a trial that raised."""
+    return row.get("status") == TRIAL_ERROR
 
 
 def instrument_harness(harness: Any, recorder: UsageRecorder) -> None:
@@ -230,10 +301,12 @@ def mock_trial_metrics(
     return {
         "task_id": task_id,
         "trial": trial,
+        "status": TRIAL_OK,
         "passed": bool(passed),
         "score": 1.0 if passed else 0.0,
         "wall_time_s": 0.05,
         "metrics_source": MOCK,
+        "model": None,
         "llm_calls": 0,
         "input_tokens": int(total * 0.8),
         "output_tokens": int(total * 0.2),
@@ -256,6 +329,11 @@ def aggregate_trials(
     Raises ``ValueError`` if any row's ``metrics_source`` disagrees with
     the declared one — mixing a mock trial into a measured candidate is
     a correctness bug, not something to average over.
+
+    A trial that raised (``status: "error"``) counts as a trial and as a
+    failure, and is reported in ``errored_trials``. Its usage is unknown,
+    so it is left out of the token and call statistics rather than
+    averaged in as zero, and it makes the cost incomplete.
     """
     for row in rows:
         got = row.get("metrics_source")
@@ -264,25 +342,27 @@ def aggregate_trials(
                 f"cannot aggregate {got!r} trial into {metrics_source!r} result"
             )
 
-    totals = [int(r.get("total_tokens") or 0) for r in rows]
+    measured = [r for r in rows if not is_error_row(r)]
+    totals = [int(r.get("total_tokens") or 0) for r in measured]
     costs = [r.get("cost_usd") for r in rows]
     cost_complete = bool(costs) and all(c is not None for c in costs)
 
     return {
         "total_trials": len(rows),
         "passed_trials": sum(1 for r in rows if r.get("passed")),
+        "errored_trials": len(rows) - len(measured),
         "tokens": {
-            "input_tokens": sum(int(r.get("input_tokens") or 0) for r in rows),
-            "output_tokens": sum(int(r.get("output_tokens") or 0) for r in rows),
+            "input_tokens": sum(int(r.get("input_tokens") or 0) for r in measured),
+            "output_tokens": sum(int(r.get("output_tokens") or 0) for r in measured),
             "cache_creation_input_tokens": sum(
-                int(r.get("cache_creation_input_tokens") or 0) for r in rows
+                int(r.get("cache_creation_input_tokens") or 0) for r in measured
             ),
             "cache_read_input_tokens": sum(
-                int(r.get("cache_read_input_tokens") or 0) for r in rows
+                int(r.get("cache_read_input_tokens") or 0) for r in measured
             ),
             "total_tokens": sum(totals),
         },
-        "total_llm_calls": sum(int(r.get("llm_calls") or 0) for r in rows),
+        "total_llm_calls": sum(int(r.get("llm_calls") or 0) for r in measured),
         "total_wall_time_s": round(
             sum(float(r.get("wall_time_s") or 0.0) for r in rows), 3
         ),
@@ -297,37 +377,6 @@ def aggregate_trials(
         ),
         "cost_complete": cost_complete,
         "metrics_source": metrics_source,
-    }
-
-
-def combine_run_metrics(
-    *,
-    benchmark: dict[str, Any],
-    proposer: dict[str, Any],
-) -> dict[str, Any]:
-    """Combine benchmark (inner-loop) and proposer metrics for a whole run.
-
-    Kept separate as well as combined: the proposer runs on a different
-    model, on a different billing path (CLI subscription auth), and
-    conflating the two makes a per-candidate cost look ~10× larger than
-    it is.
-    """
-    b_cost = benchmark.get("total_cost_usd")
-    p_cost = proposer.get("total_cost_usd")
-    combined_known = b_cost is not None and p_cost is not None
-    return {
-        "benchmark": benchmark,
-        "proposer": proposer,
-        "combined": {
-            "total_tokens": int(
-                (benchmark.get("tokens") or {}).get("total_tokens") or 0
-            )
-            + int((proposer.get("tokens") or {}).get("total_tokens") or 0),
-            "total_cost_usd": (
-                round(float(b_cost) + float(p_cost), 6) if combined_known else None
-            ),
-            "cost_complete": combined_known,
-        },
     }
 
 

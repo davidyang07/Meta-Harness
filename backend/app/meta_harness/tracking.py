@@ -27,9 +27,40 @@ environment variables.
 
 from __future__ import annotations
 
+import functools
+import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
+
+_log = logging.getLogger(__name__)
+
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def _never_raises(fn: _F) -> _F:
+    """Contain any failure inside the tracking layer.
+
+    Tracking is instrumentation. A metrics backend that is down, a
+    malformed value, or a bug in this module must not fail a node, a
+    benchmark or an experiment that is spending real money, so every
+    entry point core logic can reach is wrapped in this.
+    """
+
+    @functools.wraps(fn)
+    def _wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 — instrumentation must not fail the run
+            _log.warning(
+                "tracking call %s failed and was skipped (%s: %s)",
+                fn.__name__,
+                type(exc).__name__,
+                exc,
+            )
+            return None
+
+    return _wrapper  # type: ignore[return-value]
 
 DEFAULT_PROJECT = "meta-harness"
 
@@ -134,6 +165,12 @@ class WandbTracker(Tracker):
     ``wandb_module`` is injectable so the translation from this
     interface into W&B's API can be tested without installing W&B and
     without a network call.
+
+    Every call goes through the run object ``wandb.init`` returned, never
+    the module-level ``wandb.log``/``wandb.finish``: those act on
+    whichever run is *current*, and with ``reinit=True`` that can be a
+    different run than this tracker's. Every call is also guarded — a
+    failure is recorded in ``errors`` and logged, never raised.
     """
 
     enabled = True
@@ -160,18 +197,36 @@ class WandbTracker(Tracker):
             reinit=True,
         )
         self.run_url = getattr(self._run, "url", None)
+        #: Failures swallowed by the guard, newest last.
+        self.errors: list[str] = []
+
+    def _guarded(self, what: str, call: Callable[[], Any]) -> None:
+        try:
+            call()
+        except Exception as exc:  # noqa: BLE001 — instrumentation must not fail the run
+            message = f"{what}: {type(exc).__name__}: {exc}"
+            self.errors.append(message)
+            _log.warning("wandb %s", message)
 
     def log(self, metrics: dict[str, Any], *, step: int | None = None) -> None:
-        if step is None:
-            self._wandb.log(metrics)
-        else:
-            self._wandb.log(metrics, step=step)
+        def _call() -> None:
+            if step is None:
+                self._run.log(metrics)
+            else:
+                self._run.log(metrics, step=step)
+
+        self._guarded("log", _call)
 
     def log_table(
         self, name: str, columns: list[str], rows: list[list[Any]]
     ) -> None:
-        table = self._wandb.Table(columns=list(columns), data=[list(r) for r in rows])
-        self._wandb.log({name: table})
+        def _call() -> None:
+            table = self._wandb.Table(
+                columns=list(columns), data=[list(r) for r in rows]
+            )
+            self._run.log({name: table})
+
+        self._guarded("log_table", _call)
 
     def log_artifact(
         self,
@@ -181,22 +236,28 @@ class WandbTracker(Tracker):
         artifact_type: str = "results",
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        artifact = self._wandb.Artifact(
-            name=name, type=artifact_type, metadata=dict(metadata or {})
-        )
-        path = Path(path)
-        if path.is_dir():
-            artifact.add_dir(str(path))
-        else:
-            artifact.add_file(str(path))
-        self._wandb.log_artifact(artifact)
+        def _call() -> None:
+            artifact = self._wandb.Artifact(
+                name=name, type=artifact_type, metadata=dict(metadata or {})
+            )
+            target = Path(path)
+            if target.is_dir():
+                artifact.add_dir(str(target))
+            else:
+                artifact.add_file(str(target))
+            self._run.log_artifact(artifact)
+
+        self._guarded("log_artifact", _call)
 
     def set_summary(self, values: dict[str, Any]) -> None:
-        for key, value in values.items():
-            self._run.summary[key] = value
+        def _call() -> None:
+            for key, value in values.items():
+                self._run.summary[key] = value
+
+        self._guarded("set_summary", _call)
 
     def finish(self) -> None:
-        self._wandb.finish()
+        self._guarded("finish", lambda: self._run.finish())
 
 
 def _import_wandb() -> Any:
@@ -260,6 +321,7 @@ def make_tracker(
 # ──────────────────────────────────────────────────────────────────────
 
 
+@_never_raises
 def log_trial(tracker: Tracker, row: dict[str, Any], *, arm: str | None = None) -> None:
     """One benchmark trial: outcome, tokens, cost, wall time."""
     if not tracker.enabled:
@@ -280,6 +342,7 @@ def log_trial(tracker: Tracker, row: dict[str, Any], *, arm: str | None = None) 
     )
 
 
+@_never_raises
 def log_iteration(
     tracker: Tracker,
     *,
@@ -332,6 +395,7 @@ def log_iteration(
         )
 
 
+@_never_raises
 def log_frontier(
     tracker: Tracker, frontier: dict[str, Any], *, thread_id: str | None = None
 ) -> None:
@@ -365,6 +429,7 @@ def log_frontier(
     )
 
 
+@_never_raises
 def log_experiment(
     tracker: Tracker,
     *,
