@@ -45,32 +45,20 @@ def test_line_does_not_contain_extension():
     assert not line.contains(Point(3, 0))
 
 
-# ── Adversarial tests (option 3 hardening, 2026-04-25) ──────────────
-# Search-space rationale lives in docs/PROJECT_KNOWLEDGE_BASE.md §28.5.
-
-
 def test_line_contains_uses_floating_point_tolerance():
-    """The README spec is explicit: tolerance is 1e-6. A point offset
-    by less than that from the line should be considered ON the line.
-    Naive implementations that test collinearity with == fail this."""
+    """A point within the README's 1e-6 tolerance of the segment is on it."""
     line = Line(Point(0, 0), Point(2, 0))
-    # A point ~1e-7 above the segment is well within the 1e-6 tolerance
     near_point = Point(1.0, 1e-7)
     assert line.contains(near_point), (
-        "Spec requires 1e-6 floating-point tolerance for contains(). "
-        f"Point({near_point.x}, {near_point.y}) is 1e-7 off the line, "
-        "which is well within tolerance — must return True."
+        f"Point({near_point.x}, {near_point.y}) should be on the segment."
     )
 
 
 def test_line_contains_zero_length_segment():
-    """Edge case: a degenerate segment where start == end. The single
-    point IS on the segment; nothing else is. Naive parametric
-    implementations divide by (end - start) and crash here."""
+    """A segment whose start and end coincide contains that point only."""
     degenerate = Line(Point(1, 1), Point(1, 1))
     assert degenerate.contains(Point(1, 1)), (
-        "A zero-length segment contains its (single) endpoint. "
-        "Implementations must handle this without dividing by zero."
+        "A zero-length segment contains its (single) endpoint."
     )
     assert not degenerate.contains(Point(2, 2)), (
         "A zero-length segment at (1,1) does NOT contain other points."

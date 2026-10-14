@@ -1,6 +1,6 @@
 import pytest
 
-from stats import mean, median  # noqa: F401 — median doesn't exist yet, that's the task
+from stats import mean, median
 
 
 def test_mean_basic():
@@ -37,30 +37,22 @@ def test_median_negative():
     assert median([-3, -1, -2]) == -2
 
 
-# ── Adversarial tests (option 3 hardening, 2026-04-25) ──────────────
-# Search-space rationale lives in docs/PROJECT_KNOWLEDGE_BASE.md §28.2.
-
-
 def test_median_does_not_mutate_input():
-    """median() must not modify its argument. The natural Python
-    implementation ``values.sort()`` mutates; the correct one uses
-    ``sorted(values)``. This is a real-world contract for stats helpers."""
+    """median() leaves its argument unchanged."""
     xs = [3, 1, 2]
     median(xs)
     assert xs == [3, 1, 2], (
-        f"median() mutated its input; expected [3, 1, 2], got {xs}. "
-        "Use sorted(values) instead of values.sort()."
+        f"median() mutated its input; expected [3, 1, 2], got {xs}."
     )
 
 
 def test_median_with_duplicates():
-    """Duplicates must be counted, not deduped. Catches implementations
-    that defensively call set(values) somewhere."""
+    """Repeated values each count."""
     assert median([1, 1, 1, 2]) == 1.0
     assert median([2, 2, 3, 3]) == 2.5
 
 
 def test_median_two_element_average():
-    """Sanity: two-element list returns the average, not the first."""
+    """The median of two values is their mean."""
     assert median([1, 3]) == 2.0
     assert median([10, 20]) == 15.0

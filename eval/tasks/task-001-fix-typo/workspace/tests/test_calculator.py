@@ -24,24 +24,14 @@ def test_sub_self():
     assert sub(7, 7) == 0
 
 
-# ── Adversarial tests (option 3 hardening, 2026-04-25) ──────────────
-# These probe contract details the baseline harness can miss without
-# explicit attention. Search-space rationale lives in
-# docs/PROJECT_KNOWLEDGE_BASE.md §28.1.
-
-
 def test_add_returns_int_when_given_ints():
-    """add(int, int) must return an int. A naive overcorrection like
-    ``return float(a) + b`` would fail this. Note: ``bool`` is a subclass
-    of ``int`` in Python, so we exclude it explicitly."""
+    """add() of two ints returns an int (and not a bool)."""
     result = add(2, 3)
     assert isinstance(result, int) and not isinstance(result, bool)
 
 
 def test_sub_function_unchanged():
-    """The instruction is explicit: do NOT change sub(). This test
-    verifies the function body is exactly ``return a - b`` (modulo
-    whitespace). Catches candidates that "clean up" or rewrite the file."""
+    """sub() is left exactly as it was."""
     src = inspect.getsource(sub)
     body_lines = [
         line.strip()
@@ -54,9 +44,7 @@ def test_sub_function_unchanged():
 
 
 def test_module_only_defines_add_and_sub():
-    """Anti-bloat: the module should still only expose add and sub as
-    public functions. Catches candidates that add helpers the task
-    didn't ask for."""
+    """The module's public functions are exactly add and sub."""
     public_funcs = {
         name
         for name, obj in inspect.getmembers(calculator, inspect.isfunction)
