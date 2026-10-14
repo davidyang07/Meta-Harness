@@ -1,13 +1,17 @@
 """Smoke-test the Step 10 FastAPI/SSE backend.
 
-Run with a server already listening, for example:
+Run with a server already listening. Start it with `meta-harness serve`,
+not a bare uvicorn (which picks an event loop psycopg cannot use on
+Windows and silently degrades checkpointing to in-memory):
 
-    cd backend
-    uv run uvicorn app.main:app --port 8000 --reload
+    uv run meta-harness serve --port 8000
 
 Then from the repo root:
 
     uv run python scripts/smoke_api.py
+
+META_HARNESS_API_URL overrides the server address. If the server was
+started with META_HARNESS_API_TOKEN, export the same value here.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ import socket
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -36,7 +41,8 @@ from app.streaming import (
 )
 
 
-BASE_URL = os.environ.get("META_HARNESS_API_URL", "http://localhost:8000")
+BASE_URL = os.environ.get("META_HARNESS_API_URL", "http://localhost:8000").rstrip("/")
+API_TOKEN = os.environ.get("META_HARNESS_API_TOKEN", "").strip()
 
 
 def request_json(
@@ -47,11 +53,14 @@ def request_json(
     expected_status: int = 200,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     data = None if body is None else json.dumps(body).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if API_TOKEN:
+        headers["Authorization"] = f"Bearer {API_TOKEN}"
     request = urllib.request.Request(
         BASE_URL + path,
         data=data,
         method=method,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
     )
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
@@ -84,7 +93,9 @@ def collect_sse_events(
     *,
     timeout_s: float = 10.0,
 ) -> set[str]:
-    request = urllib.request.Request(BASE_URL + f"/runs/{run_id}/stream")
+    # EventSource cannot send headers, so SSE routes take ?token=.
+    query = f"?token={urllib.parse.quote(API_TOKEN, safe='')}" if API_TOKEN else ""
+    request = urllib.request.Request(BASE_URL + f"/runs/{run_id}/stream{query}")
     seen: set[str] = set()
     current_event: str | None = None
     deadline = time.monotonic() + timeout_s
