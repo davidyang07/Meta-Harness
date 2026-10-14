@@ -34,6 +34,11 @@ def _mods_summary(mods: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _proposer_prior(mods: dict[str, Any]) -> str | None:
+    prior = mods.get("proposer_prior")
+    return prior if isinstance(prior, str) and prior.strip() else None
+
+
 def _validate_mods(mods: dict[str, Any]) -> None:
     """Reject mods that are not outer-loop state keys, or that are identity."""
     allowed = set(MetaHarnessState.__annotations__) - _IMMUTABLE_KEYS
@@ -84,6 +89,9 @@ async def fork_run(
             "parent_thread_id": metadata.parent_thread_id,
             "parent_checkpoint_id": metadata.parent_checkpoint_id,
             "mods_summary": _mods_summary(metadata.mods),
+            # The prior is the human-readable reason the fork exists; the
+            # dashboard shows it on the fork card instead of the key names.
+            "proposer_prior": _proposer_prior(metadata.mods),
         },
     )
     return {

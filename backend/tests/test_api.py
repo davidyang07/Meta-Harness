@@ -262,6 +262,13 @@ def test_run_checkpoint_fork_branch_memory_api_flow():
                 "fork-created",
             }.issubset(event_types)
             assert ("branch-cancelled" in event_types) == branch_was_cancelled
+            # The fork card shows the prior a person wrote, not key names.
+            fork_events = [
+                event
+                for event in event_registry.history(channel_for_run(run_name))
+                if event.event_type == "fork-created"
+            ]
+            assert fork_events[0].data["proposer_prior"] == "api test prior"
     finally:
         clear_run_state()
         clear_branch_state()
