@@ -1052,7 +1052,7 @@ sed, head, tail, find, diff, make`. **No** `curl, wget, ssh`.
 `error_message` is set.
 
 This expands Appendix C §C.6.2's `write_file` fallback into the formal
-tool list; both `INTERFACES.md` and `ARCHITECTURE_SECTION_1.md` are now
+tool list; both `INTERFACES.md` and `docs/history/ARCHITECTURE_SECTION_1.md` are now
 the canonical source for the tool count (six). `write_file`, like the
 other five tools, is part of the FIXED contract — not overridable by
 candidates.

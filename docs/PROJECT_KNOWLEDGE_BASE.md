@@ -2654,7 +2654,7 @@ better story.
 ### 19.1 Demo prep checklist (the morning of)
 
 - [ ] Postgres healthy: `docker compose -f infra/docker-compose.yml ps`
-- [ ] Backend running on `:8000`: `cd backend && uv run uvicorn app.main:app --port 8000 --reload`
+- [ ] Backend running on `:8000`: `uv run meta-harness serve --port 8000` (never a bare `uvicorn app.main:app`; see AGENTS.md)
 - [ ] Frontend running on `:3000`: `cd frontend/dashboard && npm run dev`
 - [ ] Run `bash scripts/demo_acceptance.sh` end-to-end and confirm DEMO READY (LEVEL 1)
 - [ ] Test count check: `cd backend && uv run pytest tests/ -q`
@@ -2963,16 +2963,16 @@ The keystone files, sorted by likelihood of "I need to know how X works":
 
 ### Docs (read in this order)
 
-1. `ARCHITECTURE_SECTION_1.md` (root) — locked architecture
+1. `docs/history/ARCHITECTURE_SECTION_1.md` — locked architecture
 2. `docs/PROJECT_LAYOUT.md` — repo tree + naming rules
 3. `docs/INTERFACES.md` — every cross-component contract (canonical)
 4. `docs/BUILD_ORDER.md` — 13 verified steps
 5. `docs/DEFINITION_OF_DONE.md` — formal acceptance test
 6. `docs/TEAM_HANDOFF.md` — 4-person coordination
-7. `relay_metaharness_v7.md` — original design doc (the *why*)
-8. `relay_v7_appendix_a_worktrees.md` — concurrent branches deep-dive
-9. `relay_v7_appendix_b_metaharness_internals.md` — Stanford repo internals
-10. `relay_v7_appendix_c_inner_loop.md` — 5-phase agent design
+7. `docs/history/relay_metaharness_v7.md` — original design doc (the *why*)
+8. `docs/history/relay_v7_appendix_a_worktrees.md` — concurrent branches deep-dive
+9. `docs/history/relay_v7_appendix_b_metaharness_internals.md` — Stanford repo internals
+10. `docs/history/relay_v7_appendix_c_inner_loop.md` — 5-phase agent design
 11. `frontend/DESIGN.md` — frontend layout + visual decisions
 12. `skills/meta-harness-coding-agent/SKILL.md` — the proposer's tool
 
@@ -3451,7 +3451,7 @@ Canonical sources, in order of authority:
 
 - `docs/INTERFACES.md` — every cross-boundary contract (§0 Amendments first)
 - `docs/CAPABILITIES.md` — capability → code → test → evidence
-- `ARCHITECTURE_SECTION_1.md` — the locked architecture
-- `relay_metaharness_v7.md` + appendices — historical design records
+- `docs/history/ARCHITECTURE_SECTION_1.md` — the locked architecture
+- `docs/history/relay_metaharness_v7.md` + appendices — historical design records
 - This document — the synthesis, historical in tone, current in the
   sections that have been revised

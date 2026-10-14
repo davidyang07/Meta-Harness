@@ -12,7 +12,7 @@
 The repo is a **uv workspace** with two Python packages (`sdk/`, `backend/`),
 a Next.js app (`frontend/`), and supporting directories. Every Python file
 below has a one-line purpose annotation. Every locked decision in
-`ARCHITECTURE_SECTION_1.md` is reflected in placement.
+`docs/history/ARCHITECTURE_SECTION_1.md` is reflected in placement.
 
 ```
 meta-harness/                                              # Repo root (uv workspace)
@@ -21,13 +21,9 @@ meta-harness/                                              # Repo root (uv works
 ├── .gitignore
 ├── Makefile                                               # `make verify` and the routine entry points
 ├── pyproject.toml                                         # uv workspace: members = [sdk, backend]
-├── ARCHITECTURE_SECTION_1.md                              # Reference: locked architecture
-├── relay_metaharness_v7.md                                # Reference: v7 canonical build doc
-├── relay_v7_appendix_a_worktrees.md                       # Reference: concurrent branches
-├── relay_v7_appendix_b_metaharness_internals.md           # Reference: Stanford repo deep-dive
-├── relay_v7_appendix_c_inner_loop.md                      # Reference: 5-phase coding agent
 │
 ├── docs/
+│   ├── history/                                           # Historical design records (see its README)
 │   ├── PROJECT_LAYOUT.md                                  # ← this file
 │   ├── INTERFACES.md                                      # All cross-component contracts
 │   ├── CAPABILITIES.md                                    # Capability → code → validating command
@@ -143,13 +139,13 @@ meta-harness/                                              # Repo root (uv works
    only the library `pip install meta_harness`; users who want the CLI
    `pip install -e ./backend` (or both via the workspace install).
 
-4. **Reference docs (relay_metaharness_v7.md and the three appendices
-   plus ARCHITECTURE_SECTION_1.md) live at the repo root**, not in
-   `docs/`. Phase-0 execution artifacts (this file, INTERFACES.md,
+4. **Historical design records (docs/history/relay_metaharness_v7.md, the
+   three appendices and docs/history/ARCHITECTURE_SECTION_1.md) live in
+   `docs/history/`**, apart from the current contracts. Phase-0 execution artifacts (this file, INTERFACES.md,
    BUILD_ORDER.md, DEFINITION_OF_DONE.md) live in `docs/`.
 
 5. **Demo entrypoints (running locally):**
    - `docker compose -f infra/docker-compose.yml up -d postgres`
-   - `uvicorn app.main:app --reload --port 8000` (in `backend/`)
+   - `uv run meta-harness serve --port 8000` (never a bare `uvicorn app.main:app`: on Windows it picks an event loop psycopg cannot use)
    - `npm run dev` (in `frontend/`, serves on `:3000`)
    - `meta-harness loop --domain coding-agent` to start a run from the CLI

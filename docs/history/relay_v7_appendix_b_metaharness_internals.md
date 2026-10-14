@@ -6,8 +6,8 @@
 > behaviour and its aspirational wording — including phrasing like
 > "reversible by construction" — is not a claim about the shipped system.
 > For what is actually implemented and how it is validated, read
-> [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) and
-> [`docs/INTERFACES.md`](docs/INTERFACES.md) (§0 Amendments).
+> [`docs/CAPABILITIES.md`](../CAPABILITIES.md) and
+> [`docs/INTERFACES.md`](../INTERFACES.md) (§0 Amendments).
 
 *A deep-dive into how Stanford's Meta-Harness actually works internally, and a precise spec for what we ship: the inner harness (a minimal coding agent) and the outer meta-harness skill (the proposer's instruction set).*
 

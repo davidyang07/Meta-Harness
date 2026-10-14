@@ -281,3 +281,6 @@ CLAUDE.md
 # Locally generated capability-evidence document. `meta-harness report
 # capability-evidence` derives it on demand from committed artifacts.
 /docs/CAPABILITY_EVIDENCE.md
+
+# Agent worktrees created by local tooling
+.claude/worktrees/

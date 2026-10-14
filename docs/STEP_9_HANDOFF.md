@@ -187,6 +187,6 @@ If future developers need cancellation status or branch lineage inside `MetaHarn
 During verification, a wider pytest run hit Windows permission errors while creating or removing pytest temp/cache directories. Some generated temp artifacts may exist under:
 
 - `backend/pytest-cache-files-*`
-- `C:\Users\danda\.codex\memories\pytest-tmp`
+- a pytest temp directory under the developer's home directory
 
 Those artifacts are not part of Step 9 and should not be checked in.

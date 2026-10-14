@@ -101,13 +101,8 @@ meta-harness/
 ├── pyproject.toml                                       # uv workspace root: members = [sdk, backend]
 ├── uv.lock
 │
-├── ARCHITECTURE_SECTION_1.md                            # Locked architecture (NO touching without ratification)
-├── relay_metaharness_v7.md                              # Reference: v7 canonical build doc
-├── relay_v7_appendix_a_worktrees.md                     # Reference: Appendix A — concurrent branches
-├── relay_v7_appendix_b_metaharness_internals.md         # Reference: Appendix B — Stanford internals
-├── relay_v7_appendix_c_inner_loop.md                    # Reference: Appendix C — 5-phase coding agent
-│
 ├── docs/                                                # Phase-0 artifacts (canonical contracts)
+│   ├── history/                                         # Historical design records (relay v7, ARCHITECTURE_SECTION_1)
 │   ├── PROJECT_LAYOUT.md
 │   ├── INTERFACES.md                                    # READ THIS — every cross-component contract
 │   ├── BUILD_ORDER.md                                   # 13 steps, DoD per step
@@ -187,7 +182,7 @@ meta-harness/
 
 ## 2. The Architecture — Two Loops, One SKILL.md, Streaming Dashboard
 
-This is a refresher. The full version is `ARCHITECTURE_SECTION_1.md`.
+This is a refresher. The full version is `docs/history/ARCHITECTURE_SECTION_1.md`.
 
 ```
                                        ┌───────────────────────────────────────────────────────────────┐
@@ -280,15 +275,15 @@ them without explicit ratification.
 
 | Doc | When to read | What it covers |
 |---|---|---|
-| `ARCHITECTURE_SECTION_1.md` | First | Locked 2-tier architecture + the locked decisions |
+| `docs/history/ARCHITECTURE_SECTION_1.md` | First | Locked 2-tier architecture + the locked decisions |
 | `docs/PROJECT_LAYOUT.md` | First | The directory tree + naming risk callouts |
 | `docs/INTERFACES.md` | **Always** | Every cross-component contract (state schemas, JSON, REST, SSE, tool I/O, override points, SKILL.md schema) |
 | `docs/BUILD_ORDER.md` | When picking a step | DoD for each step + what each step unblocks |
 | `docs/DEFINITION_OF_DONE.md` | Before demo | The demo arc as the formal acceptance test (binary checklist) |
-| `relay_metaharness_v7.md` | For the why | The canonical hackathon build doc (3 properties, demo arc, pitch) |
-| `relay_v7_appendix_a_worktrees.md` | When working on step 9 | Concurrent branches via `asyncio.create_task` (NOT `gather`) + 3 named gotchas |
-| `relay_v7_appendix_b_metaharness_internals.md` | When working on step 6+ | Stanford repo deep-dive; SKILL.md skeleton; outer-loop phase mechanics |
-| `relay_v7_appendix_c_inner_loop.md` | When working on inner loop | 5-phase agent + 6 tools + 11 override points |
+| `docs/history/relay_metaharness_v7.md` | For the why | The canonical hackathon build doc (3 properties, demo arc, pitch) |
+| `docs/history/relay_v7_appendix_a_worktrees.md` | When working on step 9 | Concurrent branches via `asyncio.create_task` (NOT `gather`) + 3 named gotchas |
+| `docs/history/relay_v7_appendix_b_metaharness_internals.md` | When working on step 6+ | Stanford repo deep-dive; SKILL.md skeleton; outer-loop phase mechanics |
+| `docs/history/relay_v7_appendix_c_inner_loop.md` | When working on inner loop | 5-phase agent + 6 tools + 11 override points |
 | `skills/meta-harness-coding-agent/SKILL.md` | When debugging proposer | The literal text the proposer reads on every iteration |
 
 **Phase 1 decisions already resolved (DO NOT relitigate):**
@@ -370,8 +365,7 @@ refactor.** Once it's done:
 
 ### 4.6 Claude Code subprocess details
 
-- The `claude` CLI must be on `PATH`. It is at this checkpoint:
-  `/Users/mo/.local/bin/claude` v2.1.119.
+- The `claude` CLI must be on `PATH` (v2.1.119 at this checkpoint).
 - The user must be logged in (subscription auth) — `claude /login`
   if not.
 - The proposer subprocess takes **~2–3 minutes** for a single
@@ -522,7 +516,7 @@ event types with 500-class error (per §7.3). `POST /runs` returns
 
 **DoD command:**
 ```bash
-(cd backend && uv run uvicorn app.main:app --port 8000 --reload &) && sleep 2
+(cd backend && uv run meta-harness serve --port 8000 &) && sleep 2
 uv run python scripts/smoke_api.py
 # exercises POST /runs (asserts 201 + Location), checkpoint listing,
 # fork creation, SSE stream, and asserts emit() of an unregistered

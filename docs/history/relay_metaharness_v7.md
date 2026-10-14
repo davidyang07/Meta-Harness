@@ -6,8 +6,8 @@
 > behaviour and its aspirational wording — including phrasing like
 > "reversible by construction" — is not a claim about the shipped system.
 > For what is actually implemented and how it is validated, read
-> [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) and
-> [`docs/INTERFACES.md`](docs/INTERFACES.md) (§0 Amendments).
+> [`docs/CAPABILITIES.md`](../CAPABILITIES.md) and
+> [`docs/INTERFACES.md`](../INTERFACES.md) (§0 Amendments).
 
 *A great proof-of-concept that maps the Stanford Meta-Harness loop onto LangGraph state machines, with rewind, fork, and memory.*
 *Secure, consistent, reversible — by construction.*

@@ -258,7 +258,7 @@ memory.py, events.py}`, `backend/tests/test_api.py`,
 
 **Done when.**
 ```bash
-(cd backend && uv run uvicorn app.main:app --port 8000 --reload &) \
+(cd backend && uv run meta-harness serve --port 8000 &) \
   && sleep 2 \
   && uv run python scripts/smoke_api.py
 # scripts/smoke_api.py exercises: POST /runs (asserts 201 + Location),
@@ -357,7 +357,7 @@ bash scripts/demo_acceptance.sh
   before continuing.
 - **No backfill.** If a step's DoD fails, fix the step before moving
   on. Don't paper over with a TODO that gets resolved "later."
-- **Reference docs are frozen.** ARCHITECTURE_SECTION_1.md,
+- **Reference docs are frozen.** docs/history/ARCHITECTURE_SECTION_1.md,
   PROJECT_LAYOUT.md, INTERFACES.md, DEFINITION_OF_DONE.md are the
   canonical contracts. If implementation reveals a contract is wrong,
   edit the doc + restate the change before continuing.

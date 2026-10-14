@@ -16,7 +16,7 @@ contracts live, and which behaviours are deliberate design boundaries.
 When there is disagreement, use this precedence:
 
 1. `docs/INTERFACES.md` (cross-component contracts)
-2. `ARCHITECTURE_SECTION_1.md` (locked architecture decisions)
+2. `docs/history/ARCHITECTURE_SECTION_1.md` (locked architecture decisions)
 3. `docs/PROJECT_LAYOUT.md` (placement and naming constraints)
 4. `docs/DEFINITION_OF_DONE.md` (acceptance criteria)
 5. `docs/BUILD_ORDER.md` (step DoD sequencing)
