@@ -50,6 +50,8 @@ export function ForkModal({ candidateName, checkpointId, parentThreadId, onClose
       });
       // Only a fork the backend actually accepted becomes a fork event.
       // Recording one on failure would draw a branch that does not exist.
+      // The backend also announces it (fork-created); the thread id is
+      // what lets the reducer recognise the two as one fork.
       dispatch({
         type: 'ADD_FORK_EVENT',
         payload: {
@@ -59,6 +61,8 @@ export function ForkModal({ candidateName, checkpointId, parentThreadId, onClose
           prior: prior.trim(),
           branchId,
           rationale: 'Manual fork rerun from dashboard',
+          threadId: result.thread_id,
+          origin: 'dashboard',
         },
       });
       // Pick up the new branch immediately rather than waiting for SSE.

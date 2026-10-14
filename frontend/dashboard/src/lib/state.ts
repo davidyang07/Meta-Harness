@@ -9,11 +9,15 @@ import {
 } from "react";
 import { createElement } from "react";
 import type {
+  CandidateStatus,
   DashboardAction,
   DashboardState,
+  ForkEvent,
+  FrontierUpdate,
   IterationChapter,
   LogEntry,
   TreeNode,
+  TreeNodePatch,
 } from "./types";
 
 /**
@@ -27,6 +31,11 @@ import type {
  */
 export function nodeKey(node: { threadId?: string; candidate: string }): string {
   return `${node.threadId ?? ""}::${node.candidate}`;
+}
+
+/** Identity of a fork: its thread when known, else its branch id. */
+export function forkKey(fork: Pick<ForkEvent, "threadId" | "branchId">): string {
+  return fork.threadId ?? fork.branchId;
 }
 
 const initialTree: TreeNode[] = [
@@ -203,10 +212,118 @@ export const demoFixtureState: Partial<DashboardState> = {
       branchId: "fork.abc12345",
       rationale:
         "iteration 2's hash-strictness regressed; try the orthogonal direction",
+      origin: "fixture",
     },
   ],
   selectedNode: "more-specific-descriptions",
 };
+
+/** Drop undefined fields so a partial update leaves them as they were. */
+function definedFields<T extends object>(value: T): Partial<T> {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, v]) => v !== undefined),
+  ) as Partial<T>;
+}
+
+function mergeNode(existing: TreeNode | undefined, patch: TreeNodePatch): TreeNode {
+  const fields = definedFields(patch);
+  if (!existing) {
+    return {
+      parent_candidate_name: null,
+      iteration: 0,
+      status: "seed",
+      scores: { accuracy: 0 },
+      delta: null,
+      ...fields,
+      candidate: patch.candidate,
+    };
+  }
+  return {
+    ...existing,
+    ...fields,
+    // A later event without lineage must not erase what an earlier one said.
+    parent_candidate_name: fields.parent_candidate_name ?? existing.parent_candidate_name,
+    iteration: fields.iteration || existing.iteration,
+    isForkBranch: Boolean(fields.isForkBranch || existing.isForkBranch),
+  };
+}
+
+/**
+ * The thread a node belongs to. Nodes recorded before the backend
+ * stamped thread ids belong to the run's root thread.
+ */
+function threadOf(threadId: string | undefined, state: DashboardState): string {
+  return threadId ?? state.run?.threadId ?? "";
+}
+
+/** What a frontier update says about the candidate it decided on. */
+function decidedStatus(update: FrontierUpdate): CandidateStatus | null {
+  if (update.status === "smoke_failed") return "smoke_failed";
+  const isBest = Boolean(update.candidate) && update.bestCandidate === update.candidate;
+  if (update.accepted === true) return isBest ? "best" : "accepted";
+  if (update.accepted === false) return "rejected";
+  if (update.status === "rejected") return "rejected";
+  if (update.status === "best" || update.status === "accepted") {
+    return isBest ? "best" : "accepted";
+  }
+  return null;
+}
+
+function applyFrontierUpdate(state: DashboardState, update: FrontierUpdate): TreeNode[] {
+  const decided = decidedStatus(update);
+  // Events from before the backend reported a verdict carry only the
+  // frontier, so frontier membership is the best available signal.
+  const legacy = update.accepted === undefined && update.status === undefined;
+  return state.tree.map(node => {
+    // A fork's frontier says nothing about main's nodes, and vice versa:
+    // two branches can disagree about which candidate is best.
+    if (
+      update.threadId !== undefined &&
+      threadOf(node.threadId, state) !== update.threadId
+    ) {
+      return node;
+    }
+    if (update.candidate && node.candidate === update.candidate) {
+      return decided ? { ...node, status: decided, delta: update.delta } : node;
+    }
+    if (update.bestCandidate && node.candidate === update.bestCandidate) {
+      const delta = legacy && !update.candidate ? update.delta : node.delta;
+      return { ...node, status: "best", delta };
+    }
+    if (update.bestCandidate && node.status === "best") {
+      // Superseded, not rejected: it was accepted when it was measured.
+      return { ...node, status: node.parent_candidate_name ? "accepted" : "seed" };
+    }
+    if (legacy && update.frontier.includes(node.candidate)) {
+      return { ...node, status: "accepted" };
+    }
+    return node;
+  });
+}
+
+function addForkEvent(forks: ForkEvent[], incoming: ForkEvent): ForkEvent[] {
+  const key = forkKey(incoming);
+  const idx = forks.findIndex(f => forkKey(f) === key);
+  if (idx === -1) return [...forks, incoming];
+  // One fork, reported twice. The dashboard's own record knows the prior
+  // and the node it was forked from; the stream's knows only ids.
+  const existing = forks[idx];
+  const merged =
+    incoming.origin === "stream"
+      ? { ...incoming, ...existing }
+      : { ...existing, ...incoming };
+  const next = [...forks];
+  next[idx] = merged;
+  return next;
+}
+
+function sameThread(
+  a: string | undefined,
+  b: string | undefined,
+  state: DashboardState,
+): boolean {
+  return threadOf(a, state) === threadOf(b, state);
+}
 
 function reducer(state: DashboardState, action: DashboardAction): DashboardState {
   switch (action.type) {
@@ -218,24 +335,13 @@ function reducer(state: DashboardState, action: DashboardAction): DashboardState
       return { ...state, tree: action.payload };
     case "ADD_TREE_NODE": {
       const key = nodeKey(action.payload);
-      const existing = state.tree.find(n => nodeKey(n) === key);
-      const merged: TreeNode = existing
-        ? {
-            ...existing,
-            ...action.payload,
-            parent_candidate_name:
-              action.payload.parent_candidate_name ?? existing.parent_candidate_name,
-            iteration: action.payload.iteration || existing.iteration,
-            hypothesis: action.payload.hypothesis ?? existing.hypothesis,
-            axis: action.payload.axis ?? existing.axis,
-            delta: action.payload.delta ?? existing.delta,
-            // A later event without a thread must not erase branch identity.
-            threadId: action.payload.threadId ?? existing.threadId,
-            isForkBranch: action.payload.isForkBranch || existing.isForkBranch,
-          }
-        : action.payload;
-      const without = state.tree.filter(n => nodeKey(n) !== key);
-      return { ...state, tree: [...without, merged] };
+      const idx = state.tree.findIndex(n => nodeKey(n) === key);
+      if (idx === -1) {
+        return { ...state, tree: [...state.tree, mergeNode(undefined, action.payload)] };
+      }
+      const tree = [...state.tree];
+      tree[idx] = mergeNode(tree[idx], action.payload);
+      return { ...state, tree };
     }
     case "SET_CHECKPOINT_ID":
       return {
@@ -255,24 +361,7 @@ function reducer(state: DashboardState, action: DashboardAction): DashboardState
           : state.run,
       };
     case "APPLY_FRONTIER_UPDATE":
-      return {
-        ...state,
-        tree: state.tree.map(node => ({
-          ...node,
-          status:
-            action.payload.bestCandidate && node.candidate === action.payload.bestCandidate
-              ? "best"
-              : action.payload.bestCandidate && node.status === "best"
-                ? (action.payload.frontier.includes(node.candidate) ? "accepted" : "rejected")
-                : action.payload.frontier.includes(node.candidate)
-                  ? "accepted"
-                  : node.status,
-          delta:
-            action.payload.bestCandidate && node.candidate === action.payload.bestCandidate
-              ? action.payload.delta
-              : node.delta,
-        })),
-      };
+      return { ...state, tree: applyFrontierUpdate(state, action.payload) };
     case "SET_ITERATIONS":
       return { ...state, iterations: action.payload };
     case "ADD_LOG_ENTRY": {
@@ -287,7 +376,7 @@ function reducer(state: DashboardState, action: DashboardAction): DashboardState
     case "SET_LOG_ENTRIES":
       return { ...state, logEntries: action.payload };
     case "ADD_FORK_EVENT":
-      return { ...state, forkEvents: [...state.forkEvents, action.payload] };
+      return { ...state, forkEvents: addForkEvent(state.forkEvents, action.payload) };
     case "SET_FILTER":
       return { ...state, filters: { ...state.filters, ...action.payload } };
     case "SET_CONTEXT_TAB":
@@ -303,6 +392,39 @@ function reducer(state: DashboardState, action: DashboardAction): DashboardState
         i => !(i.candidateName === action.payload.candidateName && i.iteration === action.payload.iteration),
       );
       return { ...state, iterations: [...without, action.payload] };
+    }
+    case "UPDATE_ITERATION": {
+      const { candidateName, phases, ...rest } = action.payload;
+      const fields = definedFields(rest);
+      return {
+        ...state,
+        iterations: state.iterations.map(chapter =>
+          chapter.candidateName === candidateName &&
+          (fields.iteration === undefined || chapter.iteration === fields.iteration)
+            ? {
+                ...chapter,
+                ...fields,
+                phases: phases ? { ...chapter.phases, ...definedFields(phases) } : chapter.phases,
+              }
+            : chapter,
+        ),
+      };
+    }
+    case "COMPLETE_ITERATION": {
+      const { iteration, threadId, status } = action.payload;
+      return {
+        ...state,
+        iterations: state.iterations.map(chapter =>
+          chapter.iteration === iteration && sameThread(chapter.threadId, threadId, state)
+            ? {
+                ...chapter,
+                phases: { propose: true, validate: true, benchmark: true, frontier: true },
+                // frontier-updated already gave the precise verdict, if it came.
+                status: chapter.status === "running" && status ? status : chapter.status,
+              }
+            : chapter,
+        ),
+      };
     }
     case "SET_CHECKPOINT":
       return { ...state, latestCheckpointId: action.payload };

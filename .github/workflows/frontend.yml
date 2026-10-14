@@ -12,6 +12,8 @@ concurrency:
 defaults:
   run:
     working-directory: frontend/dashboard
+    # `bash -eo pipefail`; the implicit default has no pipefail.
+    shell: bash
 
 jobs:
   lint-build:

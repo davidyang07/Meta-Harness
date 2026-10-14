@@ -13,11 +13,11 @@ SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
 .PHONY: help verify verify-fast install postgres test test-postgres \
-        replay evidence wandb docker docker-up docker-down serve \
-        dashboard clean
+        replay evidence verify-evidence wandb docker docker-up docker-down \
+        serve dashboard e2e clean
 
 help: ## Show this help
-	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
+	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) \
 	  | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
 install: ## Sync the uv workspace (sdk/ + backend/)
@@ -29,7 +29,7 @@ postgres: ## Start just the Postgres container
 verify: ## Everything provable without credentials or paid model calls
 	bash scripts/verify.sh
 
-verify-fast: ## Same, minus the Docker image build and the dashboard build
+verify-fast: ## Same, minus the Docker image and dashboard stages (reported as skipped)
 	SKIP_DOCKER=1 SKIP_FRONTEND=1 bash scripts/verify.sh
 
 test: ## Backend test suite
@@ -41,8 +41,11 @@ test-postgres: ## Only the suites that require a real Postgres
 replay: ## Recording + exact recorded-execution replay
 	ONLY=replay bash scripts/verify.sh
 
-evidence: ## Derive the capability-evidence document from the artifacts
+evidence: ## Derive the capability-evidence document (local only; never committed)
 	uv run meta-harness report capability-evidence
+
+verify-evidence: ## Evidence derives, and docs/evidence/*.json has no absolute paths
+	ONLY=evidence bash scripts/verify.sh
 
 wandb: ## Probe the optional W&B adapter offline
 	ONLY=wandb bash scripts/verify.sh
@@ -61,6 +64,9 @@ serve: ## Run the API on :8000 (never `uvicorn` directly — see README)
 
 dashboard: ## Run the Next.js dashboard in dev mode
 	cd frontend/dashboard && npm run dev
+
+e2e: ## Playwright against the offline demo and a scripted backend (no backend needed)
+	cd frontend/dashboard && npx playwright test --project=mock
 
 clean: ## Remove caches and generated run artifacts (never committed evidence)
 	rm -rf backend/.pytest_cache backend/.pytest-tmp

@@ -9,6 +9,11 @@ concurrency:
   group: e2e-${{ github.ref }}
   cancel-in-progress: true
 
+# `bash -eo pipefail` for every step; the implicit default has no pipefail.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   playwright:
     name: playwright (mock + live backend)
@@ -65,9 +70,15 @@ jobs:
           cd backend
           uv run meta-harness serve --port 8000 > "$RUNNER_TEMP/backend.log" 2>&1 &
           for _ in $(seq 1 60); do
-            curl -sf http://127.0.0.1:8000/health && break
+            curl -sf http://127.0.0.1:8000/health >/dev/null && break
             sleep 1
           done
+          # The loop ending is not the backend answering.
+          curl -sf http://127.0.0.1:8000/health || {
+            echo "::error::the backend never became healthy"
+            cat "$RUNNER_TEMP/backend.log"
+            exit 1
+          }
 
       - name: Assert the backend is Postgres-backed
         # The live-backend suite is only meaningful against real
@@ -76,13 +87,13 @@ jobs:
         run: |
           body="$(curl -sf http://127.0.0.1:8000/health)"
           echo "$body"
-          echo "$body" | grep -q '"persistence":"postgres"' || {
+          grep -q '"persistence":"postgres"' <<<"$body" || {
             echo "::error::backend fell back to in-memory checkpointing"
             cat "$RUNNER_TEMP/backend.log"
             exit 1
           }
 
-      - name: Playwright — mock fixtures
+      - name: Playwright — offline demo and scripted backend
         run: npx playwright test --project=mock
         working-directory: frontend/dashboard
 

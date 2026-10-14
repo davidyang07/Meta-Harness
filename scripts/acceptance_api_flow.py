@@ -9,6 +9,11 @@ and mock benchmark, so it costs nothing.
     API_URL=... uv run python scripts/acceptance_api_flow.py --sse-only
     API_URL=... uv run python scripts/acceptance_api_flow.py --keep      # prints RUN_ID=
     API_URL=... uv run python scripts/acceptance_api_flow.py --recover <run_id>
+
+If the backend was started with META_HARNESS_API_TOKEN, export the same
+value here: every request then carries it, the stream is opened with
+`?token=`, and the flow additionally asserts that a request without it
+is refused while /health stays open.
 """
 
 from __future__ import annotations
@@ -18,27 +23,59 @@ import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
 API_URL = os.environ.get("API_URL", "http://127.0.0.1:8000").rstrip("/")
+API_TOKEN = os.environ.get("META_HARNESS_API_TOKEN", "").strip()
+
+
+def _decode(raw: bytes) -> dict[str, Any]:
+    try:
+        decoded = json.loads(raw.decode("utf-8") or "{}")
+    except json.JSONDecodeError:
+        return {"raw": raw.decode("utf-8", "replace")}
+    return decoded if isinstance(decoded, dict) else {"value": decoded}
 
 
 def request(
-    method: str, path: str, body: dict[str, Any] | None = None
+    method: str,
+    path: str,
+    body: dict[str, Any] | None = None,
+    *,
+    authenticated: bool = True,
 ) -> tuple[int, dict[str, Any]]:
     data = None if body is None else json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(
-        API_URL + path,
-        data=data,
-        method=method,
-        headers={"Content-Type": "application/json"},
-    )
+    headers = {"Content-Type": "application/json"}
+    if API_TOKEN and authenticated:
+        headers["Authorization"] = f"Bearer {API_TOKEN}"
+    req = urllib.request.Request(API_URL + path, data=data, method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
-            return resp.status, json.loads(resp.read().decode("utf-8") or "{}")
+            return resp.status, _decode(resp.read())
     except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read().decode("utf-8") or "{}")
+        return exc.code, _decode(exc.read())
+
+
+def stream_url(run_id: str) -> str:
+    """The SSE URL. EventSource cannot send headers, so the token rides
+    in the query string, exactly as the dashboard sends it."""
+    url = f"{API_URL}/runs/{urllib.parse.quote(run_id, safe='')}/stream"
+    if API_TOKEN:
+        url += "?token=" + urllib.parse.quote(API_TOKEN, safe="")
+    return url
+
+
+def check_auth() -> None:
+    """With a token configured, the API must refuse requests without it."""
+    status, _ = request("GET", "/health", authenticated=False)
+    assert status == 200, f"/health must stay open without a token, got {status}"
+    status, _ = request("GET", "/runs", authenticated=False)
+    assert status == 401, f"GET /runs without the token -> {status}, expected 401"
+    status, _ = request("GET", "/runs")
+    assert status == 200, f"GET /runs with the token -> {status}"
+    print("  API token enforced: 401 without it, /health open")
 
 
 def wait_for(predicate, *, what: str, timeout_s: float = 120.0, interval: float = 0.5):
@@ -54,9 +91,7 @@ def wait_for(predicate, *, what: str, timeout_s: float = 120.0, interval: float 
 
 def check_sse(run_id: str) -> None:
     """Confirm the SSE stream replays this run's backlog."""
-    req = urllib.request.Request(
-        f"{API_URL}/runs/{run_id}/stream", headers={"Accept": "text/event-stream"}
-    )
+    req = urllib.request.Request(stream_url(run_id), headers={"Accept": "text/event-stream"})
     seen: set[str] = set()
     with urllib.request.urlopen(req, timeout=30) as resp:
         deadline = time.monotonic() + 15
@@ -123,6 +158,9 @@ def main() -> int:
     sse_only = "--sse-only" in sys.argv
     keep = "--keep" in sys.argv
     run_id = f"acceptance-api-{int(time.time())}"
+
+    if API_TOKEN:
+        check_auth()
 
     status, _ = request(
         "POST",

@@ -1,36 +1,11 @@
 'use client';
-import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useDashboard } from '@/lib/state';
-
-type AuthProfile = {
-  name?: string;
-  email?: string;
-};
+import { useAuthStatus } from '@/lib/auth-client';
 
 export function TopBar({ onReplay }: { onReplay?: () => void }) {
   const { run, mode } = useDashboard();
-  const [profile, setProfile] = useState<AuthProfile | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    fetch('/auth/profile', { cache: 'no-store' })
-      .then(async (response) => {
-        if (!response.ok) return null;
-        return (await response.json()) as AuthProfile;
-      })
-      .then((data) => {
-        if (!cancelled) setProfile(data);
-      })
-      .catch(() => {
-        if (!cancelled) setProfile(null);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const { enabled: authEnabled, profile } = useAuthStatus();
 
   return (
     <div className="h-12 flex items-center justify-between px-6 bg-header border-b border-border">
@@ -54,12 +29,15 @@ export function TopBar({ onReplay }: { onReplay?: () => void }) {
             {profile.name ?? profile.email ?? 'authenticated user'}
           </span>
         )}
-        <a
-          href={profile ? '/auth/logout' : '/auth/login'}
-          className="text-[10px] text-cyan uppercase tracking-wide hover:text-text-hi transition-colors"
-        >
-          {profile ? 'Logout' : 'Login'}
-        </a>
+        {/* Without Auth0 there are no /auth routes; a link would 404. */}
+        {authEnabled && (
+          <a
+            href={profile ? '/auth/logout' : '/auth/login'}
+            className="text-[10px] text-cyan uppercase tracking-wide hover:text-text-hi transition-colors"
+          >
+            {profile ? 'Logout' : 'Login'}
+          </a>
+        )}
       </div>
     </div>
   );
