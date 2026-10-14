@@ -254,3 +254,275 @@ def test_wandb_check_can_always_record_elsewhere(monkeypatch, tmp_path: Path):
 
     assert result.exit_code == 0, result.output
     assert json.loads(destination.read_text())["wandb_installed"] is False
+
+
+# ── serve refuses an unauthenticated public bind ──────────────────────
+
+
+@pytest.fixture
+def fake_uvicorn(monkeypatch):
+    import uvicorn
+
+    calls: list[dict] = []
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: calls.append(k))
+    return calls
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", "192.168.1.10", "example.com"])
+def test_serve_refuses_a_public_bind_without_a_token(monkeypatch, fake_uvicorn, host):
+    monkeypatch.delenv("META_HARNESS_API_TOKEN", raising=False)
+
+    result = runner.invoke(app, ["serve", "--host", host])
+
+    assert result.exit_code == 2
+    assert "refusing to serve" in result.output
+    assert "META_HARNESS_API_TOKEN" in result.output
+    assert fake_uvicorn == []
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1", "127.0.0.2"])
+def test_serve_allows_loopback_without_a_token(monkeypatch, fake_uvicorn, host):
+    monkeypatch.delenv("META_HARNESS_API_TOKEN", raising=False)
+
+    result = runner.invoke(app, ["serve", "--host", host])
+
+    assert result.exit_code == 0, result.output
+    assert [c["host"] for c in fake_uvicorn] == [host]
+
+
+def test_serve_binds_publicly_once_a_token_is_set(monkeypatch, fake_uvicorn):
+    monkeypatch.setenv("META_HARNESS_API_TOKEN", "s3cret")
+
+    result = runner.invoke(app, ["serve", "--host", "0.0.0.0"])
+
+    assert result.exit_code == 0, result.output
+    assert [c["host"] for c in fake_uvicorn] == ["0.0.0.0"]
+
+
+# ── loop validates every input before deleting anything ───────────────
+
+
+@pytest.fixture
+def existing_run():
+    import uuid
+
+    name = f"test-cli-keep-{uuid.uuid4().hex[:8]}"
+    run_dir = REPO_ROOT / "runs" / name
+    run_dir.mkdir(parents=True)
+    sentinel = run_dir / "sentinel.txt"
+    sentinel.write_text("keep me")
+    try:
+        yield name, sentinel
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+
+@pytest.mark.parametrize(
+    "bad_args",
+    [
+        ["--skill", "skills/not-a-skill/SKILL.md"],
+        ["--skill", "../outside/SKILL.md"],
+        ["--skill", "/etc/passwd"],
+        ["--domain", "../escape"],
+        ["--proposer", "nonsense"],
+        ["--record", "--no-persistent"],
+    ],
+)
+def test_loop_fresh_with_a_bad_input_deletes_nothing(existing_run, bad_args):
+    name, sentinel = existing_run
+
+    result = runner.invoke(app, ["loop", "--fresh", "--run-name", name, *bad_args])
+
+    assert result.exit_code == 2, result.output
+    assert sentinel.read_text() == "keep me"
+
+
+# ── fork --detach is refused instead of cancelling its own branch ─────
+
+
+def test_fork_detach_is_refused_with_a_pointer_to_the_api(existing_run):
+    name, sentinel = existing_run
+    (sentinel.parent / "manifest.json").write_text(json.dumps({"run_id": name}))
+
+    result = runner.invoke(app, ["fork", name, "--checkpoint", "x", "--detach"])
+
+    assert result.exit_code == 2
+    assert "POST /runs/<run>/fork" in result.output
+    assert not (sentinel.parent / "branches.json").exists()
+
+
+# ── rebuild and resume read the run's own config (I2) ─────────────────
+
+
+@pytest.fixture
+def scratch_skill():
+    import uuid
+
+    domain = f"cli-test-{uuid.uuid4().hex[:8]}"
+    skill_dir = REPO_ROOT / "skills" / f"meta-harness-{domain}"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("---\nname: scratch\n---\n")
+    try:
+        yield domain, (skill_dir / "SKILL.md").resolve()
+    finally:
+        shutil.rmtree(skill_dir, ignore_errors=True)
+
+
+def test_rebuild_graph_uses_the_runs_own_workers_and_skill(monkeypatch, scratch_skill):
+    from app import cli
+    from app.meta_harness import outer
+
+    domain, skill = scratch_skill
+    seen: dict = {}
+
+    class _Runner:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+        def build(self):
+            return "graph"
+
+    monkeypatch.setattr(outer, "OuterLoopRunner", _Runner)
+    manifest = {"domain": domain, "workers": 7, "trials": 2, "mock_proposer": False}
+
+    assert cli._rebuild_graph(REPO_ROOT / "runs" / "x", manifest, saver=None) == "graph"
+    assert seen["bench_workers"] == 7
+    assert seen["trials"] == 2
+    assert seen["skill_path"] == skill
+
+
+def test_resume_passes_the_recorded_config(monkeypatch, scratch_skill):
+    import contextlib
+    import uuid
+
+    from app.meta_harness import outer, persistence
+
+    domain, skill = scratch_skill
+    name = f"test-cli-resume-{uuid.uuid4().hex[:8]}"
+    run_dir = REPO_ROOT / "runs" / name
+    run_dir.mkdir(parents=True)
+    (run_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "run_id": name,
+                "workers": 4,
+                "trials": 2,
+                "mock_proposer": False,
+                "domain": domain,
+                "skill_path": f"skills/meta-harness-{domain}/SKILL.md",
+                "record": True,
+                "memory": False,
+            }
+        )
+    )
+    seen: dict = {}
+
+    async def fake_resume(
+        *,
+        run_dir,
+        repo_root,
+        eval_tasks_dir,
+        checkpointer,
+        skill_path=None,
+        memory_store=None,
+        tracker=None,
+        recording_root=None,
+        bench_workers=None,
+    ):
+        seen.update(
+            skill_path=skill_path,
+            memory_store=memory_store,
+            tracker=tracker,
+            recording_root=recording_root,
+            bench_workers=bench_workers,
+        )
+        return {"iteration": 1, "budget_remaining": 0, "candidates": []}
+
+    @contextlib.asynccontextmanager
+    async def fake_layer():
+        yield object()
+
+    monkeypatch.setattr(outer, "resume_outer_loop", fake_resume)
+    monkeypatch.setattr(persistence, "persistence_layer", fake_layer)
+    try:
+        result = runner.invoke(app, ["resume", name, "--no-wandb"])
+
+        assert result.exit_code == 0, result.output
+        assert seen["skill_path"] == skill
+        assert seen["bench_workers"] == 4
+        assert seen["memory_store"] is None  # the run had no memory store
+        assert seen["tracker"] is not None
+        assert seen["recording_root"] is not None
+        assert seen["recording_root"].name == "recordings"
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+
+# ── evidence paths and --output (I6) ──────────────────────────────────
+
+
+def test_evidence_reports_carry_no_absolute_paths():
+    from app import cli
+
+    report = {
+        "recordings_root": str(REPO_ROOT / "runs" / "replay-evidence"),
+        "reports": [
+            {"recording": "task-1-trial-1", "recording_dir": str(REPO_ROOT / "x")},
+        ],
+        "nested": {"thread_dir": str(REPO_ROOT / "runs" / "r" / "threads" / "r")},
+    }
+
+    portable = cli._portable_paths(report)
+
+    assert portable["recordings_root"] == "runs/replay-evidence"
+    assert portable["reports"][0] == {"recording": "task-1-trial-1", "recording_dir": "x"}
+    assert portable["nested"]["thread_dir"] == "runs/r/threads/r"
+
+
+def _pg_ok() -> bool:
+    import asyncio
+
+    from app.meta_harness.persistence import healthcheck
+
+    return asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
+        healthcheck()
+    )
+
+
+@pytest.mark.skipif(not _pg_ok(), reason="Postgres not reachable at configured DSN")
+def test_report_version_graph_writes_where_it_is_told(tmp_path: Path) -> None:
+    import uuid
+
+    name = f"test-cli-vg-{uuid.uuid4().hex[:8]}"
+    committed = REPO_ROOT / "docs" / "evidence" / "version-graph.json"
+    before = committed.read_bytes() if committed.exists() else None
+    destination = tmp_path / "vg.json"
+    try:
+        loop = runner.invoke(
+            app,
+            [
+                "loop", "--proposer", "mock", "--mock-bench", "--budget", "1",
+                "--fresh", "--run-name", name, "--trials", "1", "--workers", "1",
+            ],
+        )
+        assert loop.exit_code == 0, loop.output
+
+        result = runner.invoke(
+            app, ["report", "version-graph", name, "--output", str(destination)]
+        )
+        assert result.exit_code == 0, result.output
+        assert f"wrote {destination}" in result.output
+        assert destination.is_file()
+        assert (committed.read_bytes() if committed.exists() else None) == before
+
+        written = json.loads(destination.read_text())
+        assert written["checkpoint_count"] > 0
+        for thread in written["branch_artifacts"].values():
+            assert thread["thread_dir"].startswith(f"runs/{name}/threads/")
+            for source in thread["candidate_sources"].values():
+                assert not Path(source["path"]).is_absolute()
+                assert "\\" not in source["path"]
+    finally:
+        shutil.rmtree(REPO_ROOT / "runs" / name, ignore_errors=True)
+        for stub in (REPO_ROOT / "agents").glob("_mock_*.py"):
+            stub.unlink()

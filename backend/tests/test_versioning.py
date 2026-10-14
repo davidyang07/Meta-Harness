@@ -360,3 +360,54 @@ async def test_any_persisted_checkpoint_can_be_forked_from(tmp_path: Path):
     assert len({m.thread_id for _, m in forked}) == 3
     for checkpoint_id, metadata in forked:
         assert metadata.parent_checkpoint_id == checkpoint_id
+
+
+def test_branch_artifact_paths_are_repo_relative_posix(tmp_path: Path):
+    """Evidence is committed: no absolute (or backslashed) path may leak in."""
+    run_dir = runs_mod.make_run_dir(tmp_path, "vg-portable", fresh=True)
+    for thread_id in ("vg-portable", "vg-portable.fork.aaaa"):
+        runs_mod.candidate_source_path(run_dir, thread_id, "iter_1").write_text(
+            "class A: pass\n", encoding="utf-8"
+        )
+
+    artifacts = ver.branch_artifacts(run_dir)
+
+    for thread_id, entry in artifacts.items():
+        assert entry["thread_dir"] == f"runs/vg-portable/threads/{thread_id}"
+        source = entry["candidate_sources"]["iter_1"]["path"]
+        assert source == f"runs/vg-portable/threads/{thread_id}/agents/iter_1.py"
+
+    other_root = ver.branch_artifacts(run_dir, repo_root=tmp_path / "runs")
+    assert other_root["vg-portable"]["thread_dir"] == "vg-portable/threads/vg-portable"
+
+
+@pg_only
+async def test_captured_evidence_carries_no_machine_specific_state(tmp_path: Path):
+    """Committed evidence holds no absolute path, hostname or pid."""
+    name = unique("vg-evidence")
+    br.clear_branch_state()
+    br.set_runs_root(tmp_path / "runs")
+    try:
+        async with persistence_layer() as saver:
+            run_dir, graph = await _seeded_run(tmp_path, name, saver)
+            versions = await ver.thread_versions(graph, thread_id=name)
+            fork_point = _forkable(versions)[0].checkpoint_id
+            metadata, task = await br.worktree_add(
+                graph,
+                run_id=name,
+                parent_thread_id=name,
+                parent_checkpoint_id=fork_point,
+            )
+            await task
+            evidence = await ver.capture_evidence(graph, run_id=name, run_dir=run_dir)
+    finally:
+        await br.cancel_all_branches()
+        br.clear_branch_state()
+        br.set_runs_root(None)
+
+    assert metadata.owner_host  # recorded on the branch itself...
+    assert evidence["branch_count"] == 1
+    for branch in evidence["branches"]:  # ...but never in the evidence
+        assert not {"owner_pid", "owner_host", "heartbeat_at"} & set(branch)
+    for thread in evidence["branch_artifacts"].values():
+        assert thread["thread_dir"].startswith(f"runs/{name}/threads/")

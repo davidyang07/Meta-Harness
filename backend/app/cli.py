@@ -8,12 +8,15 @@ single eval task. The ``loop``, ``benchmark``, ``fork``, ``resume``,
 
 from __future__ import annotations
 
+import contextlib
+import inspect
+import ipaddress
 import json
 import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator, Callable
 
 import typer
 from dotenv import load_dotenv
@@ -52,6 +55,96 @@ def _run_async(coro: Any) -> Any:
     if "error" in result:
         raise result["error"]
     return result.get("value")
+
+
+def _supported_kwargs(func: Callable[..., Any], candidates: dict[str, Any]) -> dict[str, Any]:
+    """The subset of ``candidates`` that ``func`` accepts as keywords.
+
+    The outer-loop entry points gain keyword parameters over time (memory,
+    tracking, recording, domain). Passing only what the installed version
+    accepts keeps the CLI working on both sides of such a change.
+    """
+    params = inspect.signature(func).parameters
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return dict(candidates)
+    return {k: v for k, v in candidates.items() if k in params}
+
+
+@contextlib.asynccontextmanager
+async def _optional_memory_store(enabled: bool = True) -> AsyncIterator[Any]:
+    """Yield the cross-run memory store, or ``None`` if it is unavailable.
+
+    Entered *before* the loop body and exited after it, so a failure of
+    the store is isolated from the loop: an exception in a node must never
+    fall through into a second, memory-less run of the loop.
+    """
+    if not enabled:
+        yield None
+        return
+    import logging
+
+    from app.meta_harness.memory import memory_store as _mem_store
+
+    log = logging.getLogger("meta_harness.cli")
+    store_cm = None
+    store = None
+    try:
+        store_cm = _mem_store()
+        store = await store_cm.__aenter__()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "memory store unavailable (%s); proceeding without it. "
+            "The cross-run memory beat will be skipped this run.",
+            type(exc).__name__,
+        )
+        store_cm = None
+    try:
+        yield store
+    finally:
+        if store_cm is not None:
+            try:
+                await store_cm.__aexit__(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _is_loopback_host(host: str) -> bool:
+    """True for ``localhost`` and loopback IPs (``127.0.0.0/8``, ``::1``)."""
+    if host.strip().lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip().strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
+def _cli_skill_path(skill: str | None, domain: str) -> Path:
+    """Resolve ``--skill``/``--domain`` to a SKILL.md, or exit 2.
+
+    The same rule the API enforces: only ``skills/<name>/SKILL.md`` in
+    this repository. A run's manifest records the skill relative to the
+    repo, and every resume or fork reads it back from there; a skill
+    outside ``skills/`` could not be found again.
+    """
+    from app.meta_harness import runs as runs_mod
+
+    try:
+        path = (
+            runs_mod.resolve_skill_path(REPO_ROOT, skill)
+            if skill
+            else runs_mod.default_skill_path(REPO_ROOT, domain)
+        )
+    except ValueError:
+        typer.echo(
+            "--skill must name skills/<name>/SKILL.md inside this repository "
+            "(scaffold one with `meta-harness init <domain>`)",
+            err=True,
+        )
+        raise typer.Exit(2) from None
+    if not path.is_file():
+        typer.echo(f"skill not found: {path}", err=True)
+        raise typer.Exit(2)
+    return path
 
 
 app = typer.Typer(
@@ -114,6 +207,10 @@ def inner(
         typer.echo(f"task not found: {task_dir}", err=True)
         raise typer.Exit(1)
     task_spec = json.loads((task_dir / "task.json").read_text())
+    # Grading compares against the pristine workspace, never the sandbox
+    # the agent edited. ``run_inner_loop`` sets this too; the recording
+    # path below builds the inner graph itself, so it is set here.
+    task_spec["_source_workspace"] = str(task_dir / "workspace")
 
     harness = _resolve_harness_class(candidate)()
     usage = met.UsageRecorder()
@@ -430,39 +527,16 @@ def loop(
     resolves) checkpoints every transition; ``meta-harness resume
     <run-name>`` continues from the last checkpoint.
     """
-    import asyncio
-    import datetime as _dt
-
+    from app.meta_harness import branches as br
+    from app.meta_harness import runs as runs_mod
     from app.meta_harness.outer import run_outer_loop
-    from app.meta_harness.persistence import persistence_layer
-    from app.meta_harness.runs import make_run_dir
+    from app.meta_harness.persistence import delete_threads, persistence_layer
 
+    # Every input is validated before anything is deleted: `--fresh` with
+    # a bad `--skill` used to wipe runs/<name>/ and *then* exit 2.
     if proposer not in {"claude", "mock"}:
         typer.echo(f"--proposer must be 'claude' or 'mock' (got {proposer!r})", err=True)
         raise typer.Exit(2)
-
-    if run_name is None:
-        run_name = "loop-" + _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-    run_dir = make_run_dir(REPO_ROOT, run_name, fresh=fresh)
-    # Search always runs on eval/tasks/. Holdout post-eval (if --holdout
-    # is set) runs after the main loop completes, on eval/holdout/ — the
-    # proposer never sees holdout tasks (Appendix C §C.14).
-    eval_tasks_dir = REPO_ROOT / "eval" / "tasks"
-
-    skill_path: Path | None = None
-    if proposer == "claude":
-        if skill:
-            sp = Path(skill)
-            skill_path = sp if sp.is_absolute() else (REPO_ROOT / sp).resolve()
-        else:
-            skill_path = REPO_ROOT / "skills" / f"meta-harness-{domain}" / "SKILL.md"
-        if not skill_path.exists():
-            typer.echo(f"skill not found: {skill_path}", err=True)
-            raise typer.Exit(2)
-
-    from app.meta_harness import tracking as trk
-
     if record and not persistent:
         typer.echo(
             "--record needs --persistent: a tape with no checkpoint history "
@@ -470,6 +544,50 @@ def loop(
             err=True,
         )
         raise typer.Exit(2)
+    try:
+        runs_mod.validate_domain(domain)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from None
+
+    if run_name is None:
+        run_name = runs_mod.generated_run_id("loop")
+    try:
+        run_path = runs_mod.make_run_path(REPO_ROOT, run_name)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from None
+
+    skill_path: Path | None = None
+    if proposer == "claude":
+        skill_path = _cli_skill_path(skill, domain)
+
+    # A fresh run never inherits the old one's branches or checkpoints,
+    # and is refused while another process is still driving one of them.
+    br.set_runs_root(REPO_ROOT / "runs")
+    stale_threads = [run_name]
+    if run_path.exists():
+        if fresh:
+            live = br.live_branches(run_name)
+            if live:
+                typer.echo(
+                    f"refusing --fresh: {len(live)} branch(es) of {run_name} are "
+                    "still running in another process; cancel them first",
+                    err=True,
+                )
+                raise typer.Exit(1)
+            stale_threads += [b.thread_id for b in br.list_branches(run_id=run_name)]
+        else:
+            stale_threads = []
+    br.forget_run(run_name)
+
+    run_dir = runs_mod.make_run_dir(REPO_ROOT, run_name, fresh=fresh)
+    # Search always runs on eval/tasks/. Holdout post-eval (if --holdout
+    # is set) runs after the main loop completes, on eval/holdout/ — the
+    # proposer never sees holdout tasks (Appendix C §C.14).
+    eval_tasks_dir = REPO_ROOT / "eval" / "tasks"
+
+    from app.meta_harness import tracking as trk
 
     tracker = trk.make_tracker(
         enabled=wandb,
@@ -494,32 +612,17 @@ def loop(
         _recordings_root(run_dir, run_name) if record else None
     )
 
+    # ``domain`` is recorded in the manifest by ``run_outer_loop`` once it
+    # accepts it; passed only where the installed version does.
+    loop_extras = _supported_kwargs(run_outer_loop, {"domain": domain})
+
     async def _run() -> Any:
-        # Open the memory store FIRST so its failure mode is isolated
-        # from the loop body. Previously a single ``try`` wrapped both
-        # the store entry AND ``run_outer_loop``, so any node-body
-        # exception silently fell through to a second loop invocation
-        # with memory dropped (double-spending the LLM budget and
-        # masking the original error).
-        from app.meta_harness.memory import memory_store as _mem_store
-        import logging
-
-        log = logging.getLogger("meta_harness.cli")
-
         if persistent:
             async with persistence_layer() as saver:
-                mstore = None
-                try:
-                    mstore_cm = _mem_store()
-                    mstore = await mstore_cm.__aenter__()
-                except Exception as exc:  # noqa: BLE001
-                    log.warning(
-                        "memory store unavailable (%s); proceeding without it. "
-                        "The cross-run memory beat will be skipped this run.",
-                        type(exc).__name__,
-                    )
-                    mstore_cm = None
-                try:
+                # The new root thread (and, for --fresh, the old forks)
+                # must not start with a previous run's checkpoints.
+                await delete_threads(saver, stale_threads)
+                async with _optional_memory_store() as mstore:
                     return await run_outer_loop(
                         run_dir=run_dir,
                         repo_root=REPO_ROOT,
@@ -534,13 +637,8 @@ def loop(
                         memory_store=mstore,
                         tracker=tracker,
                         recording_root=recording_root,
+                        **loop_extras,
                     )
-                finally:
-                    if mstore_cm is not None:
-                        try:
-                            await mstore_cm.__aexit__(None, None, None)
-                        except Exception:  # noqa: BLE001
-                            pass
         return await run_outer_loop(
             run_dir=run_dir,
             repo_root=REPO_ROOT,
@@ -553,6 +651,7 @@ def loop(
             skill_path=skill_path,
             checkpointer=None,
             tracker=tracker,
+            **loop_extras,
         )
 
     final_state = _run_async(_run())
@@ -687,30 +786,40 @@ def fork(
     detach: bool = typer.Option(
         False,
         "--detach",
-        help="Don't wait for the branch to finish; return metadata immediately",
+        hidden=True,
+        help="Not supported; fork on a running server instead.",
     ),
 ) -> None:
     """Fork a run from a checkpoint into a concurrent branch (Appendix A).
 
-    Reads runs/<run-name>/manifest.json to recover the original run config,
-    opens the same Postgres checkpointer, calls ``branches.worktree_add``,
-    and (unless ``--detach``) awaits the branch to completion.
+    Reads runs/<run-name>/manifest.json to recover the original run config
+    (workers, skill and domain included), opens the same Postgres
+    checkpointer, calls ``branches.worktree_add``, and awaits the branch to
+    completion. The branch runs inside this process, so this command
+    stays in the foreground until the branch finishes.
     """
     import asyncio
 
+    from app.meta_harness import runs as runs_mod
     from app.meta_harness.branches import set_runs_root, worktree_add
     from app.meta_harness.outer import OuterLoopRunner
     from app.meta_harness.persistence import persistence_layer
 
-    run_dir = REPO_ROOT / "runs" / run_name
-    if not run_dir.exists():
-        typer.echo(f"run not found: {run_dir}", err=True)
-        raise typer.Exit(1)
-    manifest_path = run_dir / "manifest.json"
-    if not manifest_path.exists():
-        typer.echo(f"manifest.json missing in {run_dir}; cannot fork", err=True)
-        raise typer.Exit(1)
-    manifest = json.loads(manifest_path.read_text())
+    if detach:
+        # The branch is an asyncio task in this process. Returning early
+        # ends the event loop, which cancels the task: the command printed
+        # "running" while branches.json recorded "cancelled".
+        typer.echo(
+            "--detach is not supported: a branch runs inside the process that "
+            "forked it and stops when that process exits. To fork without "
+            "waiting, ask a running server: POST /runs/<run>/fork "
+            '(body: {"parent_checkpoint_id": "<id>"}) on `meta-harness serve`.',
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    run_dir, manifest = _require_run(run_name)
+    config = runs_mod.run_config_from_manifest(REPO_ROOT, manifest)
     # Persist branch metadata so the API/dashboard can see this fork.
     set_runs_root(REPO_ROOT / "runs")
 
@@ -723,8 +832,6 @@ def fork(
         mods[k.strip()] = v
 
     eval_tasks_dir = REPO_ROOT / "eval" / "tasks"
-    skill_path = REPO_ROOT / "skills" / "meta-harness-coding-agent" / "SKILL.md"
-    skill_path = skill_path if skill_path.exists() else None
 
     async def _run() -> dict[str, Any]:
         async with persistence_layer() as saver:
@@ -732,11 +839,11 @@ def fork(
                 run_dir=run_dir,
                 repo_root=REPO_ROOT,
                 eval_tasks_dir=eval_tasks_dir,
-                mock_proposer=manifest.get("mock_proposer", False),
-                mock_bench=manifest.get("mock_bench", False),
-                trials=manifest.get("trials", 5),
-                bench_workers=manifest.get("workers", 3),
-                skill_path=skill_path,
+                mock_proposer=config["mock_proposer"],
+                mock_bench=config["mock_bench"],
+                trials=config["trials"],
+                bench_workers=config["workers"],
+                skill_path=config["skill_path"],
                 checkpointer=saver,
             )
             graph = runner.build()
@@ -748,15 +855,18 @@ def fork(
                 mods=mods,
                 name=branch_name,
             )
-            if not detach:
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001 - recorded in the metadata below
+                pass
             return metadata.to_dict()
 
     metadata = _run_async(_run())
     typer.echo(json.dumps(metadata, indent=2, default=str))
+    if metadata.get("status") == "failed":
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -772,8 +882,25 @@ def serve(
     cannot run on it — the server would come up with checkpointing
     silently degraded to in-memory, which disables checkpoint history,
     forking and branch recovery.
+
+    The API can start runs that spend money and read the repository, so
+    binding anything but a loopback address requires
+    ``META_HARNESS_API_TOKEN`` (clients then send
+    ``Authorization: Bearer <token>``).
     """
     import uvicorn
+
+    from app.main import API_TOKEN_ENV, configured_api_token
+
+    if not _is_loopback_host(host) and configured_api_token() is None:
+        typer.echo(
+            f"refusing to serve on {host!r} without authentication: the API "
+            "would be reachable from other machines with no credentials. Set "
+            f"{API_TOKEN_ENV} (clients send `Authorization: Bearer <token>`), "
+            "or bind 127.0.0.1.",
+            err=True,
+        )
+        raise typer.Exit(2)
 
     uvicorn.run(
         "app.main:app",
@@ -1193,19 +1320,24 @@ def _require_run(run_name: str) -> tuple[Path, dict[str, Any]]:
 
 
 def _rebuild_graph(run_dir: Path, manifest: dict[str, Any], saver: Any) -> Any:
-    """Recompile a run's outer graph from its manifest, for read-only use."""
+    """Recompile a run's outer graph from its manifest, for read-only use.
+
+    Workers, skill and domain come from the manifest, not from the
+    coding-agent defaults this used to hard-code.
+    """
+    from app.meta_harness import runs as runs_mod
     from app.meta_harness.outer import OuterLoopRunner
 
-    skill_path = REPO_ROOT / "skills" / "meta-harness-coding-agent" / "SKILL.md"
+    config = runs_mod.run_config_from_manifest(REPO_ROOT, manifest)
     runner = OuterLoopRunner(
         run_dir=run_dir,
         repo_root=REPO_ROOT,
         eval_tasks_dir=REPO_ROOT / "eval" / "tasks",
-        mock_proposer=bool(manifest.get("mock_proposer", False)),
-        mock_bench=bool(manifest.get("mock_bench", False)),
-        trials=int(manifest.get("trials", 5)),
-        bench_workers=int(manifest.get("workers", 3)),
-        skill_path=skill_path if skill_path.exists() else None,
+        mock_proposer=config["mock_proposer"],
+        mock_bench=config["mock_bench"],
+        trials=config["trials"],
+        bench_workers=config["workers"],
+        skill_path=config["skill_path"],
         checkpointer=saver,
     )
     return runner.build()
@@ -1286,43 +1418,76 @@ ONE falsifiable hypothesis and write ONE new candidate file.
 @app.command()
 def resume(
     run_name: str = typer.Argument(..., help="Run name to resume (under runs/)"),
+    wandb: bool = typer.Option(
+        None,
+        "--wandb/--no-wandb",
+        help="Log the resumed iterations to Weights & Biases. Defaults to META_HARNESS_WANDB.",
+    ),
 ) -> None:
     """Resume an interrupted ``meta-harness loop`` run from its last
     Postgres checkpoint. Reconstructs the run config from
     ``runs/{run_name}/manifest.json`` and continues with the same
-    proposer / mock_bench / trials settings.
-    """
-    import asyncio
+    proposer / mock_bench / trials / workers / skill settings, the
+    memory store if the run had one, and recording if it was recorded.
 
+    This issues FRESH model calls; it is not a replay.
+    """
+    from app.meta_harness import runs as runs_mod
+    from app.meta_harness import tracking as trk
     from app.meta_harness.outer import resume_outer_loop
     from app.meta_harness.persistence import persistence_layer
 
-    run_dir = REPO_ROOT / "runs" / run_name
-    if not run_dir.exists():
-        typer.echo(f"run not found: {run_dir}", err=True)
-        raise typer.Exit(1)
-    manifest_path = run_dir / "manifest.json"
-    if not manifest_path.exists():
-        typer.echo(f"manifest.json missing in {run_dir}; cannot resume", err=True)
-        raise typer.Exit(1)
+    run_dir, manifest = _require_run(run_name)
+    config = runs_mod.run_config_from_manifest(REPO_ROOT, manifest)
+    if not config["mock_proposer"] and config["skill_path"] is None:
+        typer.echo(
+            f"the skill this run was started with is missing "
+            f"({manifest.get('skill_path') or 'skills/meta-harness-' + config['domain']}); "
+            "cannot resume the proposer without it",
+            err=True,
+        )
+        raise typer.Exit(2)
 
     eval_tasks_dir = REPO_ROOT / "eval" / "tasks"
-    skill_path: Path | None = None
-    skills_default = REPO_ROOT / "skills" / "meta-harness-coding-agent" / "SKILL.md"
-    if skills_default.exists():
-        skill_path = skills_default
+    recording_root = _recordings_root(run_dir, run_name) if config["record"] else None
+    tracker = trk.make_tracker(
+        enabled=wandb,
+        run_name=f"{run_name}-resume",
+        config={
+            "resumed": True,
+            "trials": config["trials"],
+            "workers": config["workers"],
+            "domain": config["domain"],
+        },
+        tags=["outer-loop", "resume"],
+        job_type="resume",
+    )
 
     async def _run() -> Any:
         async with persistence_layer() as saver:
-            return await resume_outer_loop(
-                run_dir=run_dir,
-                repo_root=REPO_ROOT,
-                eval_tasks_dir=eval_tasks_dir,
-                checkpointer=saver,
-                skill_path=skill_path,
-            )
+            async with _optional_memory_store(config["memory"]) as mstore:
+                extras = _supported_kwargs(
+                    resume_outer_loop,
+                    {
+                        "memory_store": mstore,
+                        "tracker": tracker,
+                        "recording_root": recording_root,
+                        "bench_workers": config["workers"],
+                    },
+                )
+                return await resume_outer_loop(
+                    run_dir=run_dir,
+                    repo_root=REPO_ROOT,
+                    eval_tasks_dir=eval_tasks_dir,
+                    checkpointer=saver,
+                    skill_path=config["skill_path"],
+                    **extras,
+                )
 
-    final_state = _run_async(_run())
+    try:
+        final_state = _run_async(_run())
+    finally:
+        tracker.finish()
     typer.echo(
         json.dumps(
             {
@@ -1489,7 +1654,7 @@ def verify_replay(
         out_path = REPO_ROOT / out_path
     from app.meta_harness import runs as runs_mod
 
-    runs_mod.write_json_atomic(out_path, report)
+    runs_mod.write_json_atomic(out_path, _portable_paths(report))
     typer.echo("")
     typer.echo(f"wrote {out_path}")
 
@@ -1858,10 +2023,54 @@ def _selection_from_agents_dir(candidate: str) -> dict[str, Any]:
     }
 
 
+#: Where ``report version-graph`` writes by default, and what
+#: ``report capability-evidence`` reads.
+DEFAULT_VERSION_GRAPH_EVIDENCE = "docs/evidence/version-graph.json"
+
+#: Keys whose string values are filesystem paths in evidence reports.
+_PATH_KEY_SUFFIXES = ("_dir", "_path", "_root")
+
+
+def _portable_paths(value: Any) -> Any:
+    """Rewrite absolute paths in a report as repo-relative POSIX strings.
+
+    Evidence under ``docs/evidence/`` is committed and read on other
+    machines; an absolute ``C:\\Users\\...`` path in it is both a
+    leak and meaningless there. Applies to ``path`` keys and keys ending
+    in ``_dir``/``_path``/``_root``.
+    """
+    from app.meta_harness import runs as runs_mod
+
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            if (
+                isinstance(item, str)
+                and (key == "path" or str(key).endswith(_PATH_KEY_SUFFIXES))
+                and Path(item).is_absolute()
+            ):
+                out[key] = runs_mod.portable_path(item, REPO_ROOT)
+            else:
+                out[key] = _portable_paths(item)
+        return out
+    if isinstance(value, list):
+        return [_portable_paths(item) for item in value]
+    return value
+
+
 async def _capture_version_graph(
-    saver: Any, run_dir: Path, run_name: str, *, full: bool = False
+    saver: Any,
+    run_dir: Path,
+    run_name: str,
+    *,
+    full: bool = False,
+    output: Path | None = None,
 ) -> dict[str, Any]:
-    """Read the run's checkpoint DAG out of Postgres and persist it as evidence."""
+    """Read the run's checkpoint DAG out of Postgres and persist it as evidence.
+
+    Writes to ``output`` (default ``docs/evidence/version-graph.json``).
+    Every path in the artifact is repo-relative.
+    """
     from app.meta_harness import branches as br
     from app.meta_harness import runs as runs_mod
     from app.meta_harness import versioning as ver
@@ -1873,11 +2082,10 @@ async def _capture_version_graph(
     graph = _rebuild_graph(run_dir, manifest, saver)
 
     version = await ver.capture_evidence(
-        graph, run_id=run_name, run_dir=run_dir, full=full
+        graph, run_id=run_name, run_dir=run_dir, full=full, repo_root=REPO_ROOT
     )
-    runs_mod.write_json_atomic(
-        REPO_ROOT / "docs" / "evidence" / "version-graph.json", version
-    )
+    destination = output if output is not None else _abs(DEFAULT_VERSION_GRAPH_EVIDENCE)
+    runs_mod.write_json_atomic(destination, _portable_paths(version))
     return version
 
 
@@ -1981,7 +2189,7 @@ def _echo_first_difference(committed: str, derived: str) -> None:
 def report_version_graph(
     run_name: str = typer.Argument(..., help="Run name (under runs/)"),
     output: str = typer.Option(
-        "docs/evidence/version-graph.json",
+        DEFAULT_VERSION_GRAPH_EVIDENCE,
         "--output",
         help="Where to write the version-graph evidence artifact.",
     ),
@@ -2005,17 +2213,15 @@ def report_version_graph(
     from app.meta_harness.persistence import persistence_layer
 
     run_dir, _ = _require_run(run_name)
+    path = _abs(output)
 
     async def _run() -> dict[str, Any]:
         async with persistence_layer() as saver:
             return await _capture_version_graph(
-                saver, run_dir, run_name, full=full
+                saver, run_dir, run_name, full=full, output=path
             )
 
     version = _run_async(_run())
-    path = Path(output)
-    if not path.is_absolute():
-        path = REPO_ROOT / path
     typer.echo(
         json.dumps(
             {
