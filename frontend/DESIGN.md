@@ -82,6 +82,11 @@ are about honesty rather than style:
 - **Unknown is not zero.** A smoke-failed candidate shows "—", never 0.00,
   and is drawn in orange, not red.
 
+**Scope.** This system covers the dashboard: the runs list at `/runs` and
+every run page under it. The landing page at `/` deliberately keeps its
+original animated title screen and palette (the `--color-void`, `--color-cyan`
+… tokens at the end of `globals.css`); those tokens are for that page only.
+
 ## 2. Colour
 
 Use the surface ladder for hierarchy instead of shadows: canvas → surface-1
@@ -230,7 +235,8 @@ black scrim. Title 15px semibold, labels 12px `ink-subtle`, inputs on
 **Don't**
 - Don't use pure black (#000) for the canvas, or drop shadows on dark.
 - Don't use lavender as a fill, a chart colour or a decoration.
-- Don't introduce gradients, glows, scanlines or typing animations.
+- Don't introduce gradients, glows, scanlines or typing animations
+  (the landing page's title screen is the one exception; see §1).
 - Don't write labels in all caps or add letter-spacing to small text.
 - Don't render a smoke-failed candidate as 0, or mock numbers without the
   "Mock data" tag.

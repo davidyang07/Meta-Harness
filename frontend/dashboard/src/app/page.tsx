@@ -1,10 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import Link from 'next/link';
+import { useState, useEffect, useCallback } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { useRouter } from 'next/navigation';
 import {
-  API_BASE_URL,
   ApiUnauthorizedError,
   createRun,
   listRuns,
@@ -12,281 +11,394 @@ import {
   type RunListItem,
 } from '@/lib/api';
 import { useAuthStatus } from '@/lib/auth-client';
-import { runStatusMeta } from '@/lib/status';
-import { BrandMark } from '@/components/TopBar';
-import { StatusPill } from '@/components/ui/Badge';
-import { Segmented } from '@/components/ui/FilterBar';
 
-const DEMO_RUN = 'demo-2026-04-25';
+const TITLE = 'META-HARNESS';
+const SUBTITLE = 'autonomous agent evolution monitor';
+const GRID_LINES_H = 12;
+const GRID_LINES_V = 20;
 
 type PresetSuite = {
   id: string;
   label: string;
   description: string;
-  payload: { budget: number; trials: number; workers: number; fresh: boolean };
+  payload: {
+    proposer: 'mock' | 'claude';
+    mock_bench: boolean;
+    budget: number;
+    trials: number;
+    workers: number;
+    fresh: boolean;
+  };
 };
 
 const PRESET_SUITES: PresetSuite[] = [
   {
     id: 'quick-smoke',
-    label: 'Quick smoke',
-    description: '1 iteration, 1 trial per task. Confirms the wiring.',
-    payload: { budget: 1, trials: 1, workers: 1, fresh: true },
+    label: 'Quick Smoke',
+    description: '1 iter, 1 trial - confirms wiring fast',
+    payload: { proposer: 'mock', mock_bench: true, budget: 1, trials: 1, workers: 1, fresh: true },
   },
   {
     id: 'balanced',
     label: 'Balanced',
-    description: '3 iterations, 2 trials per task. A realistic local signal.',
-    payload: { budget: 3, trials: 2, workers: 2, fresh: true },
+    description: '3 iter, 2 trials - realistic local signal',
+    payload: { proposer: 'mock', mock_bench: true, budget: 3, trials: 2, workers: 2, fresh: true },
   },
   {
     id: 'stress',
     label: 'Stress',
-    description: '5 iterations, 5 trials per task. Heavier event volume.',
-    payload: { budget: 5, trials: 5, workers: 3, fresh: true },
+    description: '5 iter, 5 trials - heavier event volume',
+    payload: { proposer: 'mock', mock_bench: true, budget: 5, trials: 5, workers: 3, fresh: true },
   },
 ];
 
-type Proposer = 'mock' | 'claude';
-type Bench = 'mock' | 'measured';
+function GridBackground() {
+  return (
+    <svg className="absolute inset-0 w-full h-full" xmlns="http://www.w3.org/2000/svg">
+      {Array.from({ length: GRID_LINES_H }).map((_, i) => {
+        const y = ((i + 1) / (GRID_LINES_H + 1)) * 100;
+        return (
+          <motion.line
+            key={`h-${i}`}
+            x1="0%"
+            y1={`${y}%`}
+            x2="100%"
+            y2={`${y}%`}
+            stroke="#22222e"
+            strokeWidth={0.5}
+            initial={{ pathLength: 0, opacity: 0 }}
+            animate={{ pathLength: 1, opacity: 1 }}
+            transition={{ duration: 1.8, delay: 0.05 * i, ease: 'easeOut' }}
+          />
+        );
+      })}
+      {Array.from({ length: GRID_LINES_V }).map((_, i) => {
+        const x = ((i + 1) / (GRID_LINES_V + 1)) * 100;
+        return (
+          <motion.line
+            key={`v-${i}`}
+            x1={`${x}%`}
+            y1="0%"
+            x2={`${x}%`}
+            y2="100%"
+            stroke="#22222e"
+            strokeWidth={0.5}
+            initial={{ pathLength: 0, opacity: 0 }}
+            animate={{ pathLength: 1, opacity: 1 }}
+            transition={{ duration: 1.8, delay: 0.05 * i + 0.3, ease: 'easeOut' }}
+          />
+        );
+      })}
+    </svg>
+  );
+}
 
-function relativeTime(iso: string | null | undefined): string {
-  if (!iso) return '—';
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return '—';
-  const minutes = Math.round((Date.now() - then) / 60000);
-  if (minutes < 1) return 'just now';
-  if (minutes < 60) return `${minutes} min ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours} h ago`;
-  return new Date(iso).toLocaleDateString();
+function TypingTitle({ onComplete }: { onComplete: () => void }) {
+  const [charCount, setCharCount] = useState(0);
+  const [showCursor, setShowCursor] = useState(true);
+
+  const stableOnComplete = useCallback(() => onComplete(), [onComplete]);
+
+  useEffect(() => {
+    if (charCount < TITLE.length) {
+      const timeout = setTimeout(() => setCharCount(c => c + 1), 90 + Math.random() * 60);
+      return () => clearTimeout(timeout);
+    } else {
+      const timeout = setTimeout(stableOnComplete, 400);
+      return () => clearTimeout(timeout);
+    }
+  }, [charCount, stableOnComplete]);
+
+  useEffect(() => {
+    const interval = setInterval(() => setShowCursor(c => !c), 530);
+    return () => clearInterval(interval);
+  }, []);
+
+  return (
+    <div className="flex items-center justify-center">
+      <h1 className="text-[clamp(2rem,6vw,4.5rem)] font-bold tracking-[0.3em] text-text-hi">
+        {TITLE.slice(0, charCount).split('').map((char, i) => (
+          <motion.span
+            key={i}
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.15 }}
+            style={{ display: 'inline-block' }}
+          >
+            {char === '-' ? '‐' : char}
+          </motion.span>
+        ))}
+        <span
+          className="inline-block w-[0.5ch] h-[1em] bg-cyan ml-1 align-middle"
+          style={{ opacity: showCursor ? 1 : 0 }}
+        />
+      </h1>
+    </div>
+  );
+}
+
+function Scanline() {
+  return (
+    <motion.div
+      className="absolute left-0 right-0 h-0.5 pointer-events-none"
+      style={{
+        background: 'linear-gradient(90deg, transparent, rgba(122,184,173,0.15), transparent)',
+        boxShadow: '0 0 20px rgba(122,184,173,0.08)',
+      }}
+      initial={{ top: '-2px' }}
+      animate={{ top: '100%' }}
+      transition={{ duration: 3, repeat: Infinity, repeatDelay: 4, ease: 'linear' }}
+    />
+  );
+}
+
+function StatusReadout({ visible }: { visible: boolean }) {
+  const lines = [
+    { label: 'SYS', value: 'online', color: 'text-green' },
+    { label: 'VER', value: 'v0.1.0', color: 'text-text-mid' },
+    { label: 'ENV', value: 'relay-hackathon', color: 'text-amber' },
+  ];
+
+  return (
+    <AnimatePresence>
+      {visible && (
+        <motion.div
+          className="absolute bottom-8 left-8 flex flex-col gap-1"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 0.6, delay: 0.2 }}
+        >
+          {lines.map((line, i) => (
+            <motion.div
+              key={line.label}
+              className="flex items-center gap-2 text-[10px]"
+              initial={{ opacity: 0, x: -10 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ duration: 0.3, delay: 0.3 + i * 0.15 }}
+            >
+              <span className="text-text-ghost">{line.label}</span>
+              <span className="text-text-ghost">&mdash;</span>
+              <span className={line.color}>{line.value}</span>
+            </motion.div>
+          ))}
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
 }
 
 export default function Home() {
   const router = useRouter();
+  const [phase, setPhase] = useState<'typing' | 'ready'>('typing');
+  const [entering, setEntering] = useState(false);
   const [runs, setRuns] = useState<RunListItem[]>([]);
   const [live, setLive] = useState<boolean | null>(null);
-  const [launching, setLaunching] = useState(false);
+  const [launchingPreset, setLaunchingPreset] = useState<string | null>(null);
   const [launchError, setLaunchError] = useState<string | null>(null);
-  const [presetId, setPresetId] = useState<string>(PRESET_SUITES[1].id);
-  const [proposer, setProposer] = useState<Proposer>('mock');
-  const [bench, setBench] = useState<Bench>('mock');
+  const [selectedPresetId, setSelectedPresetId] = useState<string>(PRESET_SUITES[1]?.id ?? PRESET_SUITES[0].id);
+  const [mockModeEnabled, setMockModeEnabled] = useState(true);
+  const [proposerMode, setProposerMode] = useState<'mock' | 'claude'>('mock');
   const [authError, setAuthError] = useState<string | null>(null);
   const { enabled: authEnabled, profile } = useAuthStatus();
 
   useEffect(() => {
-    let cancelled = false;
+    if (phase !== 'ready') return;
     isBackendAvailable().then(ok => {
-      if (cancelled) return;
       setLive(ok);
-      if (!ok) return;
-      listRuns()
-        .then(list => {
-          if (!cancelled) setRuns(list);
-        })
-        .catch(error => {
-          if (cancelled) return;
-          setRuns([]);
-          if (error instanceof ApiUnauthorizedError) setAuthError(error.message);
-        });
+      if (ok) {
+        listRuns()
+          .then(setRuns)
+          .catch(error => {
+            setRuns([]);
+            if (error instanceof ApiUnauthorizedError) setAuthError(error.message);
+          });
+      }
     });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  }, [phase]);
 
-  const preset = PRESET_SUITES.find(item => item.id === presetId) ?? PRESET_SUITES[0];
+  const handleEnter = async () => {
+    if (entering) return;
+    setEntering(true);
+    let target = live !== false && runs[0] ? `/runs/${runs[0].run_id}` : '/runs/demo-2026-04-25';
+    if (live === null) {
+      const ok = await isBackendAvailable();
+      if (ok) {
+        const latest = await listRuns().catch(() => []);
+        target = latest[0] ? `/runs/${latest[0].run_id}` : target;
+      }
+    }
+    setTimeout(() => router.push(target), 600);
+  };
 
-  const handleLaunch = async () => {
-    if (launching) return;
+  const handleLaunchPreset = async () => {
+    const preset = PRESET_SUITES.find(item => item.id === selectedPresetId);
+    if (!preset) return;
+    if (launchingPreset) return;
     setLaunchError(null);
-    setLaunching(true);
+    setLaunchingPreset(preset.id);
     try {
       const run = await createRun({
         run_name: `preset-${preset.id}-${Date.now()}`,
         ...preset.payload,
-        proposer,
-        mock_bench: bench === 'mock',
+        proposer: proposerMode,
+        mock_bench: mockModeEnabled,
       });
       router.push(`/runs/${run.run_id}`);
     } catch (error) {
-      setLaunchError(error instanceof Error ? error.message : 'failed to start the run');
-      setLaunching(false);
+      setLaunchError(error instanceof Error ? error.message : 'failed to launch preset');
+    } finally {
+      setLaunchingPreset(null);
     }
   };
 
   return (
-    <div className="h-full flex flex-col bg-canvas overflow-hidden">
-      <header className="h-12 shrink-0 flex items-center justify-between px-4 border-b border-hairline">
-        <nav className="flex items-center gap-2 text-[13px]">
-          <Link href="/" className="flex items-center gap-2 font-semibold text-ink">
-            <BrandMark />
-            Meta-Harness
-          </Link>
-          <span className="text-ink-tertiary">/</span>
-          <span className="text-ink-subtle">Runs</span>
-        </nav>
-        <div className="flex items-center gap-3 text-[13px]">
-          {live !== null && (
-            <StatusPill label={live ? 'Backend connected' : 'Backend offline'} tone={live ? 'green' : 'red'} />
-          )}
-          {/* Without Auth0 there are no /auth routes; the links would 404. */}
-          {authEnabled && (
-            <a href={profile ? '/auth/logout' : '/auth/login'} className="text-ink-subtle hover:text-ink">
-              {profile ? 'Log out' : 'Log in'}
-            </a>
-          )}
-        </div>
-      </header>
+    <div className="relative h-full w-full bg-void overflow-hidden flex items-center justify-center font-mono text-text-hi">
+      <GridBackground />
+      <Scanline />
 
-      <main className="flex-1 overflow-y-auto">
-        <div className="max-w-[1040px] mx-auto px-8 py-10">
-          <div className="mb-8">
-            <h1 className="text-[20px] font-semibold tracking-[-0.3px] text-ink">Runs</h1>
-            <p className="mt-1 text-[13px] text-ink-subtle max-w-[640px]">
-              Each run evolves a coding-agent harness: a proposer rewrites the agent, every candidate is
-              benchmarked on frozen tasks, and every step is checkpointed so you can fork from it.
-            </p>
-          </div>
+      <div className="relative z-10 flex flex-col items-center gap-8">
+        <TypingTitle onComplete={() => setPhase('ready')} />
 
-          {authError && (
-            <div data-testid="auth-error" className="mb-6 rounded-md border border-status-red/40 bg-status-red/10 px-3 py-2 text-[13px] text-status-red">
-              {authError}
-            </div>
+        <AnimatePresence>
+          {phase === 'ready' && (
+            <motion.p
+              className="text-text-mid text-[11px] tracking-[0.25em] uppercase"
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.8 }}
+            >
+              {SUBTITLE}
+            </motion.p>
           )}
+        </AnimatePresence>
 
-          <section className="mb-8 rounded-lg border border-hairline bg-surface-1">
-            <div className="px-5 pt-4 pb-3 border-b border-hairline">
-              <h2 className="text-[13px] font-medium text-ink">Start a run</h2>
-            </div>
-            <div className="px-5 py-4 grid gap-5">
-              <div className="flex flex-wrap items-center gap-x-8 gap-y-3">
-                <div className="flex items-center gap-3">
-                  <span className="text-[12px] text-ink-subtle w-[70px]">Proposer</span>
-                  <Segmented<Proposer>
-                    ariaLabel="Proposer"
-                    options={['mock', 'claude']}
-                    labels={{ mock: 'Mock', claude: 'Claude CLI' }}
-                    active={proposer}
-                    onSelect={setProposer}
-                  />
+        <AnimatePresence>
+          {phase === 'ready' && (
+            <div className="mt-4 flex flex-col items-center gap-3">
+              <motion.button
+                onClick={handleEnter}
+                className="px-8 py-3 border border-border-active rounded text-[11px] font-semibold tracking-[0.2em] uppercase text-cyan hover:bg-hover hover:border-cyan transition-colors cursor-pointer"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.6, delay: 0.3 }}
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+              >
+                {live === false ? 'Enter Mock Dashboard →' : 'Enter Dashboard →'}
+              </motion.button>
+              {/* Without Auth0 there are no /auth routes; the links would 404. */}
+              {authEnabled && (
+                <div className="flex items-center gap-3 text-[10px] uppercase tracking-[0.15em]">
+                  {profile ? (
+                    <a href="/auth/logout" className="text-text-mid hover:text-text-hi transition-colors">
+                      Logout
+                    </a>
+                  ) : (
+                    <a href="/auth/login" className="text-cyan hover:text-text-hi transition-colors">
+                      Login
+                    </a>
+                  )}
                 </div>
-                <div className="flex items-center gap-3">
-                  <span className="text-[12px] text-ink-subtle w-[70px]">Benchmark</span>
-                  <Segmented<Bench>
-                    ariaLabel="Benchmark"
-                    options={['mock', 'measured']}
-                    labels={{ mock: 'Mock scores', measured: 'Measured' }}
-                    active={bench}
-                    onSelect={setBench}
-                  />
+              )}
+              {authError && (
+                <div data-testid="auth-error" className="max-w-115 text-center text-[10px] text-red">
+                  {authError}
                 </div>
-              </div>
-
-              <div role="radiogroup" aria-label="Run size" className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                {PRESET_SUITES.map(item => {
-                  const selected = item.id === presetId;
-                  return (
+              )}
+              <div className="mt-2 w-full max-w-115 rounded border border-border bg-header/80 px-4 py-3">
+                <div className="text-[9px] uppercase tracking-wide text-text-mid mb-2">Preset test suites</div>
+                <div className="mb-3 grid grid-cols-1 md:grid-cols-2 gap-2">
+                  <label className="rounded border border-border px-3 py-2 bg-panel/60">
+                    <div className="text-[9px] uppercase tracking-wide text-text-mid mb-1">Mock benchmark</div>
                     <button
-                      key={item.id}
-                      role="radio"
-                      aria-checked={selected}
-                      onClick={() => setPresetId(item.id)}
-                      className={`text-left rounded-md border px-3 py-2.5 transition-colors ${
-                        selected
-                          ? 'border-hairline-strong bg-surface-3 shadow-[inset_2px_0_0_var(--color-accent)]'
-                          : 'border-hairline bg-surface-2 hover:bg-surface-3'
+                      onClick={() => setMockModeEnabled(prev => !prev)}
+                      className={`rounded border px-2 py-1 text-[10px] uppercase tracking-wide transition-colors ${
+                        mockModeEnabled
+                          ? 'border-amber text-amber hover:border-amber/70'
+                          : 'border-green text-green hover:border-green/70'
                       }`}
                     >
-                      <div className="text-[13px] font-medium text-ink">{item.label}</div>
-                      <div className="mt-0.5 text-[12px] text-ink-subtle">{item.description}</div>
+                      {mockModeEnabled ? 'On (fast mock data)' : 'Off (real benchmark)'}
                     </button>
-                  );
-                })}
-              </div>
+                  </label>
 
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <p className="text-[12px] text-ink-subtle">
-                  {bench === 'mock'
-                    ? 'Mock scores are synthetic and free; the run is labelled “Mock data” everywhere.'
-                    : 'Measured runs call the inner-loop model for every trial and cost real money.'}
-                  {proposer === 'claude' && ' The Claude CLI proposer needs the claude command and credentials.'}
-                </p>
-                <button
-                  onClick={() => void handleLaunch()}
-                  disabled={launching || live === false}
-                  className="h-[30px] px-3 rounded-md bg-accent text-[13px] font-medium text-white hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  {launching ? 'Starting…' : 'Start run'}
-                </button>
-              </div>
-              {launchError && <div className="text-[13px] text-status-red">{launchError}</div>}
-            </div>
-          </section>
-
-          <section className="rounded-lg border border-hairline bg-surface-1 overflow-hidden">
-            <div className="px-5 pt-4 pb-3 border-b border-hairline flex items-center justify-between">
-              <h2 className="text-[13px] font-medium text-ink">Recent runs</h2>
-              {runs.length > 0 && <span className="text-[12px] text-ink-subtle tabular">{runs.length}</span>}
-            </div>
-
-            {live === false && (
-              <div className="px-5 py-6 text-[13px] text-ink-subtle">
-                No backend answered at <span className="font-mono text-ink-muted">{API_BASE_URL}</span>. Start it with{' '}
-                <span className="font-mono text-ink-muted">uv run meta-harness serve</span>, or{' '}
-                <Link href={`/runs/${DEMO_RUN}`} className="text-ink underline decoration-hairline-strong underline-offset-2 hover:decoration-accent">
-                  open the offline demo
-                </Link>
-                .
-              </div>
-            )}
-            {live && runs.length === 0 && !authError && (
-              <div className="px-5 py-6 text-[13px] text-ink-subtle">No runs yet. Start one above.</div>
-            )}
-            {live === null && <div className="px-5 py-6 text-[13px] text-ink-subtle">Connecting…</div>}
-
-            {runs.length > 0 && (
-              <table className="w-full text-[13px]">
-                <thead>
-                  <tr className="text-[12px] text-ink-subtle text-left border-b border-hairline">
-                    <th className="font-normal px-5 py-2">Run</th>
-                    <th className="font-normal px-3 py-2">Status</th>
-                    <th className="font-normal px-3 py-2 text-right">Iteration</th>
-                    <th className="font-normal px-3 py-2 text-right">Best score</th>
-                    <th className="font-normal px-5 py-2 text-right">Started</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {runs.map(run => {
-                    const status = runStatusMeta(run.status);
-                    return (
-                      <tr
-                        key={run.run_id}
-                        onClick={() => router.push(`/runs/${run.run_id}`)}
-                        className="border-b border-hairline last:border-0 hover:bg-surface-2 cursor-pointer"
+                  <label className="rounded border border-border px-3 py-2 bg-panel/60">
+                    <div className="text-[9px] uppercase tracking-wide text-text-mid mb-1">Proposer</div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setProposerMode('mock')}
+                        className={`rounded border px-2 py-1 text-[10px] uppercase tracking-wide transition-colors ${
+                          proposerMode === 'mock'
+                            ? 'border-cyan text-cyan'
+                            : 'border-border text-text-mid hover:text-text-hi'
+                        }`}
                       >
-                        <td className="px-5 py-2.5">
-                          <Link href={`/runs/${run.run_id}`} className="font-mono text-[12px] text-ink hover:underline">
-                            {run.run_id}
-                          </Link>
-                        </td>
-                        <td className="px-3 py-2.5">
-                          <StatusPill label={status.label} tone={status.tone} pulse={status.tone === 'blue'} />
-                        </td>
-                        <td className="px-3 py-2.5 text-right tabular text-ink-muted">{run.iteration}</td>
-                        <td className="px-3 py-2.5 text-right tabular text-ink">
-                          {run.best_score === null || run.best_score === undefined ? '—' : run.best_score.toFixed(2)}
-                        </td>
-                        <td className="px-5 py-2.5 text-right text-ink-subtle">{relativeTime(run.started_at)}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            )}
-          </section>
-        </div>
-      </main>
+                        Mock
+                      </button>
+                      <button
+                        onClick={() => setProposerMode('claude')}
+                        className={`rounded border px-2 py-1 text-[10px] uppercase tracking-wide transition-colors ${
+                          proposerMode === 'claude'
+                            ? 'border-cyan text-cyan'
+                            : 'border-border text-text-mid hover:text-text-hi'
+                        }`}
+                      >
+                        Claude
+                      </button>
+                    </div>
+                  </label>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                  {PRESET_SUITES.map((preset) => (
+                    <div
+                      key={preset.id}
+                      onClick={() => setSelectedPresetId(preset.id)}
+                      className={`text-left rounded border px-3 py-2 transition-colors cursor-pointer ${
+                        selectedPresetId === preset.id
+                          ? 'border-cyan bg-cyan/5'
+                          : 'border-border hover:border-cyan/40'
+                      }`}
+                    >
+                      <div className="text-[10px] font-semibold uppercase tracking-wide text-cyan">{preset.label}</div>
+                      <div className="text-[10px] text-text-mid mt-1">{preset.description}</div>
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-3 flex items-center justify-between gap-3">
+                  <div className="text-[10px] text-text-mid">
+                    Selected: {PRESET_SUITES.find(p => p.id === selectedPresetId)?.label ?? 'None'} · {proposerMode} proposer · {mockModeEnabled ? 'mock bench' : 'real bench'}
+                  </div>
+                  <button
+                    onClick={() => void handleLaunchPreset()}
+                    disabled={launchingPreset !== null}
+                    className="rounded border border-border-active px-3 py-1.5 text-[10px] uppercase tracking-wide text-cyan hover:border-cyan hover:bg-hover disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+                  >
+                    Run selected suite
+                  </button>
+                </div>
+                {launchingPreset && (
+                  <div className="text-[10px] text-text-mid mt-2">Launching {launchingPreset} preset...</div>
+                )}
+                {launchError && (
+                  <div className="text-[10px] text-red mt-2">{launchError}</div>
+                )}
+              </div>
+            </div>
+          )}
+        </AnimatePresence>
+      </div>
+
+      <StatusReadout visible={phase === 'ready'} />
+      <AnimatePresence>
+        {entering && (
+          <motion.div
+            className="absolute inset-0 bg-void z-50"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.5 }}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }

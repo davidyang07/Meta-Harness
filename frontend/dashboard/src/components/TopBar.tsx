@@ -31,7 +31,7 @@ export function TopBar({ onReplay }: { onReplay?: () => void }) {
           Meta-Harness
         </Link>
         <span className="text-ink-tertiary">/</span>
-        <Link href="/" className="text-ink-subtle hover:text-ink">Runs</Link>
+        <Link href="/runs" className="text-ink-subtle hover:text-ink">Runs</Link>
         {run && (
           <>
             <span className="text-ink-tertiary">/</span>

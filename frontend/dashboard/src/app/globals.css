@@ -26,6 +26,22 @@
   --color-status-blue: #4ea7fc;
   --color-status-purple: #bb87fc;
 
+  /* The landing page (src/app/page.tsx) keeps its original look, so it
+     keeps its original palette. Nothing else uses these. */
+  --color-void: #0c0c12;
+  --color-panel: #111118;
+  --color-header: #16161e;
+  --color-hover: #1c1c26;
+  --color-border: #22222e;
+  --color-border-active: #32323e;
+  --color-text-hi: #c8c8d0;
+  --color-text-mid: #707084;
+  --color-text-ghost: #303040;
+  --color-cyan: #7ab8ad;
+  --color-green: #6a9e78;
+  --color-red: #b06068;
+  --color-amber: #b09868;
+
   --font-sans: var(--font-inter), -apple-system, system-ui, "Segoe UI", sans-serif;
   --font-mono: var(--font-jetbrains), ui-monospace, "SF Mono", Menlo, monospace;
 }
@@ -34,10 +50,15 @@ html, body {
   background: var(--color-canvas);
   color: var(--color-ink);
   font-family: var(--font-sans);
-  font-size: 13px;
   height: 100%;
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
+}
+
+/* 13px body text, set on body rather than html so 1rem stays 16px and
+   the spacing scale (h-11 = 44px, h-12 = 48px …) means what DESIGN.md says. */
+body {
+  font-size: 13px;
 }
 
 * {
