@@ -1,36 +1,88 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Meta-Harness dashboard
 
-## Getting Started
+A Next.js 16 app that renders a Meta-Harness run live: the search tree of
+candidates across every branch, the decision log the outer loop streams
+over SSE, per-candidate diffs and test output, and cross-run memory. It
+talks to the FastAPI backend directly from the browser; it has no API of
+its own.
 
-First, run the development server:
+Read [`AGENTS.md`](AGENTS.md) before changing code: this Next.js version
+differs from older ones (for example, `middleware.ts` is now `proxy.ts`).
+
+## Run it
+
+Start the backend from the repository root. Use `meta-harness serve`, not a
+bare `uvicorn`, so persistence comes up on an event loop psycopg can use:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+uv sync
+docker compose -f infra/docker-compose.yml up -d postgres   # optional: real checkpoints
+uv run meta-harness serve --port 8000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Then the dashboard:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+cd frontend/dashboard
+npm ci
+cp .env.example .env.local      # optional; every variable has a default
+npm run dev                     # http://localhost:3000
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+The home page lists the backend's runs and launches preset runs. The mock
+proposer with the mock benchmark costs nothing; its numbers are labelled
+"Mock data (synthetic)" in the status bar wherever they appear.
 
-## Learn More
+With no backend reachable, `/runs/demo-2026-04-25` plays a built-in
+offline demo. Any other run shows an explicit "backend unavailable"
+error rather than fixture data.
 
-To learn more about Next.js, take a look at the following resources:
+## Configuration
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+All variables are optional. See [`.env.example`](.env.example).
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+| Variable | Default | Purpose |
+|---|---|---|
+| `NEXT_PUBLIC_API_BASE_URL` | `http://localhost:8000` | Where the backend listens. |
+| `NEXT_PUBLIC_META_HARNESS_API_TOKEN` | empty | Must match the backend's `META_HARNESS_API_TOKEN` when that is set. Sent as `Authorization: Bearer …` on API calls and as `?token=…` on the event stream. A missing or wrong token shows a 401 message in the status bar. |
+| `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`, `AUTH0_CLIENT_SECRET` (or `AUTH0_CLIENT_ASSERTION_SIGNING_KEY`), `AUTH0_SECRET`, `APP_BASE_URL` | unset | Optional Auth0 login in front of every page, including `/`. Enabled only when all of them are set; otherwise the dashboard is open and shows no Login/Logout links. |
 
-## Deploy on Vercel
+`NEXT_PUBLIC_*` values are compiled into the browser bundle when `next dev`
+starts or `next build` runs, so restart after changing them. The API token
+is therefore visible to anyone who can load the dashboard. It keeps other
+machines off the backend; it is not a user login.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Scripts
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+| Command | What it does |
+|---|---|
+| `npm run dev` | Development server on port 3000 (React StrictMode on). |
+| `npm run build` / `npm run start` | Production build and server. |
+| `npm run lint` | ESLint. |
+| `npx tsc --noEmit` | Type-check, including the e2e specs. |
+| `npm run test:e2e` | Every Playwright project; see below. |
+
+## End-to-end tests
+
+Playwright starts `npm run dev` itself, or reuses a server already on the
+port. Set `DASHBOARD_PORT` to use a port other than 3000; do so whenever
+another checkout's dev server might be on 3000, or the tests will run
+against that checkout's code.
+
+```bash
+npx playwright install chromium                       # once
+npx playwright test --project=mock                    # no backend needed
+uv run meta-harness serve --port 8000                 # then, for the live project:
+npx playwright test --project=live-backend
+```
+
+- `mock` needs no backend. `e2e/dashboard.spec.ts` renders the offline
+  demo with the backend deliberately unreachable. `e2e/fixture-backend.spec.ts`
+  scripts every API response and drives a fake `EventSource` event by
+  event, pinning down candidate verdicts, per-thread frontiers, fork
+  de-duplication, the decision log and the stream's lifecycle.
+- `live-backend` runs a real (mock-proposer, mock-benchmark) run through
+  the real backend and checks runs, checkpoints, forks, branch isolation,
+  diffs and memory. It skips itself if no backend answers at
+  `NEXT_PUBLIC_API_BASE_URL`. If the backend has `META_HARNESS_API_TOKEN`
+  set, export the same value as `NEXT_PUBLIC_META_HARNESS_API_TOKEN`.
