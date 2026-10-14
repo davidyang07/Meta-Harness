@@ -16,28 +16,60 @@ the API still reconstructs the full branch tree. The in-process
 ``branch_registry`` holds live ``asyncio.Task`` handles, and those do
 *not* survive a restart — a branch that was ``running`` when the process
 died is reported as ``interrupted``, never as still running.
+
+More than one process writes ``branches.json``: the API and any
+``meta-harness fork`` running beside it. Every read-modify-write holds a
+cross-process lock, and a running branch records the pid and host that
+own it plus a heartbeat, so a branch another live process is driving is
+reported as running, not interrupted, and cannot be marked cancelled by
+a process that has no way to stop it.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import json
+import logging
+import os
+import socket
+import sys
+import time
 import uuid
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Iterator, Literal
 
 from langgraph.graph import END, START
 
 from app.meta_harness import runs as runs_mod
+
+log = logging.getLogger("meta_harness.branches")
 
 BranchStatus = Literal[
     "created", "running", "completed", "failed", "cancelled", "interrupted"
 ]
 
 INPUT_NODE = "__input__"
+
+#: Statuses of a branch that some process may still be driving.
+ACTIVE_STATUSES = frozenset({"created", "running"})
+
+#: How long a cancel waits for a branch task to actually stop. Bounded,
+#: so one stuck task cannot hang the API request (or shutdown) behind it.
+CANCEL_TIMEOUT_S = 10.0
+
+#: A running branch refreshes ``heartbeat_at`` this often...
+HEARTBEAT_INTERVAL_S = 10.0
+#: ...and is considered dead once its heartbeat is older than this.
+HEARTBEAT_STALE_S = 45.0
+
+#: How long a writer waits for another process's ``branches.json`` lock.
+LOCK_TIMEOUT_S = 10.0
+
+_HOSTNAME = socket.gethostname()
 
 
 @dataclass
@@ -63,6 +95,11 @@ class BranchMetadata:
     #: True while an in-process task is driving this branch. Never
     #: persisted as True — see ``_rehydrate_status``.
     live: bool = False
+    #: The process driving the branch, and when it last proved it was
+    #: alive. Lets another process tell a live branch from a dead one.
+    owner_pid: int | None = None
+    owner_host: str | None = None
+    heartbeat_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable shape for API/CLI callers."""
@@ -163,8 +200,66 @@ def _read_persisted(run_id: str) -> dict[str, dict[str, Any]]:
     }
 
 
+if sys.platform == "win32":  # pragma: no cover - exercised on Windows only
+    import msvcrt
+
+    def _try_lock(fd: int) -> None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+
+    def _unlock(fd: int) -> None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+
+else:
+    import fcntl
+
+    def _try_lock(fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def _unlock(fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def branches_lock(path: Path, *, timeout: float | None = None) -> Iterator[None]:
+    """Hold an exclusive, cross-process lock on ``path``'s sibling lockfile.
+
+    ``flock`` on POSIX and ``msvcrt.locking`` on Windows; both are
+    released by the OS if the holder dies, so a crashed writer cannot
+    leave a stale lock behind. Each acquisition opens its own descriptor,
+    which makes the lock exclusive between threads of one process too.
+    Raises ``TimeoutError`` (an ``OSError``) if it cannot be acquired.
+    """
+    lock_path = path.with_name(f".{path.name}.lock")
+    deadline = time.monotonic() + (LOCK_TIMEOUT_S if timeout is None else timeout)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        while True:
+            try:
+                _try_lock(fd)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"timed out waiting for {lock_path.name}"
+                    ) from None
+                time.sleep(0.01)
+        try:
+            yield
+        finally:
+            _unlock(fd)
+    finally:
+        os.close(fd)
+
+
 def persist_branch(metadata: BranchMetadata) -> None:
     """Mirror one branch's metadata into ``runs/<run_id>/branches.json``.
+
+    The read-modify-write runs under ``branches_lock``: a CLI fork and the
+    API writing the same file used to lose each other's records. The
+    record is snapshotted *inside* the lock, so whichever writer goes last
+    writes the newest state rather than one captured before it waited.
 
     Best-effort: branch history is an observability artifact, and a
     filesystem hiccup must never abort a running branch.
@@ -173,34 +268,130 @@ def persist_branch(metadata: BranchMetadata) -> None:
     if path is None:
         return
     try:
-        existing = _read_persisted(metadata.run_id)
-        record = metadata.to_dict()
-        # ``live`` is process state. Persisting it True would make a
-        # branch look running forever after a crash.
-        record["live"] = False
-        existing[metadata.thread_id] = record
-        runs_mod.write_json_atomic(
-            path,
-            {
-                "run_id": metadata.run_id,
-                "updated_at": _now(),
-                "branches": sorted(
-                    existing.values(), key=lambda b: str(b.get("created_at", ""))
-                ),
-            },
+        with branches_lock(path):
+            existing = _read_persisted(metadata.run_id)
+            record = metadata.to_dict()
+            # ``live`` is process state. Persisting it True would make a
+            # branch look running forever after a crash.
+            record["live"] = False
+            existing[metadata.thread_id] = record
+            runs_mod.write_json_atomic(
+                path,
+                {
+                    "run_id": metadata.run_id,
+                    "updated_at": _now(),
+                    "branches": sorted(
+                        existing.values(),
+                        key=lambda b: str(b.get("created_at", "")),
+                    ),
+                },
+            )
+    except OSError as exc:
+        log.warning(
+            "could not persist branch %s (%s); branch history on disk is stale",
+            metadata.thread_id,
+            exc,
         )
+
+
+def _parse_ts(raw: Any) -> datetime | None:
+    if not isinstance(raw, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _pid_alive(pid: int) -> bool:
+    """Best-effort "does this pid exist on this host"."""
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":  # pragma: no cover - exercised on Windows only
+        # ``os.kill(pid, 0)`` *terminates* the process on Windows. Ask the
+        # kernel instead, and fall back to trusting the heartbeat.
+        try:
+            import ctypes
+
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            handle = kernel32.OpenProcess(0x1000, False, pid)
+            if not handle:
+                return False
+            try:
+                code = ctypes.c_ulong()
+                if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                    return True
+                return code.value == 259  # STILL_ACTIVE
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:  # noqa: BLE001
+            return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
     except OSError:
-        pass
+        return False
+    return True
+
+
+def _owner_alive(record: dict[str, Any]) -> bool:
+    """Is the process that owns this branch record demonstrably still alive?
+
+    This process answers for itself from its task registry. Another
+    process on this host must have a fresh heartbeat *and* an existing
+    pid (a recycled pid alone proves nothing); a process on another host
+    can only be judged by its heartbeat.
+    """
+    pid = record.get("owner_pid")
+    beat = _parse_ts(record.get("heartbeat_at"))
+    if not isinstance(pid, int) or beat is None:
+        return False
+    host = record.get("owner_host")
+    fresh = (datetime.now(timezone.utc) - beat).total_seconds() < HEARTBEAT_STALE_S
+    if host not in (None, _HOSTNAME):
+        return fresh
+    if pid == os.getpid():
+        task = branch_registry.get(str(record.get("thread_id")))
+        return task is not None and not task.done()
+    return fresh and _pid_alive(pid)
+
+
+def owned_elsewhere(metadata: BranchMetadata) -> bool:
+    """True if another live process is driving this branch."""
+    if metadata.status not in ACTIVE_STATUSES or metadata.owner_pid is None:
+        return False
+    if metadata.owner_pid == os.getpid() and metadata.owner_host in (None, _HOSTNAME):
+        return False
+    return _owner_alive(metadata.to_dict())
+
+
+class BranchOwnedElsewhere(RuntimeError):
+    """A branch another live process is driving; this one cannot stop it."""
+
+    def __init__(self, metadata: BranchMetadata) -> None:
+        super().__init__(
+            f"branch {metadata.thread_id} is running in another process "
+            f"(pid {metadata.owner_pid} on {metadata.owner_host}); "
+            "cancel it from that process"
+        )
+        self.metadata = metadata
 
 
 def _rehydrate_status(record: dict[str, Any]) -> dict[str, Any]:
-    """A persisted ``running`` branch is really an interrupted one.
+    """A persisted ``running`` branch is an interrupted one, unless its
+    owner is demonstrably alive.
 
     Its asyncio task died with the process. Reporting it as running
-    would be a lie the UI then shows as a live spinner.
+    would be a lie the UI then shows as a live spinner. A branch another
+    process (a ``meta-harness fork`` beside the API) is still driving,
+    with a fresh heartbeat, really is running and is reported so.
     """
     record = dict(record)
-    if record.get("status") in {"created", "running"}:
+    if record.get("status") in ACTIVE_STATUSES and not _owner_alive(record):
         record["status"] = "interrupted"
         record["error"] = record.get("error") or (
             "process exited while the branch was running; "
@@ -355,18 +546,42 @@ async def worktree_add(
         mods=mods,
         name=name,
         parent_candidate=fork_values.get("best_candidate"),
+        owner_pid=os.getpid(),
+        owner_host=_HOSTNAME,
+        heartbeat_at=_now(),
     )
     branch_metadata[thread_id] = metadata
-    persist_branch(metadata)
+    # File IO (fsync, a lock another process may hold) stays off the
+    # event loop: this runs inside the fork request handler.
+    await asyncio.to_thread(persist_branch, metadata)
 
-    fork_config = await graph.aupdate_state(
-        {"configurable": {"thread_id": thread_id}},
-        fork_values,
-        as_node=as_node,
-    )
+    try:
+        fork_config = await graph.aupdate_state(
+            {"configurable": {"thread_id": thread_id}},
+            fork_values,
+            as_node=as_node,
+        )
+    except BaseException as exc:
+        # Never leave a branch persisted as "created" with nothing behind it.
+        metadata.status = "failed"
+        metadata.finished_at = _now()
+        metadata.error = str(exc) or type(exc).__name__
+        persist_branch(metadata)
+        raise
+
+    if metadata.status == "cancelled":
+        # Cancelled while the fork point was being written: do not start it.
+        task = asyncio.create_task(asyncio.sleep(0), name=f"worktree:{thread_id}")
+        branch_registry[thread_id] = task
+        return metadata, task
+
     metadata.status = "running"
     metadata.started_at = _now()
     metadata.live = True
+    metadata.heartbeat_at = metadata.started_at
+    # Synchronous, and no await until the task is registered: a cancel
+    # (or a fresh re-run's liveness check) must never observe a running
+    # branch it cannot find a task for.
     persist_branch(metadata)
 
     task = asyncio.create_task(
@@ -378,8 +593,13 @@ async def worktree_add(
     return metadata, task
 
 
-async def cancel_branch(thread_id: str) -> BranchMetadata:
+async def cancel_branch(
+    thread_id: str, *, run_id: str | None = None, timeout: float | None = None
+) -> BranchMetadata:
     """Cancel a branch task if this process owns one, and mark it cancelled.
+
+    See ``cancel_branch_outcome``, which also says whether anything
+    changed. This wrapper keeps the original return shape.
 
     Resolved through ``get_branch`` rather than the in-memory registry
     alone, because a branch that outlived the process that created it
@@ -401,19 +621,89 @@ async def cancel_branch(thread_id: str) -> BranchMetadata:
     disk still raises ``KeyError``, which is what the API's 404 path
     depends on.
     """
-    metadata = get_branch(thread_id)
+    metadata, _changed = await cancel_branch_outcome(
+        thread_id, run_id=run_id, timeout=timeout
+    )
+    return metadata
+
+
+async def cancel_branch_outcome(
+    thread_id: str, *, run_id: str | None = None, timeout: float | None = None
+) -> tuple[BranchMetadata, bool]:
+    """Stop a branch and report whether its status actually changed.
+
+    - A task this process drives is cancelled **and awaited**, for at most
+      ``timeout`` seconds (``CANCEL_TIMEOUT_S`` by default). The task's
+      own ``CancelledError`` handler records the cancellation, so a task
+      that finished first stays ``completed`` and nothing changes. A task
+      that has not stopped when the wait ends is left ``running``; the
+      cancel is still in flight and will be recorded when it lands.
+    - A branch another live process drives raises ``BranchOwnedElsewhere``:
+      this process cannot stop it, so it must not claim to have.
+    - A terminal or ``interrupted`` branch is left exactly as it is.
+      Relabelling it ``cancelled`` stops nothing.
+
+    ``run_id`` scopes the lookup: a branch of another run is unknown here
+    and raises ``KeyError``.
+    """
+    metadata = get_branch(thread_id, run_id=run_id)
     if metadata is None:
         raise KeyError(f"unknown branch thread_id: {thread_id}")
+    before = metadata.status
     task = branch_registry.get(thread_id)
     if task is not None and not task.done():
         task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-    if metadata.status not in {"completed", "failed", "cancelled"}:
-        _mark_cancelled(metadata)
-    return metadata
+        await asyncio.wait(
+            {task}, timeout=CANCEL_TIMEOUT_S if timeout is None else timeout
+        )
+        if task.done() and metadata.status in ACTIVE_STATUSES:
+            # The task ended without running ``_run_branch``'s handler
+            # (cancelled before its first step).
+            _mark_cancelled(metadata)
+    elif before in ACTIVE_STATUSES:
+        if owned_elsewhere(metadata):
+            raise BranchOwnedElsewhere(metadata)
+        if branch_metadata.get(thread_id) is metadata:
+            # An in-process record with no task to stop (cancelled while
+            # its fork point was still being written).
+            _mark_cancelled(metadata)
+    changed = before != "cancelled" and metadata.status == "cancelled"
+    return metadata, changed
+
+
+def is_live(metadata: BranchMetadata) -> bool:
+    """True if some process — this one or another live one — drives it."""
+    task = branch_registry.get(metadata.thread_id)
+    if task is not None and not task.done():
+        return True
+    if (
+        branch_metadata.get(metadata.thread_id) is metadata
+        and metadata.status in ACTIVE_STATUSES
+    ):
+        return True
+    return owned_elsewhere(metadata)
+
+
+def live_branches(run_id: str) -> list[BranchMetadata]:
+    """Every branch of ``run_id`` still being driven by a live process."""
+    return [b for b in list_branches(run_id=run_id) if is_live(b)]
+
+
+def forget_run(run_id: str) -> None:
+    """Drop this process's in-memory branch records for ``run_id``.
+
+    Used when a run is re-created fresh: its old branches must not show
+    up in the new run. Handles to tasks that are still running are kept
+    (callers refuse a fresh re-run while any branch is live).
+    """
+    for thread_id, metadata in list(branch_metadata.items()):
+        if metadata.run_id != run_id:
+            continue
+        task = branch_registry.get(thread_id)
+        if task is not None and not task.done():
+            continue
+        branch_metadata.pop(thread_id, None)
+        branch_registry.pop(thread_id, None)
 
 
 def list_branches(*, run_id: str | None = None) -> list[BranchMetadata]:
@@ -440,9 +730,15 @@ def list_branches(*, run_id: str | None = None) -> list[BranchMetadata]:
 
 
 def get_branch(thread_id: str, *, run_id: str | None = None) -> BranchMetadata | None:
-    """Return branch metadata by thread id, from memory or persisted history."""
+    """Return branch metadata by thread id, from memory or persisted history.
+
+    With ``run_id``, only a branch *of that run* is returned: a thread id
+    belonging to another run is unknown here.
+    """
     live = branch_metadata.get(thread_id)
     if live is not None:
+        if run_id is not None and live.run_id != run_id:
+            return None
         return live
     if run_id is None:
         # Fork thread ids are "<parent>.fork.<id>"; the run id is the
@@ -496,18 +792,22 @@ def reconstruct_trajectory(run_id: str) -> dict[str, Any]:
     }
 
 
-async def cancel_all_branches() -> None:
-    """Best-effort cleanup helper for tests and shutdown hooks."""
-    for thread_id in list(branch_registry):
+async def cancel_all_branches(timeout: float | None = None) -> None:
+    """Best-effort cleanup helper for tests and shutdown hooks.
+
+    Cancels every task this process drives and waits for them together,
+    for at most ``timeout`` seconds, so shutdown cannot hang on one task.
+    """
+    pending = [t for t in branch_registry.values() if not t.done()]
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.wait(
+            pending, timeout=CANCEL_TIMEOUT_S if timeout is None else timeout
+        )
+    for thread_id, task in list(branch_registry.items()):
         metadata = branch_metadata.get(thread_id)
-        task = branch_registry.get(thread_id)
-        if task is not None and not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        if metadata and metadata.status == "running":
+        if metadata and metadata.status == "running" and task.done():
             _mark_cancelled(metadata)
 
 
@@ -517,12 +817,26 @@ def clear_branch_state() -> None:
     branch_metadata.clear()
 
 
+async def _heartbeat(metadata: BranchMetadata) -> None:
+    """Refresh ``heartbeat_at`` on disk while the branch runs."""
+    while True:
+        await asyncio.sleep(HEARTBEAT_INTERVAL_S)
+        metadata.heartbeat_at = _now()
+        try:
+            await asyncio.to_thread(persist_branch, metadata)
+        except Exception:  # noqa: BLE001 - a missed beat must not kill the branch
+            pass
+
+
 async def _run_branch(
     graph: Any,
     metadata: BranchMetadata,
     fork_config: dict[str, Any],
     recursion_limit: int,
 ) -> dict[str, Any]:
+    heartbeat = asyncio.create_task(
+        _heartbeat(metadata), name=f"heartbeat:{metadata.thread_id}"
+    )
     try:
         final = await graph.ainvoke(
             None,
@@ -538,6 +852,12 @@ async def _run_branch(
         metadata.live = False
         persist_branch(metadata)
         raise
+    finally:
+        heartbeat.cancel()
+    # Terminal writes are synchronous on purpose: with no await between
+    # the status change and the task finishing, nobody can see a
+    # "completed" branch whose task is still running — or have a late
+    # write land in a run directory that was re-created in between.
     metadata.status = "completed"
     metadata.finished_at = _now()
     metadata.live = False
