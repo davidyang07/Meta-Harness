@@ -17,13 +17,15 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import sys
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from typing import Any, AsyncIterator, Iterable
 
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg import AsyncConnection
+from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
@@ -70,21 +72,27 @@ async def persistence_layer(
         yield saver
 
 
-async def healthcheck(dsn: str | None = None) -> bool:
-    """Return ``True`` iff Postgres is reachable at the configured DSN.
+def healthcheck_conninfo(dsn: str) -> str:
+    """``dsn`` with a 5 s ``connect_timeout``, whatever form ``dsn`` takes.
 
-    NOTE: ``psycopg.AsyncConnection.connect`` rejects an unknown
-    ``timeout`` keyword. The libpq parameter is ``connect_timeout``,
-    which we wire through the conninfo string so it works on both
-    ``postgresql://...`` and key-value DSNs without a kwarg-mismatch
-    breaking the entire test suite (which is what happened during the
-    step-8/step-9 merge — every Postgres-backed test silently skipped).
+    ``psycopg.AsyncConnection.connect`` rejects an unknown ``timeout``
+    keyword; the libpq parameter is ``connect_timeout``. It used to be
+    appended to the string as ``?connect_timeout=5``, which is only valid
+    for a URL. A key-value DSN (``host=... user=meta_harness``) then
+    parsed its last value as ``meta_harness?connect_timeout=5``, the
+    check failed, and the API reported Postgres unreachable and dropped
+    to in-memory checkpointing. ``make_conninfo`` merges the parameter
+    into either form.
     """
+    return make_conninfo(dsn, connect_timeout=5)
+
+
+async def healthcheck(dsn: str | None = None) -> bool:
+    """Return ``True`` iff Postgres is reachable at the configured DSN."""
     try:
         dsn = dsn or get_dsn()
-        sep = "&" if "?" in dsn else "?"
         conn = await AsyncConnection.connect(
-            conninfo=f"{dsn}{sep}connect_timeout=5",
+            conninfo=healthcheck_conninfo(dsn),
             row_factory=dict_row,
             autocommit=True,
         )
@@ -93,3 +101,34 @@ async def healthcheck(dsn: str | None = None) -> bool:
         return True
     except Exception:  # noqa: BLE001 - any connection error means unhealthy
         return False
+
+
+async def delete_threads(checkpointer: Any, thread_ids: Iterable[str]) -> list[str]:
+    """Delete every checkpoint of ``thread_ids`` from ``checkpointer``.
+
+    A fresh re-run reuses its run id as its root thread id, and its forks'
+    ids derive from it. Without this, the new run's checkpoint history
+    starts with the old run's, and ``/checkpoints`` and the fork endpoint
+    offer checkpoints from a run that no longer exists.
+
+    Uses ``adelete_thread`` (or ``delete_thread``) where the saver has
+    one. Returns the ids actually deleted; a saver with neither method
+    deletes nothing, and the caller can see that. Errors propagate: a
+    fresh run that silently kept stale history is the bug being fixed.
+    """
+    deleted: list[str] = []
+    if checkpointer is None:
+        return deleted
+    adelete = getattr(checkpointer, "adelete_thread", None)
+    delete = getattr(checkpointer, "delete_thread", None)
+    for thread_id in dict.fromkeys(thread_ids):
+        if adelete is not None:
+            result = adelete(thread_id)
+            if inspect.isawaitable(result):
+                await result
+        elif delete is not None:
+            await asyncio.to_thread(delete, thread_id)
+        else:
+            break
+        deleted.append(thread_id)
+    return deleted
