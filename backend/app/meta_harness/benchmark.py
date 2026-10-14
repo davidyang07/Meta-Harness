@@ -9,6 +9,13 @@ like measurements.
 Every trial here produces a raw row (see ``metrics.UsageRecorder``), and
 every summary is derived mechanically from those rows. Nothing in this
 module invents a number.
+
+A trial that raises does not take the run down with it. It becomes a row
+with ``status: "error"``, a failed outcome and unknown usage (see
+``metrics.error_trial_row``), and the summary reports how many there
+were. Only cancellation, or a failure outside any single trial, stops a
+run — and then every sibling trial is cancelled and awaited before the
+exception propagates, so nothing keeps running unattended.
 """
 
 from __future__ import annotations
@@ -16,10 +23,12 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 from app.meta_harness import effects as fx
+from app.meta_harness import inner as inner_mod
 from app.meta_harness import metrics as met
 from app.meta_harness import recording as rec
 from app.meta_harness import runs as runs_mod
@@ -34,6 +43,201 @@ def discover_tasks(tasks_dir: Path) -> list[Path]:
     return sorted(
         d for d in tasks_dir.iterdir() if d.is_dir() and (d / "task.json").exists()
     )
+
+
+def recursion_limit_for(harness: Any) -> int:
+    """LangGraph step budget for one inner-loop trial of ``harness``.
+
+    The inner module owns the exact count (``inner.recursion_limit_for``).
+    Where it does not provide one, the bound is computed from the same
+    two knobs it would use: every verify retry can cost a full act phase
+    plus its verify, and an act phase may take up to ``MAX_ACT_TURNS``
+    steps. A fixed limit silently truncated candidates that raised either
+    knob, and a truncated trial reads as a failure of the harness.
+    """
+    exact = getattr(inner_mod, "recursion_limit_for", None)
+    if exact is not None:
+        return int(exact(harness))
+    act_turns = int(getattr(harness, "MAX_ACT_TURNS", 25) or 25)
+    retries = int(getattr(harness, "MAX_VERIFY_RETRIES", 3) or 0)
+    # orient + plan + submit, then (act turns + verify) per attempt, with
+    # headroom for routing steps.
+    return 3 + (retries + 1) * (act_turns + 2) + 10
+
+
+@dataclass(frozen=True)
+class TrialSpec:
+    """One (harness, task, trial) unit of work, fully resolved."""
+
+    task_dir: Path
+    spec: dict[str, Any]
+    trial: int
+    harness_factory: Callable[[], Any]
+    thread_id: str
+    trace_dir: Path | None = None
+    recording_dir: Path | None = None
+    arm: str | None = None
+
+
+def _grade_fields(final: dict[str, Any]) -> dict[str, Any]:
+    """The grading facts a trial row carries, read defensively.
+
+    ``grade_result`` is written by the inner loop's ``submit`` node. A
+    final state without one (an older inner loop, or a scripted graph)
+    reports ``None`` for each field: unknown, not "no changes".
+    """
+    grade = final.get("grade_result")
+    if not isinstance(grade, dict):
+        grade = {}
+    return {
+        "agent_verify_passed": grade.get("agent_verify_passed"),
+        "out_of_plan_changes": grade.get("out_of_plan_changes"),
+    }
+
+
+async def _execute_trial(spec: TrialSpec, *, checkpointer: Any) -> dict[str, Any]:
+    """Run one trial and return its raw row. Never raises for trial errors.
+
+    Called with the worker semaphore already held, so ``wall_time_s``
+    measures the trial and not the time it spent queued behind others.
+    """
+    task_id = spec.task_dir.name
+    started = time.monotonic()
+    harness: Any = None
+    try:
+        harness = spec.harness_factory()
+        writer = rec.TapeWriter() if spec.recording_dir is not None else None
+        # The effects boundary sits INSIDE the usage recorder, so a
+        # later replay's recorder still sees a response (the recorded
+        # one) and reports the recorded token counts.
+        effects: fx.Effects = (
+            fx.RecordingEffects(writer) if writer is not None else fx.Effects()
+        )
+        if writer is not None:
+            fx.instrument_harness_for_effects(harness, effects)
+        usage = met.UsageRecorder()
+        met.instrument_harness(harness, usage)
+        workspace = spec.task_dir / "workspace"
+        with sandbox_for(workspace) as sandbox:
+            task_dict = dict(spec.spec)
+            # The pristine workspace the submit node grades against. It
+            # never leaves this process's view of the task, and the
+            # agent's sandbox is a copy, so the agent cannot edit it.
+            task_dict["_source_workspace"] = str(workspace)
+            if spec.trace_dir is not None:
+                spec.trace_dir.mkdir(parents=True, exist_ok=True)
+                task_dict["_trace_dir"] = str(spec.trace_dir)
+            graph = build_inner_graph(
+                harness, checkpointer=checkpointer, effects=effects
+            )
+            if writer is not None:
+                # Imported lazily: ``replay`` imports ``inner``, which
+                # this module also builds graphs from, so a module-level
+                # import would close a cycle.
+                from app.meta_harness import replay as replay_mod  # noqa: PLC0415
+
+                await replay_mod.assert_thread_unused(graph, thread_id=spec.thread_id)
+            final = await graph.ainvoke(
+                initial_inner_state(task_dict=task_dict, workspace=sandbox),
+                config={
+                    "configurable": {"thread_id": spec.thread_id},
+                    "recursion_limit": recursion_limit_for(harness),
+                },
+            )
+            if writer is not None:
+                from app.meta_harness import replay as replay_mod  # noqa: PLC0415
+
+                await replay_mod.finalize_recording(
+                    graph,
+                    writer=writer,
+                    thread_id=spec.thread_id,
+                    task_dict=task_dict,
+                    workspace=sandbox,
+                    harness=harness,
+                    usage=usage,
+                    final_state=final,
+                    recording_dir=spec.recording_dir,  # type: ignore[arg-type]
+                )
+    except Exception as exc:  # noqa: BLE001 — one trial must not abort the run
+        row = met.error_trial_row(
+            task_id=task_id,
+            trial=spec.trial,
+            error=exc,
+            wall_time_s=time.monotonic() - started,
+            model=getattr(harness, "MODEL", None) if harness is not None else None,
+        )
+        row.update({"agent_verify_passed": None, "out_of_plan_changes": None})
+    else:
+        row = usage.to_trial_row(
+            task_id=task_id,
+            trial=spec.trial,
+            passed=(final.get("score") or 0.0) >= 1.0,
+            score=float(final.get("score") or 0.0),
+            wall_time_s=time.monotonic() - started,
+            model=getattr(harness, "MODEL", None),
+        )
+        row.update(_grade_fields(final))
+
+    row["inner_thread_id"] = spec.thread_id
+    if spec.arm is not None:
+        row["arm"] = spec.arm
+    if spec.recording_dir is not None:
+        row["recording_dir"] = str(spec.recording_dir)
+    if spec.trace_dir is not None:
+        runs_mod.write_json_atomic(spec.trace_dir / "metrics.json", row)
+    return row
+
+
+async def run_trial_specs(
+    specs: list[TrialSpec],
+    *,
+    workers: int,
+    checkpointer: Any = None,
+    on_trial: Callable[[dict[str, Any]], None] | None = None,
+) -> list[dict[str, Any]]:
+    """Run trials under one worker pool, in the order given.
+
+    Trials start in list order: the semaphore admits waiters first come,
+    first served, so a caller that interleaves two arms gets them
+    interleaved in time as well. Rows come back in the same order.
+
+    Recording needs a checkpointer, because a replay is positioned by
+    checkpoint; asking for a tape without one is a configuration error
+    and fails before any trial starts rather than as N error rows.
+    """
+    for spec in specs:
+        if spec.recording_dir is not None and checkpointer is None:
+            raise ValueError(
+                f"trial {spec.task_dir.name}/{spec.trial} asked to be recorded but "
+                "no checkpointer is configured; a tape with no checkpoint history "
+                "cannot be replayed from a checkpoint"
+            )
+
+    sem = asyncio.Semaphore(max(1, workers))
+    rows: list[dict[str, Any] | None] = [None] * len(specs)
+
+    async def _run(index: int, spec: TrialSpec) -> None:
+        async with sem:
+            row = await _execute_trial(spec, checkpointer=checkpointer)
+        rows[index] = row
+        if on_trial is not None:
+            on_trial(row)
+
+    tasks = [
+        asyncio.create_task(_run(index, spec), name=f"trial:{spec.thread_id}")
+        for index, spec in enumerate(specs)
+    ]
+    try:
+        await asyncio.gather(*tasks)
+    except BaseException:
+        # Cancellation, or a failure no single trial owns (a progress
+        # callback raising): stop every sibling and wait for it, so no
+        # trial keeps spending against a run that has already ended.
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    return [row for row in rows if row is not None]
 
 
 async def run_trials(
@@ -60,94 +264,22 @@ async def run_trials(
     a trial that asks for one without a checkpointer fails loudly rather
     than writing a tape nothing can replay from.
     """
-    work = [
-        (td, json.loads((td / "task.json").read_text()), t)
+    specs = [
+        TrialSpec(
+            task_dir=td,
+            spec=json.loads((td / "task.json").read_text()),
+            trial=t,
+            harness_factory=harness_factory,
+            thread_id=inner_thread_id_for(td.name, t),
+            trace_dir=trace_dir_for(td.name, t),
+            recording_dir=recording_dir_for(td.name, t) if recording_dir_for else None,
+        )
         for td in task_dirs
         for t in range(1, trials + 1)
     ]
-    sem = asyncio.Semaphore(max(1, workers))
-
-    async def _one(td: Path, spec: dict[str, Any], trial_idx: int) -> dict[str, Any]:
-        task_id = td.name
-        trace_dir = trace_dir_for(task_id, trial_idx)
-        thread_id = inner_thread_id_for(task_id, trial_idx)
-        recording_dir = (
-            recording_dir_for(task_id, trial_idx) if recording_dir_for else None
-        )
-        if recording_dir is not None and checkpointer is None:
-            raise ValueError(
-                f"trial {task_id}/{trial_idx} asked to be recorded but no "
-                "checkpointer is configured; a tape with no checkpoint history "
-                "cannot be replayed from a checkpoint"
-            )
-        started = time.monotonic()
-        async with sem:
-            harness = harness_factory()
-            writer = rec.TapeWriter() if recording_dir is not None else None
-            # The effects boundary sits INSIDE the usage recorder, so a
-            # later replay's recorder still sees a response (the recorded
-            # one) and reports the recorded token counts.
-            effects: fx.Effects = (
-                fx.RecordingEffects(writer) if writer is not None else fx.Effects()
-            )
-            if writer is not None:
-                fx.instrument_harness_for_effects(harness, effects)
-            usage = met.UsageRecorder()
-            met.instrument_harness(harness, usage)
-            with sandbox_for(td / "workspace") as sandbox:
-                task_dict = dict(spec)
-                if trace_dir is not None:
-                    trace_dir.mkdir(parents=True, exist_ok=True)
-                    task_dict["_trace_dir"] = str(trace_dir)
-                graph = build_inner_graph(
-                    harness, checkpointer=checkpointer, effects=effects
-                )
-                if writer is not None:
-                    from app.meta_harness import replay as replay_mod  # noqa: PLC0415
-
-                    await replay_mod.assert_thread_unused(graph, thread_id=thread_id)
-                final = await graph.ainvoke(
-                    initial_inner_state(task_dict=task_dict, workspace=sandbox),
-                    config={
-                        "configurable": {"thread_id": thread_id},
-                        "recursion_limit": 100,
-                    },
-                )
-                if writer is not None:
-                    # Imported lazily: ``replay`` imports ``inner``, which
-                    # this module also builds graphs from, so a
-                    # module-level import would close a cycle.
-                    from app.meta_harness import replay as replay_mod  # noqa: PLC0415
-
-                    await replay_mod.finalize_recording(
-                        graph,
-                        writer=writer,
-                        thread_id=thread_id,
-                        task_dict=task_dict,
-                        workspace=sandbox,
-                        harness=harness,
-                        usage=usage,
-                        final_state=final,
-                        recording_dir=recording_dir,  # type: ignore[arg-type]
-                    )
-        row = usage.to_trial_row(
-            task_id=task_id,
-            trial=trial_idx,
-            passed=(final.get("score") or 0.0) >= 1.0,
-            score=float(final.get("score") or 0.0),
-            wall_time_s=round(time.monotonic() - started, 3),
-        )
-        row["inner_thread_id"] = thread_id
-        if recording_dir is not None:
-            row["recording_dir"] = str(recording_dir)
-        if trace_dir is not None:
-            runs_mod.write_json_atomic(trace_dir / "metrics.json", row)
-        if on_trial is not None:
-            on_trial(row)
-        return row
-
-    rows = await asyncio.gather(*[_one(td, spec, t) for td, spec, t in work])
-    return list(rows)
+    return await run_trial_specs(
+        specs, workers=workers, checkpointer=checkpointer, on_trial=on_trial
+    )
 
 
 def per_task_breakdown(
@@ -163,6 +295,7 @@ def per_task_breakdown(
         out[task_id] = {
             "pass_rate": round(sum(outcomes) / len(outcomes), 4) if outcomes else 0.0,
             "trials": outcomes,
+            "errored_trials": sum(1 for r in task_rows if met.is_error_row(r)),
         }
     return out
 
