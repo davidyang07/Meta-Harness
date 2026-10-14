@@ -9,6 +9,7 @@ DSN. Bring it up with::
 from __future__ import annotations
 
 import asyncio
+import uuid
 import sys
 from pathlib import Path
 
@@ -47,6 +48,8 @@ async def test_add_and_search_pattern():
             mechanism_axis="exploitation",
             score_delta=0.08,
             run_id="test-run-a",
+            candidate=uuid.uuid4().hex,
+            metrics_source="measured",
             domain="test-domain",
         )
         assert key  # non-empty
@@ -70,6 +73,8 @@ async def test_list_namespace_returns_all():
             mechanism_axis="exploration",
             score_delta=0.05,
             run_id="test-run-list",
+            candidate=uuid.uuid4().hex,
+            metrics_source="measured",
             domain="test-list-domain",
         )
         entries = await list_namespace(store, domain="test-list-domain", limit=50)
@@ -90,6 +95,8 @@ async def test_dedup_keeps_both_with_separate_evidence():
             mechanism_axis="exploitation",
             score_delta=0.06,
             run_id="run-alpha",
+            candidate=uuid.uuid4().hex,
+            metrics_source="measured",
             domain="test-dedup",
         )
         k2 = await add_pattern(
@@ -98,6 +105,8 @@ async def test_dedup_keeps_both_with_separate_evidence():
             mechanism_axis="exploitation",
             score_delta=0.07,
             run_id="run-beta",
+            candidate=uuid.uuid4().hex,
+            metrics_source="measured",
             domain="test-dedup",
         )
         assert k1 != k2  # distinct keys
@@ -154,13 +163,17 @@ def test_format_patterns_renders_markdown():
 
 
 async def test_outer_loop_with_memory_store(tmp_path: Path):
-    """A mock outer loop with memory_store wired in writes at least one
-    pattern to memory on accepted candidates."""
+    """A mock-benchmarked outer loop with memory wired in writes nothing.
+
+    Its accepted candidates are accepted on synthetic scores, and a
+    pattern built on one would reach a real proposer's prompt as a
+    learned fact (invariant 5)."""
     from app.meta_harness.outer import run_outer_loop  # noqa: PLC0415
     from app.meta_harness.persistence import persistence_layer  # noqa: PLC0415
     from app.meta_harness.runs import make_run_dir  # noqa: PLC0415
 
-    run_dir = make_run_dir(tmp_path, "test-memory-outer", fresh=True)
+    run_name = f"test-memory-outer-{uuid.uuid4().hex[:8]}"
+    run_dir = make_run_dir(tmp_path, run_name, fresh=True)
     eval_tasks_dir = REPO_ROOT / "eval" / "tasks"
 
     async with persistence_layer() as saver, memory_store() as mstore:
@@ -178,13 +191,12 @@ async def test_outer_loop_with_memory_store(tmp_path: Path):
         )
 
         assert final["iteration"] == 2
+        # The mock scores do accept candidates...
+        assert any(c["status"] == "accepted" for c in final["candidates"])
 
-        # At least one pattern should have been written (mock candidates
-        # are auto-accepted since they start from baseline).
-        domain = "coding-agent"
-        results = await search_patterns(mstore, domain=domain, limit=50)
-        # We can't be 100% certain mock candidates are accepted (depends
-        # on mock_bench scoring), but if any were accepted, patterns exist.
-        # At minimum, verify the store is queryable without error.
-        assert isinstance(results, list)
+        # ...and none of those acceptances became a pattern.
+        results = await search_patterns(mstore, domain="coding-agent", limit=1000)
+        assert not [
+            r for r in results if run_name in (r.get("evidence_run_ids") or [])
+        ]
 

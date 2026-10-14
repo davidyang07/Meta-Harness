@@ -84,6 +84,8 @@ async def test_cross_run_pattern_propagation(tmp_path: Path):
             mechanism_axis="exploitation",
             score_delta=0.08,
             run_id="e2e-run-a",
+            candidate=uuid.uuid4().hex,
+            metrics_source="measured",
             domain=domain,
         )
 
@@ -133,6 +135,8 @@ async def test_memory_injection_into_proposer_prior():
             mechanism_axis="exploration",
             score_delta=0.04,
             run_id="inject-test-run",
+            candidate=uuid.uuid4().hex,
+            metrics_source="measured",
             domain="e2e-inject-test",
         )
 
@@ -170,6 +174,8 @@ async def test_pattern_value_schema():
             mechanism_axis="exploitation",
             score_delta=0.05,
             run_id="schema-test",
+            candidate=uuid.uuid4().hex,
+            metrics_source="measured",
             domain="e2e-schema-test",
         )
         results = await search_patterns(mstore, domain="e2e-schema-test", limit=1)
@@ -217,6 +223,8 @@ async def test_patterns_sorted_by_recency():
             mechanism_axis="exploration",
             score_delta=0.02,
             run_id="order-test",
+            candidate=uuid.uuid4().hex,
+            metrics_source="measured",
             domain="e2e-order-test",
         )
         time.sleep(0.01)  # ensure different created_at
@@ -226,6 +234,8 @@ async def test_patterns_sorted_by_recency():
             mechanism_axis="exploration",
             score_delta=0.04,
             run_id="order-test",
+            candidate=uuid.uuid4().hex,
+            metrics_source="measured",
             domain="e2e-order-test",
         )
 
@@ -248,6 +258,8 @@ async def test_search_respects_limit():
                 mechanism_axis="exploitation",
                 score_delta=0.01,
                 run_id="limit-test",
+                candidate=uuid.uuid4().hex,
+                metrics_source="measured",
                 domain="e2e-limit-test",
             )
         results = await search_patterns(mstore, domain="e2e-limit-test", limit=1)
@@ -257,14 +269,17 @@ async def test_search_respects_limit():
 # ── 7. Outer loop with memory — verify accepted writes pattern ───────
 
 
-async def test_accepted_candidate_writes_memory_pattern(tmp_path: Path):
-    """When a mock candidate is accepted, a pattern with this run's id
-    in ``evidence_run_ids`` should appear in the coding-agent domain.
+async def test_mock_accepted_candidates_never_write_memory_patterns(tmp_path: Path):
+    """A mock-benchmarked acceptance must not become cross-run memory.
+
+    The documented ``loop --proposer mock --mock-bench`` command accepts
+    candidates on synthetic "+10% per iteration" scores. Stored as
+    patterns, those reached the real proposer's system prompt as learned
+    facts. Measured acceptances are covered without Postgres in
+    ``test_memory_measured_only.py``.
 
     Resilient to test pollution: prior runs accumulate entries in the
-    ``coding-agent`` namespace, which can push the total beyond a
-    ``limit=N`` window and make a count-based ``after > before``
-    assertion plateau at ``N``. We instead look for entries whose
+    ``coding-agent`` namespace, so we look for entries whose
     ``evidence_run_ids`` contains the unique run name from THIS test.
     """
     eval_tasks_dir = REPO_ROOT / "eval" / "tasks"
@@ -286,21 +301,17 @@ async def test_accepted_candidate_writes_memory_pattern(tmp_path: Path):
         )
 
         accepted = [c for c in final["candidates"] if c["status"] == "accepted"]
-        if accepted:
-            # Search a wide window so a polluted namespace doesn't hide
-            # newly-written entries.
-            entries = await search_patterns(
-                mstore, domain="coding-agent", limit=1000
-            )
-            this_run_entries = [
-                e for e in entries
-                if run_name in (e.get("evidence_run_ids") or [])
-            ]
-            assert this_run_entries, (
-                f"Expected ≥1 pattern with evidence_run_ids=['{run_name}'] "
-                f"after {len(accepted)} accepted candidate(s); none found "
-                f"among {len(entries)} entries scanned"
-            )
+        assert accepted, "the mock scores should accept at least one candidate"
+        # Search a wide window so a polluted namespace doesn't hide
+        # newly-written entries.
+        entries = await search_patterns(mstore, domain="coding-agent", limit=1000)
+        this_run_entries = [
+            e for e in entries if run_name in (e.get("evidence_run_ids") or [])
+        ]
+        assert this_run_entries == [], (
+            f"{len(accepted)} mock-scored acceptance(s) were written to memory: "
+            f"{this_run_entries}"
+        )
 
 
 
