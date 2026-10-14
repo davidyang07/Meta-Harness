@@ -8,6 +8,10 @@ its own.
 
 Read [`AGENTS.md`](AGENTS.md) before changing code: this Next.js version
 differs from older ones (for example, `middleware.ts` is now `proxy.ts`).
+Follow [`../DESIGN.md`](../DESIGN.md) for anything visual: it holds the
+colour, type and spacing tokens (also defined in `src/app/globals.css`),
+the status colour mapping in `src/lib/status.ts`, and the layout patterns
+the panes follow.
 
 ## Run it
 

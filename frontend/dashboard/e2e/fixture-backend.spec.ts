@@ -181,11 +181,11 @@ test.describe('Dashboard against a scripted backend', () => {
     await expect(node(page, 'fork-cand')).toHaveAttribute('data-status', 'best');
     // No score, so no 0.00.
     await expect(node(page, 'cand-smoke').getByTestId('trajectory-node-score')).toHaveText('—');
-    await expect(node(page, 'cand-smoke')).toContainText('SMOKE FAILED');
+    await expect(node(page, 'cand-smoke')).toContainText('Smoke failed');
   });
 
   test('a checkpoint 404 still loads branches and opens exactly one stream', async ({ page }) => {
-    await expect(page.getByTestId('branch-count')).toContainText('1 branches');
+    await expect(page.getByTestId('branch-count')).toContainText('1 branch');
     // React StrictMode mounts the page twice in dev; only one stream may survive.
     await page.waitForTimeout(500);
     expect(await openStreams(page)).toBe(1);
@@ -271,14 +271,14 @@ test.describe('Dashboard against a scripted backend', () => {
     });
 
     await node(page, 'fork-cand').dispatchEvent('contextmenu');
-    await expect(page.locator('text=⑂ Create Fork')).toBeVisible();
+    await expect(page.getByRole('dialog', { name: 'Create fork' })).toBeVisible();
     // Resolved from the fork's own checkpoint history, not the root's.
     await expect(page.getByText('checkpoint ck-fork-2')).toBeVisible();
     await page.getByPlaceholder(/Explore few-shot/).fill('try a narrower plan');
-    await page.getByRole('button', { name: 'Create Fork' }).click();
+    await page.getByRole('button', { name: 'Create fork', exact: true }).click();
 
     // The modal closes once the fork is accepted and the branches reloaded.
-    await expect(page.locator('text=⑂ Create Fork')).toHaveCount(0);
+    await expect(page.getByRole('dialog', { name: 'Create fork' })).toHaveCount(0);
     await expect(page.getByText('Fork Created')).toHaveCount(1);
     // One card, and it is the dashboard's record: it knows the prior.
     await expect(page.getByText('try a narrower plan')).toBeVisible();
@@ -293,7 +293,7 @@ test.describe('Dashboard against a scripted backend', () => {
 
   test("after a fork's node is auto-selected, the user can select another node", async ({ page }) => {
     const NEW_FORK = `${RUN}.fork.eeee0000`;
-    const focus = page.getByText('Candidate focus:');
+    const focus = page.getByTestId('candidate-focus');
     await emit(page, 'fork-created', { thread_id: NEW_FORK, parent_thread_id: RUN, parent_checkpoint_id: 'ck-main-1' }, 'evt-fork-b');
     await emit(page, 'candidate-created', { thread_id: NEW_FORK, candidate: 'branch-first', parent: 'cand-accepted', iteration: 2 }, 'evt-bf');
     await expect(focus).toContainText('branch-first');

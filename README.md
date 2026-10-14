@@ -138,7 +138,7 @@ Four operations are called "replay"; only one earns the unqualified phrase
 | Proposer | Claude Code CLI subprocess, primed with `SKILL.md` via `--append-system-prompt` |
 | Experiment tracking | Weights & Biases, optional — disabled, offline and online modes |
 | CLI | Typer + python-dotenv |
-| Frontend | Next.js 16, Tailwind 4, D3, Monaco, optional Auth0 |
+| Frontend | Next.js 16, Tailwind 4, Monaco, optional Auth0 — design system in [`frontend/DESIGN.md`](frontend/DESIGN.md) |
 | Workspace tooling | uv (workspace mode: `sdk/` + `backend/`) |
 | Testing | pytest, pytest-asyncio, Playwright |
 

@@ -1,25 +1,15 @@
 'use client';
-import { useCallback, useRef, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { KeyboardEvent, MouseEvent } from 'react';
 import { useParams } from 'next/navigation';
-import * as d3 from 'd3';
-import { forkKey, useDashboard, useDashboardDispatch } from '@/lib/state';
+import { forkBranchCount, forkKey, useDashboard, useDashboardDispatch } from '@/lib/state';
 import { ForkModal } from './ForkModal';
 import { resolveCheckpointForNode } from '@/lib/api';
+import { deltaTone, signedDelta } from '@/lib/format';
+import { statusMeta, TONE_HEX, TONE_TEXT } from '@/lib/status';
+import { Tag } from './ui/Badge';
+import { ForkIcon } from './ui/Icons';
 import type { ForkEvent, TreeNode } from '@/lib/types';
-
-const STATUS_STYLES: Record<string, { border: string; bg: string; text: string }> = {
-  seed: { border: '#32323e', bg: '#16161e', text: '#c8c8d0' },
-  accepted: { border: '#6a9e78', bg: '#111816', text: '#c8c8d0' },
-  rejected: { border: '#b06068', bg: '#181114', text: '#c8c8d0' },
-  best: { border: '#7ab8ad', bg: '#111616', text: '#c8c8d0' },
-  fork: { border: '#8878a8', bg: '#141218', text: '#c8c8d0' },
-  smoke_failed: { border: '#b09868', bg: '#17150f', text: '#c8c8d0' },
-};
-
-/** Did not win: drawn faded and placed after the live children. */
-function isDiscarded(node: TreeNode): boolean {
-  return node.status === 'rejected' || node.status === 'smoke_failed';
-}
 
 /** The first node of the branch a fork event created, if it has arrived. */
 function nodeForFork(tree: TreeNode[], fork: ForkEvent): TreeNode | undefined {
@@ -32,56 +22,121 @@ function nodeForFork(tree: TreeNode[], fork: ForkEvent): TreeNode | undefined {
   });
 }
 
-const NODE_W = 200;
-const NODE_H = 72;
-const GAP_Y = 32;
-const GAP_X = 16;
+// ── history layout ─────────────────────────────────────────────────────
+//
+// The trajectory is drawn the way LangGraph Studio shows a thread: a
+// readable list, one row per candidate in iteration order, with a git-style
+// lane gutter. The main thread is lane 0; every fork gets its own lane that
+// branches off at the row it was forked from (frontend/DESIGN.md §5).
 
-type LayoutNode = TreeNode & { x: number; y: number };
+const ROW_H = 44;
+const LANE_W = 14;
+const GUTTER_PAD = 10;
 
-function layoutTree(nodes: TreeNode[]): LayoutNode[] {
-  if (nodes.length === 0) return [];
+type Row = { node: TreeNode; lane: number };
+type Lane = { first: number; last: number; parentRow: number | null; parentLane: number; fork: boolean };
 
-  const byName = new Map(nodes.map(n => [n.candidate, n]));
-  const root = nodes.find(n => !n.parent_candidate_name);
-  if (!root) return [];
+function laneKeyOf(node: TreeNode): string {
+  return node.isForkBranch ? `fork:${node.threadId ?? node.candidate}` : 'main';
+}
 
-  const laid: LayoutNode[] = [];
-  const colWidth = NODE_W + GAP_X;
-
-  function place(name: string, depth: number, column: number) {
-    const node = byName.get(name);
-    if (!node) return;
-
-    laid.push({
-      ...node,
-      x: column * colWidth,
-      y: depth * (NODE_H + GAP_Y),
-    });
-
-    const children = nodes.filter(n => n.parent_candidate_name === name);
-    if (children.length === 1) {
-      place(children[0].candidate, depth + 1, column);
-    } else if (children.length > 1) {
-      const mainChildren = children.filter(c => !c.isForkBranch && !isDiscarded(c));
-      const forkChildren = children.filter(c => c.isForkBranch);
-      const rejectedChildren = children.filter(c => !c.isForkBranch && isDiscarded(c));
-      const ordered = [...mainChildren, ...forkChildren, ...rejectedChildren];
-
-      ordered.forEach((child, i) => {
-        place(child.candidate, depth + 1, column + i);
-      });
-    }
+function layoutHistory(tree: TreeNode[]): { rows: Row[]; lanes: Lane[] } {
+  const order = new Map(tree.map((node, i) => [node, i]));
+  const laneIndex = new Map<string, number>([['main', 0]]);
+  // Lanes are numbered by when their branch first appears in the history.
+  for (const node of [...tree].sort((a, b) => a.iteration - b.iteration || order.get(a)! - order.get(b)!)) {
+    const key = laneKeyOf(node);
+    if (!laneIndex.has(key)) laneIndex.set(key, laneIndex.size);
   }
+  const rows: Row[] = tree
+    .map(node => ({ node, lane: laneIndex.get(laneKeyOf(node)) ?? 0 }))
+    .sort(
+      (a, b) =>
+        a.node.iteration - b.node.iteration ||
+        a.lane - b.lane ||
+        order.get(a.node)! - order.get(b.node)!,
+    );
 
-  place(root.candidate, 0, 0);
-  return laid;
+  const rowOf = new Map(rows.map((row, i) => [row.node.candidate, i]));
+  const lanes: Lane[] = Array.from({ length: laneIndex.size }, () => ({
+    first: -1,
+    last: -1,
+    parentRow: null,
+    parentLane: 0,
+    fork: false,
+  }));
+  rows.forEach((row, i) => {
+    const lane = lanes[row.lane];
+    if (lane.first === -1) {
+      lane.first = i;
+      lane.fork = Boolean(row.node.isForkBranch);
+      const parent = row.node.parent_candidate_name;
+      const parentRow = parent !== null ? rowOf.get(parent) : undefined;
+      if (lane.fork && parentRow !== undefined && parentRow < i) {
+        lane.parentRow = parentRow;
+        lane.parentLane = rows[parentRow].lane;
+      }
+    }
+    lane.last = i;
+  });
+  return { rows, lanes };
+}
+
+function laneX(lane: number): number {
+  return GUTTER_PAD + lane * LANE_W;
+}
+
+function Gutter({ index, row, lanes, width }: { index: number; row: Row; lanes: Lane[]; width: number }) {
+  const mid = ROW_H / 2;
+  const meta = statusMeta(row.node.status);
+  const color = TONE_HEX[meta.tone];
+  const x = laneX(row.lane);
+  const segments: React.ReactNode[] = [];
+
+  lanes.forEach((lane, laneNo) => {
+    if (lane.first === -1) return;
+    const start = lane.parentRow ?? lane.first;
+    const stroke = lane.fork ? '#bb87fc' : '#34343a';
+    const lx = laneX(laneNo);
+    if (index > start && index <= lane.last) {
+      segments.push(<line key={`t${laneNo}`} x1={lx} x2={lx} y1={0} y2={index === lane.first || index === lane.last ? mid : ROW_H} stroke={stroke} strokeWidth={1.5} strokeOpacity={lane.fork ? 0.7 : 1} />);
+    }
+    if (index >= lane.first && index < lane.last && index !== lane.parentRow) {
+      segments.push(<line key={`b${laneNo}`} x1={lx} x2={lx} y1={mid} y2={ROW_H} stroke={stroke} strokeWidth={1.5} strokeOpacity={lane.fork ? 0.7 : 1} />);
+    }
+    if (index === lane.parentRow) {
+      const px = laneX(lane.parentLane);
+      segments.push(
+        <path
+          key={`f${laneNo}`}
+          d={`M ${px} ${mid} C ${px} ${ROW_H - 4}, ${lx} ${mid + 6}, ${lx} ${ROW_H}`}
+          fill="none"
+          stroke="#bb87fc"
+          strokeWidth={1.5}
+          strokeOpacity={0.7}
+        />,
+      );
+    }
+  });
+
+  return (
+    <svg width={width} height={ROW_H} className="shrink-0" aria-hidden>
+      {segments}
+      {meta.dot === 'square' ? (
+        <rect x={x - 3.5} y={mid - 3.5} width={7} height={7} rx={1.5} fill="#0f1011" stroke={color} strokeWidth={1.5} />
+      ) : meta.dot === 'filled' ? (
+        <circle cx={x} cy={mid} r={4.5} fill={color} stroke="#0f1011" strokeWidth={2} />
+      ) : (
+        <circle cx={x} cy={mid} r={3.75} fill="#0f1011" stroke={color} strokeWidth={1.5} />
+      )}
+    </svg>
+  );
 }
 
 export function TrajectoryTree() {
   const params = useParams<{ run_id: string }>();
-  const svgRef = useRef<SVGSVGElement>(null);
-  const { tree, selectedNode, forkEvents, mode, run } = useDashboard();
+  const state = useDashboard();
+  const { tree, selectedNode, forkEvents, mode, run } = state;
   const dispatch = useDashboardDispatch();
   const [forkTarget, setForkTarget] = useState<{ candidate: string; checkpointId: string; parentThreadId?: string } | null>(null);
   // The fork whose first node was already auto-selected. Without it the
@@ -147,250 +202,103 @@ export function TrajectoryTree() {
     [dispatch, mode, params.run_id, run?.checkpointId],
   );
 
-  useEffect(() => {
-    if (!svgRef.current || tree.length === 0) return;
+  const { rows, lanes } = useMemo(() => layoutHistory(tree), [tree]);
+  const gutterWidth = GUTTER_PAD * 2 + Math.max(0, lanes.length - 1) * LANE_W;
+  const forks = forkBranchCount(state);
 
-    const svg = d3.select(svgRef.current);
-    svg.selectAll('*').remove();
-
-    const laid = layoutTree(tree);
-    if (laid.length === 0) return;
-
-    const byName = new Map(laid.map(n => [n.candidate, n]));
-
-    const maxX = Math.max(...laid.map(n => n.x)) + NODE_W + 30;
-
-    // Dot grid background
-    const defs = svg.append('defs');
-    defs.append('pattern')
-      .attr('id', 'dot-grid')
-      .attr('width', 24)
-      .attr('height', 24)
-      .attr('patternUnits', 'userSpaceOnUse')
-      .append('circle')
-      .attr('cx', 12)
-      .attr('cy', 12)
-      .attr('r', 1.2)
-      .attr('fill', '#1c1c26');
-
-    svg.append('rect')
-      .attr('width', '100%')
-      .attr('height', '100%')
-      .attr('fill', 'url(#dot-grid)');
-
-    const g = svg.append('g');
-
-    const zoom = d3.zoom<SVGSVGElement, unknown>()
-      .scaleExtent([0.3, 3])
-      .on('zoom', (event) => {
-        g.attr('transform', event.transform.toString());
-      });
-
-    svg.call(zoom);
-
-    const containerWidth = svgRef.current.clientWidth || 400;
-    const padding = 20;
-    const initialScale = Math.min((containerWidth - padding * 2) / maxX, 1.5);
-    const tx = (containerWidth - maxX * initialScale) / 2;
-    const ty = padding;
-    const initialTransform = d3.zoomIdentity.translate(tx, ty).scale(initialScale);
-    svg.call(zoom.transform, initialTransform);
-
-    // Draw edges
-    for (const node of laid) {
-      if (!node.parent_candidate_name) continue;
-      const parent = byName.get(node.parent_candidate_name);
-      if (!parent) continue;
-
-      const color = node.isForkBranch
-        ? '#8878a8'
-        : isDiscarded(node)
-          ? STATUS_STYLES[node.status].border
-          : '#6a9e78';
-      g.append('line')
-        .attr('x1', parent.x + NODE_W / 2)
-        .attr('y1', parent.y + NODE_H)
-        .attr('x2', node.x + NODE_W / 2)
-        .attr('y2', node.y)
-        .attr('stroke', color)
-        .attr('stroke-width', 1.5)
-        .attr('opacity', isDiscarded(node) ? 0.35 : 0.6);
+  const onContextMenu = (event: MouseEvent, node: TreeNode) => {
+    event.preventDefault();
+    void openForkFor(node);
+  };
+  const onKeyDown = (event: KeyboardEvent, node: TreeNode) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      dispatch({ type: 'SELECT_NODE', payload: node.candidate });
+    } else if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+      event.preventDefault();
+      void openForkFor(node);
     }
-
-    // Fork zone
-    if (forkEvents.length > 0) {
-      const forkNode = laid.find(n => n.candidate === forkEvents[0].parentCandidate);
-      if (forkNode) {
-        const zy = forkNode.y + NODE_H + GAP_Y / 2 - 12;
-        g.append('rect')
-          .attr('x', 0).attr('y', zy)
-          .attr('width', maxX - 30).attr('height', 24)
-          .attr('fill', '#8878a8').attr('opacity', 0.06)
-          .attr('rx', 4);
-        g.append('text')
-          .attr('x', (maxX - 30) / 2).attr('y', zy + 16)
-          .attr('text-anchor', 'middle')
-          .attr('fill', '#707084').attr('font-size', 9)
-          .attr('font-family', 'monospace')
-          .text('⑂ FORK');
-      }
-    }
-
-    // Draw nodes
-    for (const node of laid) {
-      const style = STATUS_STYLES[node.status] || STATUS_STYLES.seed;
-      const isSelected = selectedNode === node.candidate;
-      const opacity = node.status === 'rejected' ? 0.35 : node.status === 'smoke_failed' ? 0.6 : 1;
-
-      const nodeG = g.append('g')
-        .attr('transform', `translate(${node.x}, ${node.y})`)
-        .attr('opacity', opacity)
-        .attr('cursor', 'pointer')
-        .attr('data-testid', 'trajectory-node')
-        .attr('data-candidate', node.candidate)
-        .attr('data-status', node.status)
-        .on('click', () => dispatch({ type: 'SELECT_NODE', payload: node.candidate }))
-        .on('contextmenu', (event: MouseEvent) => {
-          event.preventDefault();
-          void openForkFor(node);
-        });
-
-      // Best glow
-      if (node.status === 'best') {
-        nodeG.append('rect')
-          .attr('x', -4).attr('y', -4)
-          .attr('width', NODE_W + 8).attr('height', NODE_H + 8)
-          .attr('rx', 8).attr('fill', '#7ab8ad').attr('opacity', 0.08);
-      }
-
-      // Background
-      nodeG.append('rect')
-        .attr('width', NODE_W).attr('height', NODE_H)
-        .attr('rx', 4).attr('fill', style.bg)
-        .attr('stroke', isSelected ? '#7ab8ad' : style.border)
-        .attr('stroke-width', isSelected ? 2 : 1);
-
-      // Iteration label
-      nodeG.append('text')
-        .attr('x', 10).attr('y', 16)
-        .attr('fill', '#303040').attr('font-size', 8)
-        .attr('font-family', 'monospace')
-        .text(`ITER ${node.iteration}${node.isForkBranch ? "'" : ''}`);
-
-      // Candidate name
-      nodeG.append('text')
-        .attr('x', 10).attr('y', 34)
-        .attr('fill', style.text).attr('font-size', 12)
-        .attr('font-family', 'monospace')
-        .attr('font-weight', 500)
-        .text(node.candidate.length > 22 ? node.candidate.slice(0, 22) + '…' : node.candidate);
-
-      // Score. A smoke-failed candidate never ran, so it has no score —
-      // drawing 0.00 would claim it was measured and scored nothing.
-      nodeG.append('text')
-        .attr('x', 10).attr('y', 56)
-        .attr('fill', style.border).attr('font-size', 15)
-        .attr('font-family', 'monospace')
-        .attr('font-weight', 600)
-        .attr('data-testid', 'trajectory-node-score')
-        .text(node.status === 'smoke_failed' ? '—' : node.scores.accuracy.toFixed(2));
-
-      // Delta
-      if (node.delta !== null && node.status !== 'smoke_failed') {
-        const deltaColor = node.delta >= 0 ? '#6a9e78' : '#b06068';
-        const deltaText = node.delta >= 0 ? `+${node.delta.toFixed(2)}` : node.delta.toFixed(2);
-        nodeG.append('text')
-          .attr('x', 58).attr('y', 56)
-          .attr('fill', deltaColor).attr('font-size', 10)
-          .attr('font-family', 'monospace')
-          .text(deltaText);
-      }
-
-      // Status badge
-      if (node.status === 'best') {
-        nodeG.append('text')
-          .attr('x', NODE_W - 10).attr('y', 16)
-          .attr('text-anchor', 'end')
-          .attr('fill', '#7ab8ad').attr('font-size', 8)
-          .attr('font-family', 'monospace')
-          .attr('font-weight', 600)
-          .text('★ BEST');
-      } else if (node.status === 'rejected') {
-        nodeG.append('text')
-          .attr('x', NODE_W - 10).attr('y', 16)
-          .attr('text-anchor', 'end')
-          .attr('fill', '#b06068').attr('font-size', 8)
-          .attr('font-family', 'monospace')
-          .attr('font-weight', 600)
-          .text('REJECTED');
-      } else if (node.status === 'smoke_failed') {
-        nodeG.append('text')
-          .attr('x', NODE_W - 10).attr('y', 16)
-          .attr('text-anchor', 'end')
-          .attr('fill', STATUS_STYLES.smoke_failed.border).attr('font-size', 8)
-          .attr('font-family', 'monospace')
-          .attr('font-weight', 600)
-          .text('SMOKE FAILED');
-      } else if (node.status === 'accepted') {
-        nodeG.append('text')
-          .attr('x', NODE_W - 10).attr('y', 16)
-          .attr('text-anchor', 'end')
-          .attr('fill', '#6a9e78').attr('font-size', 8)
-          .attr('font-family', 'monospace')
-          .attr('font-weight', 600)
-          .text('ACCEPTED');
-      }
-
-      // Fork button (visible on hover)
-      const forkBtn = nodeG.append('g')
-        .attr('transform', `translate(${NODE_W - 28}, ${NODE_H - 22})`)
-        .attr('opacity', 0)
-        .attr('cursor', 'pointer')
-        .on('click', (event: MouseEvent) => {
-          event.stopPropagation();
-          void openForkFor(node);
-        });
-
-      forkBtn.append('rect')
-        .attr('width', 22).attr('height', 16)
-        .attr('rx', 3)
-        .attr('fill', '#8878a8').attr('opacity', 0.15)
-        .attr('stroke', '#8878a8').attr('stroke-width', 0.5);
-
-      forkBtn.append('text')
-        .attr('x', 11).attr('y', 12)
-        .attr('text-anchor', 'middle')
-        .attr('fill', '#8878a8').attr('font-size', 10)
-        .attr('font-family', 'monospace')
-        .text('⑂');
-
-      nodeG
-        .on('mouseenter', function () {
-          forkBtn.transition().duration(150).attr('opacity', 1);
-        })
-        .on('mouseleave', function () {
-          forkBtn.transition().duration(150).attr('opacity', 0);
-        });
-    }
-  }, [tree, selectedNode, forkEvents, dispatch, openForkFor]);
+  };
 
   return (
     <>
-      <div className="flex-1 flex flex-col bg-panel rounded overflow-hidden min-h-0">
-        <div className="h-11 flex items-center px-6 bg-header border-b border-border shrink-0">
-          <span className="text-[10px] font-semibold text-text-hi uppercase tracking-wide">◆ Trajectory</span>
-        </div>
-        <div className="flex-1 overflow-hidden relative">
-          {tree.length === 0 && (
-            <div className="absolute inset-0 flex items-center justify-center px-4 text-center">
-              <div className="rounded border border-border bg-header/70 px-3 py-2 text-[10px] text-text-mid uppercase tracking-wide">
-                Waiting for first candidate graph node...
-              </div>
-            </div>
+      <section className="flex-1 flex flex-col min-h-0 bg-surface-1">
+        <div className="h-11 shrink-0 flex items-center justify-between px-4 border-b border-hairline">
+          <h2 className="text-[13px] font-medium text-ink">Trajectory</h2>
+          {tree.length > 0 && (
+            <span className="text-[12px] text-ink-subtle tabular">
+              {tree.length} candidates · {forks} {forks === 1 ? 'fork' : 'forks'}
+            </span>
           )}
-          <svg ref={svgRef} className="w-full h-full" />
         </div>
-      </div>
+        <div className="flex-1 overflow-y-auto py-1" role="list" aria-label="Candidate history">
+          {tree.length === 0 && (
+            <div className="px-4 py-6 text-[13px] text-ink-subtle">Waiting for the first candidate…</div>
+          )}
+          {rows.map((row, index) => {
+            const { node } = row;
+            const meta = statusMeta(node.status);
+            const selected = selectedNode === node.candidate;
+            const noScore = node.status === 'smoke_failed';
+            return (
+              <div
+                key={`${node.threadId ?? 'main'}:${node.candidate}`}
+                role="listitem"
+                tabIndex={0}
+                data-testid="trajectory-node"
+                data-candidate={node.candidate}
+                data-status={node.status}
+                title={node.hypothesis}
+                aria-current={selected ? "true" : undefined}
+                onClick={() => dispatch({ type: 'SELECT_NODE', payload: node.candidate })}
+                onContextMenu={event => onContextMenu(event, node)}
+                onKeyDown={event => onKeyDown(event, node)}
+                className={`group relative flex items-center pr-3 cursor-pointer outline-none transition-colors ${
+                  selected
+                    ? 'bg-surface-3 shadow-[inset_2px_0_0_var(--color-accent)]'
+                    : 'hover:bg-surface-2 focus-visible:bg-surface-2'
+                }`}
+                style={{ height: ROW_H }}
+              >
+                <Gutter index={index} row={row} lanes={lanes} width={gutterWidth} />
+                <div className={`min-w-0 flex-1 pl-1 ${meta.dimmed && !selected ? 'opacity-60' : ''}`}>
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="truncate text-[13px] text-ink font-mono">{node.candidate}</span>
+                    {node.status === 'best' && <Tag label="Best" tone="green" />}
+                  </div>
+                  <div className="flex items-center gap-1.5 text-[11px] text-ink-tertiary tabular">
+                    <span>Iteration {node.iteration}</span>
+                    {node.isForkBranch && <span className="text-status-purple">fork</span>}
+                    {node.status !== 'best' && (
+                      <span className={TONE_TEXT[meta.tone]}>{meta.label}</span>
+                    )}
+                    {!noScore && node.parent_candidate_name !== null && (
+                      <span className={TONE_TEXT[deltaTone(node.delta)]}>{signedDelta(node.delta)}</span>
+                    )}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={event => {
+                    event.stopPropagation();
+                    void openForkFor(node);
+                  }}
+                  className="hidden group-hover:inline-flex group-focus-visible:inline-flex focus-visible:inline-flex items-center gap-1 h-6 px-2 mr-2 rounded bg-surface-4 border border-hairline-strong text-[12px] text-ink-muted hover:text-ink"
+                  aria-label={`Fork from ${node.candidate}`}
+                >
+                  <ForkIcon /> Fork
+                </button>
+                <span
+                  data-testid="trajectory-node-score"
+                  className={`tabular text-[13px] font-medium ${noScore ? 'text-ink-tertiary' : 'text-ink'}`}
+                >
+                  {noScore ? '—' : node.scores.accuracy.toFixed(2)}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </section>
       {forkTarget && (
         <ForkModal
           candidateName={forkTarget.candidate}

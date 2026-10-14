@@ -8,6 +8,12 @@ import { hasAuth0Config } from "./lib/auth-config";
  */
 export async function proxy(request: NextRequest) {
   if (!hasAuth0Config()) {
+    // The dashboard asks /auth/profile whether login exists at all.
+    // Answer it here rather than letting it 404 into the console on
+    // every page load.
+    if (request.nextUrl.pathname === "/auth/profile") {
+      return NextResponse.json({ auth: "disabled" }, { headers: { "cache-control": "no-store" } });
+    }
     return NextResponse.next();
   }
 

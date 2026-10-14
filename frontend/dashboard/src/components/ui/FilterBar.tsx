@@ -1,27 +1,35 @@
 'use client';
 
-type FilterBarProps<T extends string> = {
-  filters: readonly T[];
+type SegmentedProps<T extends string> = {
+  options: readonly T[];
   active: T;
-  onSelect: (f: T) => void;
+  onSelect: (value: T) => void;
+  labels?: Partial<Record<T, string>>;
+  ariaLabel: string;
 };
 
-export function FilterBar<T extends string>({ filters, active, onSelect }: FilterBarProps<T>) {
+/** A segmented control: log filters, inspector tabs (frontend/DESIGN.md §6). */
+export function Segmented<T extends string>({ options, active, onSelect, labels, ariaLabel }: SegmentedProps<T>) {
   return (
-    <div className="flex gap-1.5">
-      {filters.map(f => (
-        <button
-          key={f}
-          onClick={() => onSelect(f)}
-          className={`px-2.5 py-1 text-[9px] font-semibold uppercase tracking-wide rounded transition-colors ${
-            active === f
-              ? 'bg-active text-text-hi'
-              : 'bg-hover text-text-mid hover:text-text-hi'
-          }`}
-        >
-          {f}
-        </button>
-      ))}
+    <div role="tablist" aria-label={ariaLabel} className="flex items-center gap-0.5 p-0.5 rounded-md bg-surface-3 border border-hairline">
+      {options.map(option => {
+        const selected = active === option;
+        return (
+          <button
+            key={option}
+            role="tab"
+            aria-selected={selected}
+            onClick={() => onSelect(option)}
+            className={`h-6 px-2.5 rounded text-[12px] font-medium transition-colors ${
+              selected
+                ? 'bg-surface-4 text-ink shadow-[inset_0_0_0_1px_var(--color-hairline-strong)]'
+                : 'text-ink-subtle hover:text-ink'
+            }`}
+          >
+            {labels?.[option] ?? option.charAt(0).toUpperCase() + option.slice(1)}
+          </button>
+        );
+      })}
     </div>
   );
 }

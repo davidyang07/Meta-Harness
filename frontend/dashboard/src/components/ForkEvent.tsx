@@ -1,23 +1,33 @@
 import type { ForkEvent as ForkEventType } from '@/lib/types';
+import { clockTime, middleEllipsis } from '@/lib/format';
 
 export function ForkEventCard({ fork }: { fork: ForkEventType }) {
   return (
-    <div className="rounded bg-purple-bg border border-purple/50 border-l-4 border-l-purple p-5 mb-5 shadow-[0_0_0_1px_rgba(136,120,168,0.15)]">
-      <div className="flex items-center gap-2 mb-2">
-        <span className="inline-flex items-center gap-1 text-purple text-xs font-semibold uppercase tracking-wide">
-          <span className="text-[13px]">{'⑂'}</span>
-          Fork Created
+    <div className="mb-2 rounded-md bg-surface-2 border border-hairline shadow-[inset_2px_0_0_var(--color-status-purple)] px-4 py-3">
+      <div className="flex items-center gap-2">
+        <span className="text-[13px] font-medium text-ink">Fork created</span>
+        <span className="font-mono text-[11px] text-ink-tertiary" title={fork.timestamp}>
+          {clockTime(fork.timestamp)}
         </span>
-        <span className="text-text-ghost text-[10px]">{fork.timestamp}</span>
       </div>
-      <div className="text-text-mid text-xs leading-relaxed">
-        <div>From: <span className="text-text-hi">{fork.parentCandidate}</span> <span className="text-text-ghost">(checkpoint {fork.checkpointId})</span></div>
-        <div>Prior: <span className="text-text-hi">{fork.prior}</span></div>
-        <div className="mt-2">
-          <span className="text-purple text-[10px] font-semibold uppercase tracking-wide">Why this fork:</span>{' '}
-          <span className="text-text-hi">{fork.rationale}</span>
-        </div>
-      </div>
+      <dl className="mt-2 grid grid-cols-[56px_minmax(0,1fr)] gap-x-3 gap-y-1 text-[13px]">
+        <dt className="text-ink-subtle">From</dt>
+        <dd className="min-w-0 text-ink-muted">
+          <span className="font-mono text-[12px]">{fork.parentCandidate}</span>
+          <span className="text-ink-tertiary"> @ </span>
+          <span className="font-mono text-[12px] text-ink-subtle" title={fork.checkpointId}>
+            {middleEllipsis(fork.checkpointId)}
+          </span>
+        </dd>
+        <dt className="text-ink-subtle">Prior</dt>
+        <dd className="text-ink">{fork.prior}</dd>
+        {fork.rationale && (
+          <>
+            <dt className="text-ink-subtle">Why</dt>
+            <dd className="text-ink-muted">{fork.rationale}</dd>
+          </>
+        )}
+      </dl>
     </div>
   );
 }

@@ -85,7 +85,9 @@ export type RunListItem = {
   status: string;
   best_score: number | null;
   iteration: number;
+  started_at?: string | null;
 };
+
 
 export type CreateRunRequest = {
   run_name?: string;
@@ -108,7 +110,10 @@ export async function listRuns(): Promise<RunListItem[]> {
   const res = await apiFetch("/runs");
   if (!res.ok) return [];
   const data = await res.json();
-  return Array.isArray(data) ? data : data.runs ?? [];
+  const rows: Array<RunListItem & { current_iteration?: number }> = Array.isArray(data) ? data : data.runs ?? [];
+  // The backend lists runs with `current_iteration`; older payloads used
+  // `iteration`. Normalised here so the list never shows an empty column.
+  return rows.map(row => ({ ...row, iteration: row.iteration ?? row.current_iteration ?? 0 }));
 }
 
 export async function createRun(payload: CreateRunRequest): Promise<CreateRunResponse> {

@@ -197,19 +197,20 @@ function DashboardShell() {
   }, [clearReplayTimers, connect]);
 
   return (
-    <div className="h-full flex flex-col bg-panel overflow-hidden">
+    <div className="h-full flex flex-col bg-canvas overflow-hidden">
       <TopBar onReplay={replayRunProgression} />
-      <div className="flex-1 flex gap-4 p-4 min-h-0 w-full">
-        <div className="w-[220px] shrink-0 flex flex-col min-h-0 min-w-0">
+      {/* Three panes edge to edge, divided by hairlines (frontend/DESIGN.md §4). */}
+      <main className="flex-1 min-h-0 w-full grid grid-cols-[320px_minmax(0,1fr)_480px] divide-x divide-hairline">
+        <div className="flex flex-col min-h-0 min-w-0">
           <TrajectoryTree />
         </div>
-        <div className="flex-[4] flex flex-col min-h-0 min-w-0">
+        <div className="flex flex-col min-h-0 min-w-0">
           <DecisionLog />
         </div>
-        <div className="flex-[3] flex flex-col min-h-0 min-w-0">
+        <div className="flex flex-col min-h-0 min-w-0">
           <ContextPanel />
         </div>
-      </div>
+      </main>
       <StatusBar />
     </div>
   );

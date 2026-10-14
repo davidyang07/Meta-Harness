@@ -38,6 +38,24 @@ export function forkKey(fork: Pick<ForkEvent, "threadId" | "branchId">): string 
   return fork.threadId ?? fork.branchId;
 }
 
+/**
+ * How many fork branches the run has. One definition for every place that
+ * shows the number: the backend's branch registry when it has answered
+ * (the root thread is in it too, hence the minus one), otherwise the
+ * distinct fork threads the tree and the fork events have seen.
+ */
+export function forkBranchCount(
+  state: Pick<DashboardState, "branches" | "tree" | "forkEvents" | "run">,
+): number {
+  if (state.branches.length > 0) return Math.max(0, state.branches.length - 1);
+  const threads = new Set<string>();
+  for (const node of state.tree) {
+    if (node.isForkBranch) threads.add(node.threadId ?? node.candidate);
+  }
+  for (const fork of state.forkEvents) threads.add(forkKey(fork));
+  return Math.max(threads.size, state.run?.branches ?? 0);
+}
+
 const initialTree: TreeNode[] = [
   {
     candidate: "baseline",

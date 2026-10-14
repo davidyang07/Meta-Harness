@@ -19,9 +19,9 @@ const SIGNED_OUT: AuthStatus = { enabled: false, profile: null };
  * Whether login exists here at all, and who is signed in.
  *
  * Asked of the server at runtime rather than baked in at build time:
- * with no Auth0 environment the proxy mounts no /auth routes, so the
- * profile endpoint 404s and the Login/Logout links — which would 404
- * too — are not shown.
+ * with no Auth0 environment the proxy answers the profile request with
+ * `{"auth": "disabled"}`, and the Login/Logout links — which would 404 —
+ * are not shown.
  */
 export function useAuthStatus(): AuthStatus {
   const [status, setStatus] = useState<AuthStatus>(SIGNED_OUT);
@@ -32,7 +32,10 @@ export function useAuthStatus(): AuthStatus {
       .then(async (response): Promise<AuthStatus> => {
         if (response.status === 404) return SIGNED_OUT;
         if (response.status === 200) {
-          return { enabled: true, profile: (await response.json()) as AuthProfile };
+          const body = (await response.json()) as AuthProfile & { auth?: string };
+          // The proxy's own answer when Auth0 is not configured.
+          if (body.auth === "disabled") return SIGNED_OUT;
+          return { enabled: true, profile: body };
         }
         // 401 / 204: Auth0 is configured and nobody is signed in.
         return { enabled: true, profile: null };

@@ -35,17 +35,20 @@ test.describe('Dashboard (mock mode, no backend)', () => {
     // The mock playback schedules iteration 4 at ~9.7s
     // (startMockSSE: (1500 + 3 * 1300) * 1.8). A 10s window raced it and
     // flaked; wait comfortably past the fixture's own schedule instead.
-    const chapter = page.getByText('ITER 4 — more-specific-descriptions');
+    const chapter = page
+      .getByTestId('iteration-chapter')
+      .filter({ hasText: 'more-specific-descriptions' })
+      .filter({ hasText: 'Iteration 4' });
     await expect(chapter).toBeVisible({ timeout: 25_000 });
   });
 
   test('score chart renders data points', async ({ page }) => {
     // Switch to chart tab explicitly
-    const chartTab = page.getByRole('button', { name: /chart/i });
-    await chartTab.click();
+    const overviewTab = page.getByRole('tab', { name: 'Overview' });
+    await overviewTab.click();
 
-    // ScoreChart circles have fill colors matching the whisper palette, not the dot-grid bg
-    const dataCircles = page.locator('svg circle[fill="#6a9e78"], svg circle[fill="#8878a8"], svg circle[fill="#b06068"]');
+    // One point per scored candidate on the accuracy chart.
+    const dataCircles = page.getByTestId('chart-point');
     await expect(dataCircles.first()).toBeVisible({ timeout: 12_000 });
     expect(await dataCircles.count()).toBeGreaterThanOrEqual(1);
   });
@@ -57,7 +60,7 @@ test.describe('Dashboard (mock mode, no backend)', () => {
       await node.click();
     }
 
-    const diffTab = page.getByRole('button', { name: /diff/i });
+    const diffTab = page.getByRole('tab', { name: 'Diff' });
     await diffTab.click();
 
     // Offline fixture content must be labelled as such, never rendered
@@ -73,9 +76,8 @@ test.describe('Dashboard (mock mode, no backend)', () => {
 
     await node.click({ button: 'right' });
 
-    // Use the modal title which has the fork symbol prefix
-    const modalTitle = page.locator('text=⑂ Create Fork');
-    await expect(modalTitle).toBeVisible({ timeout: 5_000 });
+    const dialog = page.getByRole('dialog', { name: 'Create fork' });
+    await expect(dialog).toBeVisible({ timeout: 5_000 });
   });
 
   test('SSE status indicator shows connected', async ({ page }) => {

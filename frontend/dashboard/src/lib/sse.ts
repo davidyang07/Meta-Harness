@@ -136,6 +136,8 @@ type RunEventData = {
   parent_checkpoint_id?: string;
   parent_candidate_name?: string | null;
   mods_summary?: { keys?: string[]; count?: number };
+  /** The fork's proposer prior, verbatim, when the fork set one. */
+  proposer_prior?: string | null;
 };
 
 let fallbackSeq = 0;
@@ -211,9 +213,13 @@ function forkEventFromEvent(data: RunEventData): ForkEvent {
     timestamp: new Date().toISOString(),
     parentCandidate: valueLabel(data.parent_thread_id) ?? "run",
     checkpointId: valueLabel(data.parent_checkpoint_id) ?? "checkpoint",
-    prior: keys.length > 0 ? `state changed: ${keys.join(", ")}` : "no state changes",
+    // The prior is what a reader needs from a fork. Older backends only
+    // sent the names of the changed keys, so fall back to those.
+    prior:
+      valueLabel(data.proposer_prior) ??
+      (keys.length > 0 ? `State changed: ${keys.join(", ")}` : "No state changes"),
     branchId: threadId?.split(".fork.").at(-1) ?? "branch",
-    rationale: "Fork created on the backend",
+    rationale: "",
     threadId,
     origin: "stream",
   };
@@ -389,7 +395,7 @@ export function startSSE(
           ),
         });
       }
-      for (const [taskKey, taskValue] of tasks.slice(0, 6)) {
+      for (const [taskKey, taskValue] of tasks) {
         const taskLabel = taskKey.replace(/^task-\d+-/, "");
         dispatch({
           type: "ADD_LOG_ENTRY",

@@ -254,7 +254,7 @@ test.describe('Dashboard against a live backend', () => {
       /Mock data/i,
       { timeout: 10_000 },
     );
-    await expect(page.getByTestId('branch-count')).toContainText('branches');
+    await expect(page.getByTestId('branch-count')).toHaveText(/^\d+ branch(es)?/);
   });
 
   test('reloading rebuilds run state from the backend, not from memory', async ({
@@ -283,7 +283,7 @@ test.describe('Dashboard against a live backend', () => {
     await expect(node).toBeVisible({ timeout: 20_000 });
 
     await node.click({ button: 'right' });
-    await expect(page.locator('text=⑂ Create Fork')).toBeVisible({
+    await expect(page.getByRole('dialog', { name: 'Create fork' })).toBeVisible({
       timeout: 10_000,
     });
   });

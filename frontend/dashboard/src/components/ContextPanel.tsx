@@ -6,7 +6,10 @@ import { ScoreChart } from './ScoreChart';
 import { DiffViewer } from './DiffViewer';
 import { TestOutput } from './TestOutput';
 import { MemoryPanel } from './MemoryPanel';
+import { Segmented } from './ui/FilterBar';
+import { Tag } from './ui/Badge';
 import { getDiff, getTestOutput } from '@/lib/api';
+import type { ContextTab } from '@/lib/types';
 
 /** Real added/removed line counts, read off the diff itself. */
 function diffStats(diff: string): { added: number; removed: number } {
@@ -19,6 +22,14 @@ function diffStats(diff: string): { added: number; removed: number } {
   return { added, removed };
 }
 
+const TABS: readonly ContextTab[] = ['chart', 'diff', 'test', 'memory'];
+const TAB_LABELS: Record<ContextTab, string> = {
+  chart: 'Overview',
+  diff: 'Diff',
+  test: 'Tests',
+  memory: 'Memory',
+};
+
 export function ContextPanel() {
   const params = useParams<{ run_id: string }>();
   const { contextTab, selectedNode, tree, mode, run } = useDashboard();
@@ -26,7 +37,6 @@ export function ContextPanel() {
   const [diffResult, setDiffResult] = useState<{ candidate: string; value: string | null } | null>(null);
   const [testResult, setTestResult] = useState<{ candidate: string; value: string | null } | null>(null);
 
-  const tabs = ['chart', 'diff', 'test', 'memory'] as const;
   const selected = selectedNode ?? tree.find(n => n.status === 'best')?.candidate ?? tree[0]?.candidate ?? null;
   const selectedTreeNode = tree.find(n => n.candidate === selected) ?? null;
   const diff = diffResult?.candidate === selected ? diffResult.value : null;
@@ -103,75 +113,66 @@ export function ContextPanel() {
       : 'No candidate selected yet.';
 
   const fixtureBadge = (
-    <div
-      data-testid="fixture-banner"
-      className="mb-3 inline-block rounded border border-amber/40 bg-amber/10 px-2 py-1 text-[9px] uppercase tracking-wide text-amber"
-    >
-      Offline demo — illustrative, not from a run
+    <div data-testid="fixture-banner" className="mb-3">
+      <Tag label="Offline demo — illustrative, not from a run" tone="yellow" />
     </div>
   );
 
   return (
-    <div className="flex-1 flex flex-col bg-panel rounded overflow-hidden min-h-0">
-      <div className="h-11 flex items-center gap-1 px-6 bg-header border-b border-border shrink-0">
-        {tabs.map(tab => (
-          <button
-            key={tab}
-            onClick={() => dispatch({ type: 'SET_CONTEXT_TAB', payload: tab })}
-            className={`px-3 py-1.5 text-[9px] font-semibold uppercase tracking-wide rounded transition-colors ${contextTab === tab
-                ? 'text-cyan border-b-2 border-cyan'
-                : 'text-text-mid hover:text-text-hi'
-              }`}
-          >
-            {tab}
-          </button>
-        ))}
+    <section className="flex-1 flex flex-col min-h-0 bg-surface-1">
+      <div className="h-11 shrink-0 flex items-center justify-between px-4 border-b border-hairline">
+        <h2 className="text-[13px] font-medium text-ink">Inspector</h2>
+        <Segmented
+          ariaLabel="Inspector view"
+          options={TABS}
+          labels={TAB_LABELS}
+          active={contextTab}
+          onSelect={tab => dispatch({ type: 'SET_CONTEXT_TAB', payload: tab })}
+        />
       </div>
 
-      <div className="flex-1 flex flex-col overflow-y-auto px-6 py-5 min-h-0">
-        {contextTab === 'chart' && <div className="flex-1"><ScoreChart /></div>}
+      <div className="flex-1 flex flex-col overflow-y-auto px-4 py-4 min-h-0">
+        {contextTab === 'chart' && <ScoreChart />}
 
         {contextTab === 'diff' && diff && stats && (
           <div>
-            <div className="flex items-center gap-2 mb-4 text-xs">
-              <span className="text-text-hi font-semibold">agents/{selected ?? 'candidate'}.py</span>
+            <div className="flex items-center gap-2 mb-3 text-[13px]">
+              <span className="font-mono text-[12px] text-ink truncate">agents/{selected ?? 'candidate'}.py</span>
               {/* Counted from the diff, not a placeholder. */}
-              <span className="text-green">+{stats.added}</span>
-              <span className="text-red">-{stats.removed}</span>
-              {run?.metricsSource === 'mock' && (
-                <span className="text-amber">mock run</span>
-              )}
+              <span className="tabular text-status-green">+{stats.added}</span>
+              <span className="tabular text-status-red">−{stats.removed}</span>
+              {run?.metricsSource === 'mock' && <Tag label="Mock run" tone="yellow" />}
             </div>
             <DiffViewer diff={diff} />
           </div>
         )}
         {contextTab === 'diff' && !diff && fixtureDiffPreview && (
-          <div className="space-y-3">
+          <div>
             {fixtureBadge}
-            <pre className="text-xs leading-5 text-text-hi whitespace-pre-wrap">{fixtureDiffPreview}</pre>
+            <pre className="font-mono text-[12px] leading-5 text-ink-muted whitespace-pre-wrap">{fixtureDiffPreview}</pre>
           </div>
         )}
         {contextTab === 'diff' && !diff && !fixtureDiffPreview && (
-          <div className="text-text-mid text-xs" data-testid="diff-empty">
+          <div className="text-[13px] text-ink-subtle" data-testid="diff-empty">
             {loading ? 'Loading diff…' : emptyState('diff')}
           </div>
         )}
 
         {contextTab === 'test' && testOut && <TestOutput output={testOut} />}
         {contextTab === 'test' && !testOut && fixtureTestOutput && (
-          <div className="space-y-3">
+          <div>
             {fixtureBadge}
             <TestOutput output={fixtureTestOutput} />
           </div>
         )}
         {contextTab === 'test' && !testOut && !fixtureTestOutput && (
-          <div className="text-text-mid text-xs" data-testid="test-empty">
+          <div className="text-[13px] text-ink-subtle" data-testid="test-empty">
             {loading ? 'Loading test output…' : emptyState('test output')}
           </div>
         )}
 
         {contextTab === 'memory' && <MemoryPanel />}
       </div>
-    </div>
+    </section>
   );
 }
