@@ -79,6 +79,9 @@ services:
       # startup rather than serve an unauthenticated API on 0.0.0.0. Not
       # `:?`-required here, so `up -d postgres` alone still works.
       META_HARNESS_API_TOKEN: ${META_HARNESS_API_TOKEN:-}
+      # Browser origins the dashboard is served from; empty means
+      # http://localhost:3000 and http://127.0.0.1:3000.
+      META_HARNESS_CORS_ORIGINS: ${META_HARNESS_CORS_ORIGINS:-}
     ports:
       - "127.0.0.1:8000:8000"
     volumes:

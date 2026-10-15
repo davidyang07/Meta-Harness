@@ -104,12 +104,26 @@ weakening one of those tests, fix the root cause instead.
     `meta-harness serve` refuses a non-loopback host unless
     `META_HARNESS_API_TOKEN` is set, every route but `GET /health`
     then requires it, and a skill path must resolve to
-    `skills/<name>/SKILL.md`. (`tests/test_api_auth.py`, `tests/test_api.py`)
+    `skills/<name>/SKILL.md`. The token is never accepted in a URL: the
+    event stream takes a short-lived ticket for one run, and
+    `token=`/`ticket=` values are redacted from the access log.
+    (`tests/test_api_auth.py`, `tests/test_api.py`)
 20. **A candidate cannot rebind the evaluator.** Proposer-written source is
     checked before it executes: no `app.meta_harness` import but
     `harness`, no assignment into an imported module, no `exec`/`eval`.
     The 11 override points are the whole search space.
     (`tests/test_candidates.py`)
+21. **A run's root thread has one driver, and says so.** `POST /runs`,
+    `meta-harness loop` and `resume` claim `threads/<run>/owner.json`
+    (pid, host, heartbeat) before driving it. Nothing re-creates, wipes
+    or cancels a run another live process drives, and a manifest left
+    `running` by a dead process reads `interrupted`. The terminal status
+    is written before the claim is released. (`tests/test_root_ownership.py`)
+22. **Event history is durable, thread-scoped and written once.** Each
+    thread appends to its own `events.jsonl`; never a run-level file.
+    Outer-loop event ids are derived from the event's content (not the
+    clock), so a node re-executed on resume does not duplicate its
+    events. (`tests/test_event_history.py`)
 
 ## Capabilities and evidence
 

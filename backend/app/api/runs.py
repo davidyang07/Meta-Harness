@@ -18,6 +18,8 @@ from pydantic import BaseModel, Field
 from app.meta_harness import runs as runs_mod
 from app.meta_harness.branches import (
     BranchOwnedElsewhere,
+    RootThreadClaim,
+    RootThreadOwned,
     cancel_branch_outcome,
     forget_run,
     get_branch,
@@ -25,6 +27,7 @@ from app.meta_harness.branches import (
     list_branches,
     live_branches,
     owned_elsewhere,
+    root_owner,
 )
 from app.meta_harness.outer import OuterLoopRunner, initial_state
 from app.meta_harness.persistence import delete_threads
@@ -193,13 +196,30 @@ def _read_manifest(run_dir: Path) -> dict[str, Any] | None:
 
 
 def _write_manifest_status(run_dir: Path, **updates: Any) -> None:
-    if not run_dir.is_dir():
-        # The run was re-created or removed underneath this task; do not
-        # resurrect a directory with a manifest-only skeleton.
-        return
-    manifest = _read_manifest(run_dir) or {}
-    manifest.update(updates)
-    runs_mod.write_json_atomic(_manifest_path(run_dir), manifest)
+    runs_mod.update_manifest(run_dir, **updates)
+
+
+def _effective_status(run_dir: Path, manifest: dict[str, Any]) -> str:
+    """The manifest's status, unless it claims a run nothing is driving.
+
+    A run whose process died (a crashed API, a killed ``meta-harness
+    loop``) never wrote its terminal status. ``running`` with no live
+    owner of the root thread is reported as ``interrupted``: the
+    checkpoint history is intact and ``meta-harness resume`` continues
+    it, but nothing is running.
+    """
+    status = str(manifest.get("status", "unknown"))
+    if status == "running" and root_owner(run_dir) is None:
+        return "interrupted"
+    return status
+
+
+def _foreign_root_owner(run_id: str, run_dir: Path) -> dict[str, Any] | None:
+    """The owner of ``run_id``'s root thread if another process drives it."""
+    record = run_registry.get(run_id)
+    if record is not None and record.task is not None and not record.task.done():
+        return None
+    return root_owner(run_dir)
 
 
 def _read_summary_rows(run_dir: Path, *, limit: int = 5) -> list[dict[str, Any]]:
@@ -396,7 +416,7 @@ def _run_info_from_files(run_dir: Path) -> dict[str, Any]:
     return {
         "run_id": manifest.get("run_id", run_dir.name),
         "thread_id": manifest.get("thread_id", manifest.get("run_id", run_dir.name)),
-        "status": manifest.get("status", "unknown"),
+        "status": _effective_status(run_dir, manifest),
         "started_at": manifest.get("started_at"),
         "domain": manifest.get("domain", "coding-agent"),
         "skill_path": manifest.get("skill_path"),
@@ -469,6 +489,27 @@ async def _execute_run(record: RunRecord, budget: int) -> None:
         "configurable": {"thread_id": record.thread_id},
         "recursion_limit": 200,
     }
+    # Synchronous: see ``RootThreadClaim``. Another process can only hold
+    # the claim here by racing ``POST /runs`` past ``_reset_run_state``;
+    # its run, and its manifest, are left alone.
+    try:
+        claim = RootThreadClaim(record.run_dir).acquire()
+    except (RootThreadOwned, OSError) as exc:
+        record.status = "failed"
+        record.error = str(exc)
+        emit_run_event(
+            record.run_id,
+            "error",
+            {"thread_id": record.thread_id, "node": "outer_loop", "message": str(exc)},
+        )
+        return
+    try:
+        await _drive_run(record, budget, config)
+    finally:
+        claim.release()
+
+
+async def _drive_run(record: RunRecord, budget: int, config: dict[str, Any]) -> None:
     try:
         seeds = [await record.runner.benchmark_baseline(run_id=record.run_id)]
         state = initial_state(
@@ -648,6 +689,19 @@ async def _reset_run_state(request: Request, run_id: str) -> None:
             detail=(
                 f"run has {len(live)} live branch(es); cancel them before "
                 "re-creating the run"
+            ),
+        )
+    run_dir = runs_mod.make_run_path(_repo_root(request), run_id)
+    owner = await asyncio.to_thread(root_owner, run_dir)
+    if owner is not None:
+        # A ``meta-harness loop`` or ``resume`` in another process (or
+        # another API) is driving it; deleting its directory would pull
+        # the run out from under it.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"run is being driven by another process (pid "
+                f"{owner.get('owner_pid')}); stop it there before re-creating it"
             ),
         )
     thread_ids = [run_id, *(b.thread_id for b in list_branches(run_id=run_id))]
@@ -870,6 +924,15 @@ async def delete_run(run_id: str, request: Request) -> dict[str, str]:
     """
     run_dir = get_run_dir(request, run_id)
     record = run_registry.get(run_id)
+    owner = await asyncio.to_thread(_foreign_root_owner, run_id, run_dir)
+    if owner is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"run is being driven by another process (pid "
+                f"{owner.get('owner_pid')}); stop it there"
+            ),
+        )
     branches = list_branches(run_id=run_id)
     foreign = [b.thread_id for b in branches if owned_elsewhere(b)]
     if foreign:
@@ -911,6 +974,6 @@ async def delete_run(run_id: str, request: Request) -> dict[str, str]:
         current = record.status if stopped else "cancelling"
     else:
         manifest = await asyncio.to_thread(_read_manifest, run_dir) or {}
-        current = str(manifest.get("status", "unknown"))
+        current = await asyncio.to_thread(_effective_status, run_dir, manifest)
     event_registry.evict(channel_for_run(run_id))
     return {"status": current}

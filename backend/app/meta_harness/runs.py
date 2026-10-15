@@ -231,6 +231,20 @@ def write_manifest(run_dir: Path, **fields: Any) -> None:
     write_json_atomic(run_dir / "manifest.json", manifest)
 
 
+def update_manifest(run_dir: Path, **updates: Any) -> None:
+    """Merge ``updates`` into ``manifest.json``, keeping every other key.
+
+    A run directory that no longer exists is left alone: the run was
+    re-created or removed underneath its writer, and a late status write
+    must not resurrect it as a manifest-only skeleton.
+    """
+    if not run_dir.is_dir():
+        return
+    manifest = read_manifest(run_dir) or {}
+    manifest.update(updates)
+    write_json_atomic(run_dir / "manifest.json", manifest)
+
+
 def read_manifest(run_dir: Path) -> dict[str, Any] | None:
     """Read ``manifest.json`` if present."""
     path = run_dir / "manifest.json"

@@ -303,6 +303,17 @@ def test_serve_binds_publicly_once_a_token_is_set(monkeypatch, fake_uvicorn):
     assert [c["host"] for c in fake_uvicorn] == ["0.0.0.0"]
 
 
+def test_serve_bounds_its_graceful_shutdown(monkeypatch, fake_uvicorn):
+    """An open event stream must not keep a stopped server alive forever."""
+    monkeypatch.delenv("META_HARNESS_API_TOKEN", raising=False)
+
+    result = runner.invoke(app, ["serve"])
+
+    assert result.exit_code == 0, result.output
+    [call] = fake_uvicorn
+    assert 0 < call["timeout_graceful_shutdown"] <= 30
+
+
 # ── loop validates every input before deleting anything ───────────────
 
 

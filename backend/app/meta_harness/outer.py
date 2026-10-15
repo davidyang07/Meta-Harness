@@ -33,15 +33,17 @@ Two invariants this module enforces:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
 from app.meta_harness import benchmark as bench
+from app.meta_harness import branches as br
 from app.meta_harness import candidates as cand_mod
 from app.meta_harness import frontier as fr
 from app.meta_harness import memory as mem
@@ -77,6 +79,18 @@ def _summary(state: MetaHarnessState, *, iteration: int | None = None) -> dict[s
     }
 
 
+def _event_id(event_type: str, payload: dict[str, Any]) -> str:
+    """A node event's identity: its type and content, minus the clock.
+
+    A node interrupted and re-executed on resume emits its events again.
+    With random ids every repeat was a new event, appended to the run's
+    durable history a second time; with these, the registry drops it.
+    """
+    material = {key: value for key, value in payload.items() if key != "ts"}
+    blob = json.dumps([event_type, material], sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
+
+
 def _emit(
     state: MetaHarnessState,
     config: RunnableConfig | None,
@@ -86,7 +100,12 @@ def _emit(
     """Best-effort SSE emit — never crash graph nodes on streaming errors."""
     try:
         payload.setdefault("thread_id", _thread_id(state, config))
-        emit_run_event(state["run_id"], event_type, payload)
+        emit_run_event(
+            state["run_id"],
+            event_type,
+            payload,
+            event_id=_event_id(event_type, payload),
+        )
     except Exception:  # noqa: BLE001 — SSE is best-effort; never crash a node
         pass
 
@@ -954,6 +973,11 @@ async def run_outer_loop(
     metrics_source, domain, skill_path (repo-relative POSIX), record and
     memory. ``record`` and ``memory`` default to whether a recording root
     and a memory store were supplied.
+
+    The run's root thread is claimed for this process first, so nothing
+    else can drive or re-create it meanwhile (``RootThreadOwned`` if
+    something already does), and the manifest's ``status`` follows the
+    run: ``running``, then ``completed``, ``failed`` or ``cancelled``.
     """
     runner = OuterLoopRunner(
         run_dir=run_dir,
@@ -970,32 +994,37 @@ async def run_outer_loop(
         recording_root=recording_root,
         domain=domain,
     )
-    runs_mod.write_manifest(
-        run_dir,
-        run_id=run_dir.name,
-        thread_id=run_dir.name,
-        budget=budget,
-        trials=trials,
-        workers=int(bench_workers),
-        mock_proposer=mock_proposer,
-        mock_bench=mock_bench,
-        metrics_source=met.MOCK if mock_bench else met.MEASURED,
-        domain=domain,
-        skill_path=manifest_skill_path(skill_path, repo_root),
-        record=bool(recording_root is not None if record is None else record),
-        memory=bool(memory_store is not None if memory is None else memory),
-    )
 
-    seeds: list[dict[str, Any]] = []
-    if evaluate_baseline:
-        seeds.append(await runner.benchmark_baseline(run_id=run_dir.name))
+    async def _drive() -> Any:
+        runs_mod.write_manifest(
+            run_dir,
+            run_id=run_dir.name,
+            thread_id=run_dir.name,
+            budget=budget,
+            trials=trials,
+            workers=int(bench_workers),
+            mock_proposer=mock_proposer,
+            mock_bench=mock_bench,
+            metrics_source=met.MOCK if mock_bench else met.MEASURED,
+            domain=domain,
+            skill_path=manifest_skill_path(skill_path, repo_root),
+            record=bool(recording_root is not None if record is None else record),
+            memory=bool(memory_store is not None if memory is None else memory),
+            status="running",
+            current_iteration=0,
+        )
 
-    graph = runner.build()
-    final = await graph.ainvoke(
-        initial_state(run_id=run_dir.name, budget=budget, seed_candidates=seeds),
-        config={"configurable": {"thread_id": run_dir.name}, "recursion_limit": 200},
-    )
-    return final  # type: ignore[return-value]
+        seeds: list[dict[str, Any]] = []
+        if evaluate_baseline:
+            seeds.append(await runner.benchmark_baseline(run_id=run_dir.name))
+
+        graph = runner.build()
+        return await graph.ainvoke(
+            initial_state(run_id=run_dir.name, budget=budget, seed_candidates=seeds),
+            config={"configurable": {"thread_id": run_dir.name}, "recursion_limit": 200},
+        )
+
+    return await drive_root_thread(run_dir, _drive)  # type: ignore[return-value]
 
 
 def default_recording_root(run_dir: Path) -> Path:
@@ -1025,6 +1054,9 @@ async def resume_outer_loop(
     ``recordings/`` directory, where ``meta-harness loop --record`` puts
     them. ``memory_store`` and ``tracker`` are live connections the
     manifest cannot hold, so the caller supplies them.
+
+    Like ``run_outer_loop``, it claims the root thread first and keeps
+    the manifest's ``status`` current.
     """
     manifest_path = run_dir / "manifest.json"
     if not manifest_path.exists():
@@ -1060,25 +1092,70 @@ async def resume_outer_loop(
     graph = runner.build()
     config = {"configurable": {"thread_id": run_dir.name}, "recursion_limit": 200}
 
-    # Guard: a thread that already ran to completion has no pending
-    # nodes. Calling ``ainvoke(None, ...)`` on it re-enters the graph at
-    # START and replays the whole loop, which double-appends every
-    # evolution_summary row and re-spends the proposer budget. Return
-    # the stored terminal state instead.
-    snapshot = await graph.aget_state(config)
-    values = getattr(snapshot, "values", None)
-    if values and not getattr(snapshot, "next", ()):
-        return values  # type: ignore[return-value]
+    async def _drive() -> Any:
+        # Guard: a thread that already ran to completion has no pending
+        # nodes. Calling ``ainvoke(None, ...)`` on it re-enters the graph
+        # at START and replays the whole loop, which double-appends every
+        # evolution_summary row and re-spends the proposer budget. Return
+        # the stored terminal state instead.
+        snapshot = await graph.aget_state(config)
+        values = getattr(snapshot, "values", None)
+        if values and not getattr(snapshot, "next", ()):
+            return values
 
-    # ``None`` input + existing thread_id → resume from last checkpoint.
-    final = await graph.ainvoke(None, config=config)
-    return final  # type: ignore[return-value]
+        runs_mod.update_manifest(
+            run_dir, status="running", resumed_at=_now(), finished_at=None, error=None
+        )
+        # ``None`` input + existing thread_id → resume from last checkpoint.
+        return await graph.ainvoke(None, config=config)
+
+    return await drive_root_thread(run_dir, _drive)  # type: ignore[return-value]
+
+
+def _terminal_status(exc: BaseException) -> dict[str, Any]:
+    """The manifest fields for a run that ended by raising ``exc``."""
+    if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt)):
+        return {"status": "cancelled"}
+    return {"status": "failed", "error": str(exc) or type(exc).__name__}
+
+
+async def drive_root_thread(
+    run_dir: Path, drive: Callable[[], Awaitable[Any]]
+) -> Any:
+    """Run ``drive`` while this process holds ``run_dir``'s root thread.
+
+    Raises ``branches.RootThreadOwned``, touching nothing, if another
+    live process is driving it. Otherwise the manifest's terminal
+    ``status`` is written *before* the claim is released, so no reader
+    ever sees a run that is ``running`` with nobody driving it, which is
+    what an interrupted run looks like.
+    """
+    claim = br.RootThreadClaim(run_dir).acquire()
+    try:
+        try:
+            final = await drive()
+        except BaseException as exc:
+            runs_mod.update_manifest(
+                run_dir, **_terminal_status(exc), finished_at=_now()
+            )
+            raise
+        iteration = final.get("iteration") if isinstance(final, dict) else None
+        runs_mod.update_manifest(
+            run_dir,
+            status="completed",
+            finished_at=_now(),
+            **({"current_iteration": iteration} if iteration is not None else {}),
+        )
+        return final
+    finally:
+        claim.release()
 
 
 __all__ = [
     "OuterLoopRunner",
     "baseline_candidate",
     "default_recording_root",
+    "drive_root_thread",
     "initial_state",
     "manifest_skill_path",
     "resume_outer_loop",

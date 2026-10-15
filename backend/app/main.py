@@ -18,12 +18,17 @@ from fastapi.responses import JSONResponse
 
 from app import __version__
 from app.api import branches, checkpoints, events, forks, memory, runs
+from app.auth import (
+    configured_api_token,
+    install_access_log_redaction,
+    stream_ticket_valid,
+)
 from app.event_loop import incompatible_loop_hint, is_psycopg_compatible_loop
 from app.api.runs import cancel_active_runs
 from app.meta_harness.branches import cancel_all_branches, set_runs_root
 from app.meta_harness.memory import memory_store as memory_store_cm
 from app.meta_harness.persistence import healthcheck, persistence_layer
-from app.streaming import StreamingRegistryError
+from app.streaming import StreamingRegistryError, set_event_log_root
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -31,24 +36,25 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 log = logging.getLogger("meta_harness.api")
 
 
-#: Environment variable holding the API bearer token. Unset or empty
-#: means the API is unauthenticated, which ``meta-harness serve`` only
-#: allows on a loopback address.
-API_TOKEN_ENV = "META_HARNESS_API_TOKEN"
-
-#: Routes that accept ``?token=`` as well as the header: ``EventSource``
-#: cannot send an ``Authorization`` header.
-_SSE_PATH_RE = re.compile(r"^/runs/[^/]+/stream$")
+#: The SSE route, which accepts a ``?ticket=`` (see ``app.auth``) as well
+#: as the header: ``EventSource`` cannot send an ``Authorization`` header.
+_SSE_PATH_RE = re.compile(r"^/runs/([^/]+)/stream$")
 
 #: Headers the dashboard may send cross-origin. ``Authorization`` has to
 #: be named: a ``*`` wildcard does not cover it under the Fetch spec.
 CORS_ALLOWED_HEADERS = ["Authorization", "Content-Type", "Last-Event-ID", "Cache-Control"]
 
+#: Comma-separated origins the dashboard is served from. Unset: the
+#: dashboard's default ``next dev``/``next start`` port on loopback.
+CORS_ORIGINS_ENV = "META_HARNESS_CORS_ORIGINS"
+DEFAULT_CORS_ORIGINS = ("http://localhost:3000", "http://127.0.0.1:3000")
 
-def configured_api_token() -> str | None:
-    """The API token from the environment, or ``None`` when auth is off."""
-    token = os.environ.get(API_TOKEN_ENV, "").strip()
-    return token or None
+
+def configured_cors_origins() -> list[str]:
+    """The origins allowed to call the API from a browser."""
+    raw = os.environ.get(CORS_ORIGINS_ENV, "")
+    origins = [origin.strip().rstrip("/") for origin in raw.split(",") if origin.strip()]
+    return origins or list(DEFAULT_CORS_ORIGINS)
 
 
 class APITokenMiddleware:
@@ -58,8 +64,10 @@ class APITokenMiddleware:
     streaming (SSE) response. Every route except ``GET /health`` is
     protected: the container healthcheck and load balancers probe
     ``/health`` without credentials, and it reveals nothing but liveness
-    and the persistence backend. SSE routes also accept ``?token=``,
-    because browsers' ``EventSource`` cannot set headers.
+    and the persistence backend. The SSE route also accepts a
+    ``?ticket=`` minted for that run (``POST /runs/{id}/stream-ticket``),
+    because browsers' ``EventSource`` cannot set headers. It no longer
+    accepts the token itself in the query string: a URL is logged.
 
     The token is read per request, so a token in ``.env`` (loaded during
     lifespan startup) is honoured, and so tests can toggle it.
@@ -104,10 +112,11 @@ class APITokenMiddleware:
                 presented.strip().encode("utf-8"), expected
             ):
                 return True
-        if scope.get("method") == "GET" and _SSE_PATH_RE.match(scope.get("path", "")):
+        stream = _SSE_PATH_RE.match(scope.get("path", ""))
+        if scope.get("method") == "GET" and stream:
             query = parse_qs(scope.get("query_string", b"").decode("latin-1"))
-            for presented in query.get("token", []):
-                if hmac.compare_digest(presented.encode("utf-8"), expected):
+            for ticket in query.get("ticket", []):
+                if stream_ticket_valid(token, stream.group(1), ticket):
                     return True
         return False
 
@@ -138,14 +147,19 @@ def create_app(
     eval_tasks_dir = eval_tasks_dir or Path(
         env_eval_tasks_dir or (repo_root / "eval" / "tasks")
     )
+    # Before a single request is logged: no credential in a URL reaches
+    # the access log, whatever client sent it.
+    install_access_log_redaction()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         load_dotenv(repo_root / ".env")
         app.state.repo_root = repo_root
-        # Branch history is persisted under runs/<run_id>/branches.json so
-        # the trajectory survives an API restart.
+        # Branch history is persisted under runs/<run_id>/branches.json and
+        # event history under each thread's events.jsonl, so the
+        # trajectory and the decision log survive an API restart.
         set_runs_root(repo_root / "runs")
+        set_event_log_root(repo_root / "runs")
         app.state.eval_tasks_dir = eval_tasks_dir
         app.state.checkpointer = None
         app.state.memory_store = None
@@ -196,6 +210,7 @@ def create_app(
         finally:
             await cancel_active_runs()
             await cancel_all_branches()
+            set_event_log_root(None)
             mem_cm = getattr(app.state, "memory_store_cm", None)
             if mem_cm is not None:
                 try:
@@ -217,10 +232,7 @@ def create_app(
     app.add_middleware(APITokenMiddleware)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "http://localhost:3000",
-            "http://127.0.0.1:3000",
-        ],
+        allow_origins=configured_cors_origins(),
         allow_methods=["*"],
         allow_headers=CORS_ALLOWED_HEADERS,
     )

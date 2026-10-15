@@ -3,7 +3,7 @@
 // closed allowlist from streaming.py; backend rejects unknowns with a
 // 500 so dashboard typings can stay tight.
 
-import { fetchRunInfo, fetchTrajectory, isForkThread, streamUrl } from "./api";
+import { STREAM_NEEDS_TICKET, fetchRunInfo, fetchTrajectory, isForkThread, streamUrl } from "./api";
 
 export type StreamingEventType =
   | "state-update"
@@ -53,11 +53,18 @@ function isMessageEvent(e: Event): e is MessageEvent<string> {
   return typeof (e as MessageEvent).data === "string";
 }
 
+/** How many times in a row a refused stream is reopened with a fresh ticket. */
+const MAX_TICKET_RETRIES = 3;
+
 export function subscribeToRun(runId: string, handlers: StreamHandlers): StreamHandle {
-  const source = new EventSource(streamUrl(runId));
-  if (handlers.onOpen) source.addEventListener("open", handlers.onOpen);
+  let source: EventSource | null = null;
+  let closed = false;
+  let lastEventId = "";
+  let retries = 0;
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
   const deliver = (type: StreamingEventType, evt: MessageEvent<string>) => {
+    if (evt.lastEventId) lastEventId = evt.lastEventId;
     const handler = handlers[type];
     if (!handler) return;
     let data: unknown;
@@ -70,25 +77,61 @@ export function subscribeToRun(runId: string, handlers: StreamHandlers): StreamH
     handler({ type, id: evt.lastEventId, data: data as Record<string, unknown> });
   };
 
-  // On an EventSource "error" is two different things: the transport
-  // failing, and a backend event that happens to be named `error`.
-  // Treating both as the first showed "Disconnected" on a healthy stream
-  // the moment a run reported an error. Only a real message has data.
-  source.addEventListener("error", (raw) => {
-    if (isMessageEvent(raw)) {
-      deliver("error", raw);
+  const open = async () => {
+    let url: string;
+    try {
+      url = await streamUrl(runId, lastEventId || undefined);
+    } catch {
+      // No ticket (a 401 is reported through api.onUnauthorized).
+      if (!closed) handlers.onError?.(new Event("error"), true);
       return;
     }
-    handlers.onError?.(raw, source.readyState === EventSource.CLOSED);
-  });
-
-  for (const type of STREAMING_EVENT_TYPES) {
-    if (type === "error" || !handlers[type]) continue;
-    source.addEventListener(type, (raw) => {
-      if (isMessageEvent(raw)) deliver(type, raw);
+    if (closed) return;
+    const es = new EventSource(url);
+    source = es;
+    es.addEventListener("open", () => {
+      retries = 0;
+      handlers.onOpen?.();
     });
-  }
-  return { close: () => source.close() };
+
+    // On an EventSource "error" is two different things: the transport
+    // failing, and a backend event that happens to be named `error`.
+    // Treating both as the first showed "Disconnected" on a healthy stream
+    // the moment a run reported an error. Only a real message has data.
+    es.addEventListener("error", (raw) => {
+      if (isMessageEvent(raw)) {
+        deliver("error", raw);
+        return;
+      }
+      const gaveUp = es.readyState === EventSource.CLOSED;
+      // A ticket opens a stream for a minute, and the browser's own
+      // reconnect reuses the old URL, so once it gives up, reopen with a
+      // fresh ticket, resuming after the last event seen.
+      if (gaveUp && STREAM_NEEDS_TICKET && !closed && retries < MAX_TICKET_RETRIES) {
+        retries += 1;
+        handlers.onError?.(raw, false);
+        retryTimer = setTimeout(() => void open(), 1000 * retries);
+        return;
+      }
+      handlers.onError?.(raw, gaveUp);
+    });
+
+    for (const type of STREAMING_EVENT_TYPES) {
+      if (type === "error") continue;
+      es.addEventListener(type, (raw) => {
+        if (isMessageEvent(raw)) deliver(type, raw);
+      });
+    }
+  };
+
+  void open();
+  return {
+    close: () => {
+      closed = true;
+      clearTimeout(retryTimer);
+      source?.close();
+    },
+  };
 }
 
 // ── Convenience wrappers used by the dashboard page ──

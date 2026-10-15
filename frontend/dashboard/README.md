@@ -48,7 +48,7 @@ All variables are optional. See [`.env.example`](.env.example).
 | Variable | Default | Purpose |
 |---|---|---|
 | `NEXT_PUBLIC_API_BASE_URL` | `http://localhost:8000` | Where the backend listens. |
-| `NEXT_PUBLIC_META_HARNESS_API_TOKEN` | empty | Must match the backend's `META_HARNESS_API_TOKEN` when that is set. Sent as `Authorization: Bearer …` on API calls and as `?token=…` on the event stream. A missing or wrong token shows a 401 message in the status bar. |
+| `NEXT_PUBLIC_META_HARNESS_API_TOKEN` | empty | Must match the backend's `META_HARNESS_API_TOKEN` when that is set. Sent as `Authorization: Bearer …` on API calls. The event stream cannot send headers, so the dashboard trades the token for a one-minute, single-run ticket (`POST /runs/<id>/stream-ticket`) and puts that in the stream URL instead; the token never appears in a URL. A missing or wrong token shows a 401 message in the status bar. |
 | `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`, `AUTH0_CLIENT_SECRET` (or `AUTH0_CLIENT_ASSERTION_SIGNING_KEY`), `AUTH0_SECRET`, `APP_BASE_URL` | unset | Optional Auth0 login in front of every page, including `/`. Enabled only when all of them are set; otherwise the dashboard is open and shows no Login/Logout links. |
 
 `NEXT_PUBLIC_*` values are compiled into the browser bundle when `next dev`

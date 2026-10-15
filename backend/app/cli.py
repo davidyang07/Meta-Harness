@@ -154,6 +154,53 @@ app = typer.Typer(
 )
 
 
+def _refuse_while_driven(run_name: str, run_path: Path, *, action: str) -> None:
+    """Exit 1 if any live process is driving ``run_name``: its root
+    thread or one of its branches. Deleting a run underneath its driver
+    leaves that process writing into a directory that is no longer its."""
+    from app.meta_harness import branches as br
+
+    br.set_runs_root(REPO_ROOT / "runs")
+    live = br.live_branches(run_name)
+    if live:
+        typer.echo(
+            f"refusing {action}: {len(live)} branch(es) of {run_name} are "
+            "still running in another process; cancel them first",
+            err=True,
+        )
+        raise typer.Exit(1)
+    owner = br.root_owner(run_path)
+    if owner is not None:
+        typer.echo(
+            f"refusing {action}: {run_name} is being driven by pid "
+            f"{owner.get('owner_pid')} on {owner.get('owner_host')}; stop it first",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+
+def _persist_run_history() -> None:
+    """Persist branch records and event history under ``runs/``, as the
+    API does, so a dashboard sees what this process did."""
+    from app.meta_harness import branches as br
+    from app.streaming import set_event_log_root
+
+    br.set_runs_root(REPO_ROOT / "runs")
+    set_event_log_root(REPO_ROOT / "runs")
+
+
+def _run_driving_root(coro: Any) -> Any:
+    """``_run_async`` for a coroutine that claims a run's root thread:
+    another process already driving it is a clean exit 1, not a traceback."""
+    from app.meta_harness import branches as br
+
+    try:
+        return _run_async(coro)
+    except br.RootThreadOwned as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from None
+
+
 @app.command()
 def version() -> None:
     """Show the Meta-Harness version."""
@@ -564,18 +611,11 @@ def loop(
 
     # A fresh run never inherits the old one's branches or checkpoints,
     # and is refused while another process is still driving one of them.
-    br.set_runs_root(REPO_ROOT / "runs")
+    _persist_run_history()
     stale_threads = [run_name]
     if run_path.exists():
         if fresh:
-            live = br.live_branches(run_name)
-            if live:
-                typer.echo(
-                    f"refusing --fresh: {len(live)} branch(es) of {run_name} are "
-                    "still running in another process; cancel them first",
-                    err=True,
-                )
-                raise typer.Exit(1)
+            _refuse_while_driven(run_name, run_path, action="--fresh")
             stale_threads += [b.thread_id for b in br.list_branches(run_id=run_name)]
         else:
             stale_threads = []
@@ -654,8 +694,10 @@ def loop(
             **loop_extras,
         )
 
-    final_state = _run_async(_run())
-    tracker.finish()
+    try:
+        final_state = _run_driving_root(_run())
+    finally:
+        tracker.finish()
 
     # Post-eval on holdout set (if requested and meaningful).
     holdout_result: dict[str, Any] | None = None
@@ -801,7 +843,7 @@ def fork(
     import asyncio
 
     from app.meta_harness import runs as runs_mod
-    from app.meta_harness.branches import set_runs_root, worktree_add
+    from app.meta_harness.branches import worktree_add
     from app.meta_harness.outer import OuterLoopRunner
     from app.meta_harness.persistence import persistence_layer
 
@@ -820,8 +862,8 @@ def fork(
 
     run_dir, manifest = _require_run(run_name)
     config = runs_mod.run_config_from_manifest(REPO_ROOT, manifest)
-    # Persist branch metadata so the API/dashboard can see this fork.
-    set_runs_root(REPO_ROOT / "runs")
+    # Persist branch metadata and events so the API/dashboard can see this fork.
+    _persist_run_history()
 
     mods: dict[str, Any] = {}
     for raw in mod:
@@ -869,6 +911,10 @@ def fork(
         raise typer.Exit(1)
 
 
+#: Seconds ``meta-harness serve`` waits for open connections on shutdown.
+SHUTDOWN_GRACE_S = 5
+
+
 @app.command()
 def serve(
     host: str = typer.Option("127.0.0.1", "--host", help="Bind address."),
@@ -890,7 +936,7 @@ def serve(
     """
     import uvicorn
 
-    from app.main import API_TOKEN_ENV, configured_api_token
+    from app.auth import API_TOKEN_ENV, configured_api_token
 
     if not _is_loopback_host(host) and configured_api_token() is None:
         typer.echo(
@@ -908,6 +954,12 @@ def serve(
         port=port,
         reload=reload,
         loop="app.event_loop:selector_loop_factory",
+        # A dashboard's event stream never finishes on its own, and uvicorn
+        # waits for every open connection before it shuts down: with a tab
+        # open, Ctrl-C or a SIGTERM left the old server running (and
+        # holding the stream) indefinitely. Open streams get this long,
+        # then are closed; the dashboard reconnects to the next server.
+        timeout_graceful_shutdown=SHUTDOWN_GRACE_S,
     )
 
 
@@ -1454,6 +1506,7 @@ def resume(
 
     run_dir, manifest = _require_run(run_name)
     config = runs_mod.run_config_from_manifest(REPO_ROOT, manifest)
+    _persist_run_history()
     if not config["mock_proposer"] and config["skill_path"] is None:
         typer.echo(
             f"the skill this run was started with is missing "
@@ -1500,7 +1553,7 @@ def resume(
                 )
 
     try:
-        final_state = _run_async(_run())
+        final_state = _run_driving_root(_run())
     finally:
         tracker.finish()
     typer.echo(
@@ -1948,6 +2001,9 @@ def _run_canonical_experiment(
         )
         raise typer.Exit(1)
 
+    if run_path.exists() and fresh and not resume:
+        _refuse_while_driven(run_name, run_path, action="--fresh")
+    _persist_run_history()
     # Only now: the one place a run is deleted, and only when asked to.
     run_dir = runs_mod.make_run_dir(REPO_ROOT, run_name, fresh=fresh and not resume)
     # Published where the evidence derivation (stage 6) reads them.
@@ -2118,7 +2174,7 @@ def _run_canonical_experiment(
                 )
         return collected
 
-    stages = _run_async(_run())
+    stages = _run_driving_root(_run())
 
     typer.echo("")
     typer.echo("stage 6/6: regenerating capability evidence")

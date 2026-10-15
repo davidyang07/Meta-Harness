@@ -2,15 +2,19 @@
 
 The API starts runs that spend money and serves the repository's run
 artifacts. With a token configured, every route but ``GET /health``
-requires ``Authorization: Bearer <token>``; SSE routes also accept
-``?token=``, because ``EventSource`` cannot send headers. Without a token
-the API is open, which ``meta-harness serve`` only allows on loopback
-(see ``test_cli.py``).
+requires ``Authorization: Bearer <token>``. ``EventSource`` cannot send
+headers, so the stream accepts a short-lived ticket for that one run
+(``POST /runs/{id}/stream-ticket``) instead; the token itself is never
+accepted in a URL, because a URL is logged. Without a token the API is
+open, which ``meta-harness serve`` only allows on loopback (see
+``test_cli.py``).
 """
 
 from __future__ import annotations
 
+import logging
 import shutil
+import time
 import uuid
 from pathlib import Path
 
@@ -18,7 +22,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.runs import clear_run_state
+from app.auth import (
+    STREAM_TICKET_TTL_S,
+    RedactCredentialsFilter,
+    mint_stream_ticket,
+    redact_credentials,
+)
 from app.main import create_app
+from app.meta_harness import runs as runs_mod
 from app.meta_harness.branches import clear_branch_state
 from app.streaming import event_registry
 
@@ -104,16 +115,83 @@ def test_an_unauthenticated_post_creates_nothing(client_factory, tmp_path: Path)
     assert not (tmp_path / "repo" / "runs" / "nope").exists()
 
 
-def test_only_sse_routes_accept_a_query_token(client_factory):
+def test_the_token_is_never_accepted_in_a_url(client_factory):
     client = client_factory(TOKEN)
 
-    # Auth passes on the stream route (the run does not exist: 404)...
-    assert client.get(f"/runs/missing/stream?token={TOKEN}").status_code == 404
-    # ...and fails without, or with a wrong, token.
-    assert client.get("/runs/missing/stream").status_code == 401
-    assert client.get("/runs/missing/stream?token=wrong").status_code == 401
-    # A query token is not accepted anywhere else.
+    assert client.get(f"/runs/missing/stream?token={TOKEN}").status_code == 401
     assert client.get(f"/runs?token={TOKEN}").status_code == 401
+
+
+def test_a_stream_ticket_is_minted_only_for_a_token_holder(client_factory, tmp_path):
+    client = client_factory(TOKEN)
+    runs_mod.make_run_dir(tmp_path / "repo", "ticketed")
+    runs_mod.write_manifest(tmp_path / "repo" / "runs" / "ticketed", run_id="ticketed")
+
+    assert client.post("/runs/ticketed/stream-ticket").status_code == 401
+    assert (
+        client.post("/runs/missing/stream-ticket", headers=_bearer(TOKEN)).status_code
+        == 404
+    )
+    minted = client.post("/runs/ticketed/stream-ticket", headers=_bearer(TOKEN))
+    assert minted.status_code == 200
+    assert minted.json()["expires_in"] == STREAM_TICKET_TTL_S
+    assert TOKEN not in minted.json()["ticket"]
+
+
+def test_a_ticket_opens_one_runs_stream_until_it_expires(client_factory):
+    client = client_factory(TOKEN)
+
+    # Auth passes (the run does not exist: 404)...
+    ticket = mint_stream_ticket(TOKEN, "missing")
+    assert client.get(f"/runs/missing/stream?ticket={ticket}").status_code == 404
+    # ...but not for another run, once expired, forged, or anywhere else.
+    assert client.get(f"/runs/other/stream?ticket={ticket}").status_code == 401
+    expired = mint_stream_ticket(TOKEN, "missing", now=time.time() - 2 * STREAM_TICKET_TTL_S)
+    assert client.get(f"/runs/missing/stream?ticket={expired}").status_code == 401
+    forged = mint_stream_ticket("not-the-token", "missing")
+    assert client.get(f"/runs/missing/stream?ticket={forged}").status_code == 401
+    for junk in ("", "abc", "123.", ".abc", f"{int(time.time()) + 999}.00"):
+        assert client.get(f"/runs/missing/stream?ticket={junk}").status_code == 401
+    assert client.get(f"/runs?ticket={ticket}").status_code == 401
+    assert client.get("/runs/missing/stream").status_code == 401
+
+
+def test_credentials_in_a_url_never_reach_the_access_log():
+    line = "GET /runs/r/stream?token=s3cret&last_event_id=7&ticket=123.abc HTTP/1.1"
+    assert redact_credentials(line) == (
+        "GET /runs/r/stream?token=[redacted]&last_event_id=7&ticket=[redacted] HTTP/1.1"
+    )
+
+    record = logging.LogRecord(
+        "uvicorn.access", logging.INFO, __file__, 1,
+        '%s - "%s %s HTTP/%s" %d',
+        ("127.0.0.1:5000", "GET", f"/runs/r/stream?ticket=123.{TOKEN}", "1.1", 200),
+        None,
+    )
+    assert RedactCredentialsFilter().filter(record)
+    assert TOKEN not in record.getMessage()
+
+    create_app(repo_root=REPO_ROOT, use_persistence=False)
+    assert any(
+        isinstance(f, RedactCredentialsFilter)
+        for f in logging.getLogger("uvicorn.access").filters
+    )
+
+
+def test_cors_origins_are_configurable(client_factory, monkeypatch):
+    monkeypatch.setenv("META_HARNESS_CORS_ORIGINS", "http://localhost:4000, https://dash.example")
+    client = client_factory(TOKEN)
+
+    def _allowed(origin: str) -> bool:
+        preflight = client.options(
+            "/runs",
+            headers={"Origin": origin, "Access-Control-Request-Method": "GET"},
+        )
+        return preflight.headers.get("access-control-allow-origin") == origin
+
+    assert _allowed("http://localhost:4000")
+    assert _allowed("https://dash.example")
+    assert not _allowed(ORIGIN)
 
 
 def test_without_a_token_the_api_is_open(client_factory):

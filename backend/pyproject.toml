@@ -15,15 +15,13 @@ dependencies = [
     "pydantic>=2.9",
     "python-dotenv>=1.0",
     "pyyaml>=6.0",
+    # Runtime, not dev: the inner loop grades every trial by running the
+    # task's ``test_command`` (``pytest ...``) from this environment, and
+    # the Docker image is installed with ``--no-dev``.
     "pytest>=8.0",
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest-asyncio>=0.24",
-    "pytest-timeout>=2.3",
-    "httpx>=0.27",
-]
 # Experiment tracking is optional on purpose: the repository, its tests
 # and every CLI command run without a W&B account, without credentials
 # and without network access. Install with `uv sync --extra wandb` and
@@ -50,10 +48,15 @@ meta-harness = "app.cli:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# The one place test-only dependencies live. ``uv sync`` installs this
+# group by default; ``uv sync --no-dev`` (the Docker image) leaves it out.
 [dependency-groups]
 dev = [
     "pytest-asyncio>=1.3.0",
     "pytest-timeout>=2.3",
+    # FastAPI's TestClient. Arrives transitively through anthropic today;
+    # named here so the API tests do not depend on that.
+    "httpx>=0.27",
 ]
 
 [tool.hatch.build.targets.wheel]

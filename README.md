@@ -182,6 +182,9 @@ cd frontend/dashboard && npm install && npm run dev  # terminal 2
 > `Authorization: Bearer <token>`, and the dashboard sends it from
 > `NEXT_PUBLIC_META_HARNESS_API_TOKEN` (see
 > [`frontend/dashboard/.env.example`](frontend/dashboard/.env.example)).
+> The token never goes in a URL; the event stream uses a one-minute
+> ticket for one run instead. A dashboard served from anywhere but port
+> 3000 needs its origin in `META_HARNESS_CORS_ORIGINS`.
 
 With credentials, the same loop runs against live models, and the whole
 stack runs in Docker:
@@ -326,10 +329,12 @@ executes model-written code":
   sandbox: a model that names an absolute path outside the stage can
   still read it.
 - **The API** binds loopback by default and requires
-  `META_HARNESS_API_TOKEN` for anything else. Path inputs arriving over
-  HTTP are pattern- and containment-checked, and a skill path must
-  resolve to `skills/<name>/SKILL.md`. Compose publishes both ports on
-  `127.0.0.1` only.
+  `META_HARNESS_API_TOKEN` for anything else. The token is never accepted
+  in a URL (the event stream takes a short-lived ticket), and
+  `token=`/`ticket=` values are redacted from the access log. Path inputs
+  arriving over HTTP are pattern- and containment-checked, and a skill
+  path must resolve to `skills/<name>/SKILL.md`. Compose publishes both
+  ports on `127.0.0.1` only.
 - **Eval `test_command`s** run with `shell=True` as trusted repository
   content.
 

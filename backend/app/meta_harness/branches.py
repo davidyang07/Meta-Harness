@@ -35,6 +35,7 @@ import logging
 import os
 import socket
 import sys
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field, fields
@@ -687,6 +688,177 @@ def is_live(metadata: BranchMetadata) -> bool:
 def live_branches(run_id: str) -> list[BranchMetadata]:
     """Every branch of ``run_id`` still being driven by a live process."""
     return [b for b in list_branches(run_id=run_id) if is_live(b)]
+
+
+# ── the run's root thread ─────────────────────────────────────────────
+#
+# Branches record their owner in ``branches.json``. The root thread is
+# driven by whatever started the run (``POST /runs``, ``meta-harness
+# loop``, ``meta-harness resume``) and records it in its own thread
+# directory. Without this, a fresh re-run from the API could not see a
+# ``meta-harness loop`` driving the same run in another process, and
+# deleted its directory underneath it.
+
+ROOT_OWNER_FILENAME = "owner.json"
+
+#: Root threads this process is driving, keyed by owner-file path.
+_root_claims: dict[Path, "RootThreadClaim"] = {}
+_root_claims_lock = threading.Lock()
+
+
+class RootThreadOwned(RuntimeError):
+    """Another live process is driving this run's root thread."""
+
+    def __init__(self, run_id: str, record: dict[str, Any]) -> None:
+        super().__init__(
+            f"run {run_id} is being driven by another process "
+            f"(pid {record.get('owner_pid')} on {record.get('owner_host')}); "
+            "stop it there first"
+        )
+        self.run_id = run_id
+        self.record = record
+
+
+def root_owner_path(run_dir: Path) -> Path:
+    """``runs/<run>/threads/<root>/owner.json``. Nothing is created."""
+    return runs_mod.thread_dir_path(run_dir, run_dir.name) / ROOT_OWNER_FILENAME
+
+
+def _read_owner(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _root_owner_alive(path: Path, record: dict[str, Any]) -> bool:
+    """This process answers from its own claims; another by heartbeat and pid."""
+    if record.get("owner_pid") == os.getpid() and record.get("owner_host") in (
+        None,
+        _HOSTNAME,
+    ):
+        with _root_claims_lock:
+            claim = _root_claims.get(path)
+        # A record naming this pid but not one of its claims was left by an
+        # earlier process that happened to have the same pid.
+        return claim is not None and claim.claim_id == record.get("claim_id")
+    return _owner_alive(record)
+
+
+def root_owner(run_dir: Path) -> dict[str, Any] | None:
+    """The owner record of the live process driving ``run_dir``'s root
+    thread, or ``None`` when nothing is driving it."""
+    try:
+        path = root_owner_path(run_dir)
+    except ValueError:
+        return None
+    record = _read_owner(path)
+    if record is None or not _root_owner_alive(path, record):
+        return None
+    return record
+
+
+class RootThreadClaim:
+    """This process drives a run's root thread from ``acquire`` to ``release``.
+
+    The claim is ``owner.json`` in the root thread's directory, naming
+    this process and refreshed by a heartbeat. The heartbeat is a thread
+    rather than an asyncio task, so a node that holds the event loop for
+    a while cannot make a live run look dead.
+
+    ``acquire`` is synchronous and quick (one small locked write), so it
+    is called directly from async code: handing it to a worker thread
+    would let a cancellation land between the claim and its release.
+    """
+
+    def __init__(self, run_dir: Path) -> None:
+        self.run_dir = run_dir
+        self.path = root_owner_path(run_dir)
+        self.claim_id = uuid.uuid4().hex
+        self._stop = threading.Event()
+        self._heartbeat: threading.Thread | None = None
+
+    def acquire(self) -> "RootThreadClaim":
+        """Claim the root thread, or raise ``RootThreadOwned``."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with branches_lock(self.path):
+            existing = _read_owner(self.path)
+            if existing is not None and _root_owner_alive(self.path, existing):
+                raise RootThreadOwned(self.run_dir.name, existing)
+            now = _now()
+            runs_mod.write_json_atomic(
+                self.path,
+                {
+                    "run_id": self.run_dir.name,
+                    "thread_id": self.run_dir.name,
+                    "claim_id": self.claim_id,
+                    "owner_pid": os.getpid(),
+                    "owner_host": _HOSTNAME,
+                    "claimed_at": now,
+                    "heartbeat_at": now,
+                },
+            )
+            with _root_claims_lock:
+                _root_claims[self.path] = self
+        self._heartbeat = threading.Thread(
+            target=self._beat,
+            name=f"root-heartbeat:{self.run_dir.name}",
+            daemon=True,
+        )
+        self._heartbeat.start()
+        return self
+
+    def _beat(self) -> None:
+        while not self._stop.wait(HEARTBEAT_INTERVAL_S):
+            try:
+                self._rewrite(lambda record: {**record, "heartbeat_at": _now()})
+            except Exception:  # noqa: BLE001 - a missed beat must not kill the run
+                pass
+
+    def _rewrite(self, change: Any) -> None:
+        """Apply ``change`` to the owner record if it is still this claim's.
+
+        A record ``change`` maps to ``None`` is removed. Nothing happens
+        once the run directory is gone: a late write must not resurrect it.
+        """
+        if not self.path.parent.is_dir():
+            return
+        with branches_lock(self.path):
+            record = _read_owner(self.path)
+            if record is None or record.get("claim_id") != self.claim_id:
+                return
+            updated = change(record)
+            if updated is None:
+                self.path.unlink(missing_ok=True)
+            else:
+                runs_mod.write_json_atomic(self.path, updated)
+
+    def release(self) -> None:
+        """Stop the heartbeat and give the root thread up. Idempotent."""
+        self._stop.set()
+        with _root_claims_lock:
+            if _root_claims.get(self.path) is self:
+                del _root_claims[self.path]
+        try:
+            self._rewrite(lambda record: None)
+        except OSError as exc:
+            log.warning(
+                "could not release the root thread of %s (%s); it reads as "
+                "dead once its heartbeat is stale",
+                self.run_dir.name,
+                exc,
+            )
+
+
+@contextlib.contextmanager
+def claim_root_thread(run_dir: Path) -> Iterator[RootThreadClaim]:
+    """Hold the root thread of ``run_dir`` for the duration of the block."""
+    claim = RootThreadClaim(run_dir).acquire()
+    try:
+        yield claim
+    finally:
+        claim.release()
 
 
 def forget_run(run_id: str) -> None:

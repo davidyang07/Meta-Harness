@@ -56,14 +56,28 @@ async function apiFetch(path: string, init: RequestInit = {}): Promise<Response>
   return res;
 }
 
+/** Whether opening a stream needs a ticket (the backend requires a token). */
+export const STREAM_NEEDS_TICKET = Boolean(API_TOKEN);
+
 /**
- * URL of a run's SSE stream. EventSource cannot send headers, so the
- * token travels as a query parameter, which the backend accepts on its
- * SSE routes only.
+ * URL of a run's SSE stream. EventSource cannot send headers, so with a
+ * token configured the stream is authorised by a ticket for this one run,
+ * valid for a minute (POST /runs/{id}/stream-ticket). The token itself
+ * never goes in a URL: URLs end up in access logs. `lastEventId` resumes
+ * a new EventSource where an earlier one stopped.
  */
-export function streamUrl(runId: string): string {
-  const url = `${BASE_URL}/runs/${encodeURIComponent(runId)}/stream`;
-  return API_TOKEN ? `${url}?token=${encodeURIComponent(API_TOKEN)}` : url;
+export async function streamUrl(runId: string, lastEventId?: string): Promise<string> {
+  const path = `/runs/${encodeURIComponent(runId)}`;
+  const params = new URLSearchParams();
+  if (STREAM_NEEDS_TICKET) {
+    const res = await apiFetch(`${path}/stream-ticket`, { method: "POST" });
+    if (!res.ok) throw new Error(`stream ticket refused (${res.status})`);
+    const { ticket } = (await res.json()) as { ticket: string | null };
+    if (ticket) params.set("ticket", ticket);
+  }
+  if (lastEventId) params.set("last_event_id", lastEventId);
+  const query = params.toString();
+  return `${BASE_URL}${path}/stream${query ? `?${query}` : ""}`;
 }
 
 // ── Availability check ──

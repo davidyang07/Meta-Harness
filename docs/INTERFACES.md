@@ -1257,11 +1257,25 @@ must treat that as a valid degraded mode, not an error.
 
 | Method | Path | Response |
 |---|---|---|
+| `POST` | `/runs/{run_id}/stream-ticket` | `{ticket, expires_in}` — `ticket` is `null` when no API token is configured |
 | `GET` | `/runs/{run_id}/stream` | `text/event-stream` — see §7 below for event shape |
 
 A single SSE stream per run multiplexes events from all branches; each
 event carries its `thread_id` so the dashboard can route events to the
 right branch in the trajectory tree.
+
+`EventSource` cannot send an `Authorization` header. With an API token
+configured, the stream is opened with `?ticket=<ticket>`: minted by the
+`POST` above (which does need the header), valid for that run only, for
+`expires_in` seconds, checked when the stream opens. The token itself is
+never accepted in a URL. A client reopening the stream with a new
+`EventSource` passes `?last_event_id=` in place of the header it cannot
+set.
+
+The replay history is durable: each thread appends its events to
+`runs/<run>/threads/<thread>/events.jsonl`, and a subscriber is replayed
+the newest 1000 across all threads, in time order, including events a
+CLI process emitted.
 
 ---
 
@@ -1286,7 +1300,9 @@ data: {"thread_id": "...", "candidate": "few-shot-tool-results", "import_path": 
 ```
 
 Blank line terminates each event. Reconnect via `Last-Event-ID` header
-(checkpoint-id is monotonic per thread).
+(or `?last_event_id=`). An id is emitted once per run: the outer loop
+derives its events' ids from their content, so a node re-executed on
+resume does not repeat them.
 
 ### 7.2 Event types (closed set)
 

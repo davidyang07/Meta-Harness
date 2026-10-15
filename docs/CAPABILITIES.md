@@ -203,13 +203,24 @@ The part that makes this a real search tree rather than a demo: every
 artifact a branch writes is scoped to its LangGraph thread. Two branches
 forked from the same checkpoint reach the same iteration number and
 still keep separate pending-eval handoffs, frontiers, evolution logs,
-proposer sessions, candidate directories and candidate source snapshots.
+proposer sessions, candidate directories, candidate source snapshots and
+event logs (`events.jsonl`, the dashboard's decision log, which survives
+a backend restart).
+
+Every thread records the process driving it: branches in
+`branches.json`, the run's root thread in `threads/<run>/owner.json`,
+each with a pid and a heartbeat. A run that another live process is
+driving (a `meta-harness loop` beside the API, say) cannot be re-created
+or cancelled from elsewhere, and a run whose process died reports as
+`interrupted` rather than `running`.
 
 ### Validation
 
 ```bash
 cd backend && uv run pytest tests/test_branch_isolation.py \
-                            tests/test_branch_persistence.py -q
+                            tests/test_branch_persistence.py \
+                            tests/test_root_ownership.py \
+                            tests/test_event_history.py -q
 API_URL=http://127.0.0.1:8000 uv run python scripts/acceptance_api_flow.py
 cd frontend/dashboard && npx playwright test --project=live-backend
 ```
@@ -217,7 +228,9 @@ cd frontend/dashboard && npx playwright test --project=live-backend
 `test_same_iteration_branches_keep_separate_artifacts` reproduces the
 exact race that used to corrupt a run and asserts it cannot happen.
 `test_trajectory_survives_registry_reset` proves the branch tree is
-reconstructable after a backend restart.
+reconstructable after a backend restart, and
+`test_a_backend_restart_keeps_the_runs_event_history` that the decision
+log is too.
 
 ---
 
@@ -618,8 +631,12 @@ working with it.
 **5. Historical branching.**
 
 A running branch's asyncio task does not survive a backend restart. The
-branch tree is reconstructed from durable metadata, and an interrupted
-branch reports as `interrupted` rather than silently resuming.
+branch tree and the event history are reconstructed from durable
+artifacts, and an interrupted branch or run reports as `interrupted`
+rather than silently resuming; `meta-harness resume` continues a run.
+Live events reach a dashboard only from the process it is connected to:
+events a CLI process emits are replayed when the dashboard (re)connects,
+not pushed as they happen.
 
 **6. Replay.**
 
